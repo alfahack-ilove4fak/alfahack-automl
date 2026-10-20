@@ -67,14 +67,28 @@ def main() -> int:
         gh(["label", "create", name, "--repo", REPO, "--color", color, "--description", desc, "--force"], dry)
 
     print("2/3 Вехи (чек-поинты)")
-    existing = set() if dry else set(json.loads(gh(["api", f"repos/{REPO}/milestones?state=all", "--jq",
-                                                   "[.[].title]"], dry) or "[]"))
+    existing = (
+        set()
+        if dry
+        else set(json.loads(gh(["api", f"repos/{REPO}/milestones?state=all", "--jq", "[.[].title]"], dry) or "[]"))
+    )
     for title, due, desc in MILESTONES:
         if title in existing:
             print(f"   = {title} уже есть")
             continue
-        gh(["api", f"repos/{REPO}/milestones", "-f", f"title={title}", "-f", f"due_on={due}",
-            "-f", f"description={desc}"], dry)
+        gh(
+            [
+                "api",
+                f"repos/{REPO}/milestones",
+                "-f",
+                f"title={title}",
+                "-f",
+                f"due_on={due}",
+                "-f",
+                f"description={desc}",
+            ],
+            dry,
+        )
 
     print("3/3 Доска задач (GitHub Projects)")
     auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)

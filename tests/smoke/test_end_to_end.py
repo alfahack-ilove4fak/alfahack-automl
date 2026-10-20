@@ -43,15 +43,28 @@ def _hidden_like_task(dst: Path) -> Path:
     test[["row_id"]].assign(diagnosis=0.5).to_csv(files / "sample_submission.csv", index=False)
     (dst / "task.md").write_text(
         "# Diagnosis\n\nPredict `diagnosis`. Files: `data/files/train.csv`, `data/files/test.csv`.\n\n"
-        "Метрика — ROC-AUC, в ответе вероятность.\n", encoding="utf-8")
+        "Метрика — ROC-AUC, в ответе вероятность.\n",
+        encoding="utf-8",
+    )
     return dst / "task.md"
 
 
 def _run_solution(task_md: Path, tmp_path: Path) -> subprocess.CompletedProcess:
-    env = {**os.environ, "AGENT_TIME_BUDGET_SEC": "40", "AGENT_SAFETY_SEC": "5", "LLM_MOCK": "1",
-           "AGENT_RUN_DIR": str(tmp_path / "run")}
-    return subprocess.run([sys.executable, str(ROOT / "solution.py"), str(task_md)], env=env,
-                          capture_output=True, text=True, timeout=300, cwd=tmp_path)
+    env = {
+        **os.environ,
+        "AGENT_TIME_BUDGET_SEC": "40",
+        "AGENT_SAFETY_SEC": "5",
+        "LLM_MOCK": "1",
+        "AGENT_RUN_DIR": str(tmp_path / "run"),
+    }
+    return subprocess.run(
+        [sys.executable, str(ROOT / "solution.py"), str(task_md)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=tmp_path,
+    )
 
 
 @pytest.mark.parametrize("builder", ["regression", "multiclass", "hidden_binary"])

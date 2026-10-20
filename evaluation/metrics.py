@@ -51,32 +51,111 @@ METRICS: dict[str, Metric] = {
     for m in [
         # --- регрессия
         Metric("rmse", _rmse, False, "value", ("rmse", "root mean squared error", "корень из среднеквадратичной")),
-        Metric("mse", lambda y, p: float(skm.mean_squared_error(y, p)), False, "value", ("mse", "mean squared error", "среднеквадратичн")),
-        Metric("mae", lambda y, p: float(skm.mean_absolute_error(y, p)), False, "value", ("mae", "mean absolute error", "средняя абсолютная")),
-        Metric("mape", lambda y, p: float(skm.mean_absolute_percentage_error(y, p)), False, "value", ("mape", "mean absolute percentage")),
+        Metric(
+            "mse",
+            lambda y, p: float(skm.mean_squared_error(y, p)),
+            False,
+            "value",
+            ("mse", "mean squared error", "среднеквадратичн"),
+        ),
+        Metric(
+            "mae",
+            lambda y, p: float(skm.mean_absolute_error(y, p)),
+            False,
+            "value",
+            ("mae", "mean absolute error", "средняя абсолютная"),
+        ),
+        Metric(
+            "mape",
+            lambda y, p: float(skm.mean_absolute_percentage_error(y, p)),
+            False,
+            "value",
+            ("mape", "mean absolute percentage"),
+        ),
         Metric("rmsle", _rmsle, False, "value", ("rmsle", "root mean squared log")),
-        Metric("medae", lambda y, p: float(skm.median_absolute_error(y, p)), False, "value", ("medae", "median absolute error")),
-        Metric("r2", lambda y, p: float(skm.r2_score(y, p)), True, "value", ("r2", "r^2", "r²", "коэффициент детерминации")),
+        Metric(
+            "medae",
+            lambda y, p: float(skm.median_absolute_error(y, p)),
+            False,
+            "value",
+            ("medae", "median absolute error"),
+        ),
+        Metric(
+            "r2", lambda y, p: float(skm.r2_score(y, p)), True, "value", ("r2", "r^2", "r²", "коэффициент детерминации")
+        ),
         # --- классификация по меткам
-        Metric("f1_macro", lambda y, p: float(skm.f1_score(y, p, average="macro")), True, "label", ("macro f1", "f1 macro", "macro-f1", "f1_macro", 'average="macro"')),
-        Metric("f1_weighted", lambda y, p: float(skm.f1_score(y, p, average="weighted")), True, "label", ("weighted f1", "f1 weighted", "f1_weighted")),
-        Metric("f1_micro", lambda y, p: float(skm.f1_score(y, p, average="micro")), True, "label", ("micro f1", "f1 micro", "f1_micro")),
+        Metric(
+            "f1_macro",
+            lambda y, p: float(skm.f1_score(y, p, average="macro")),
+            True,
+            "label",
+            ("macro f1", "f1 macro", "macro-f1", "f1_macro", 'average="macro"'),
+        ),
+        Metric(
+            "f1_weighted",
+            lambda y, p: float(skm.f1_score(y, p, average="weighted")),
+            True,
+            "label",
+            ("weighted f1", "f1 weighted", "f1_weighted"),
+        ),
+        Metric(
+            "f1_micro",
+            lambda y, p: float(skm.f1_score(y, p, average="micro")),
+            True,
+            "label",
+            ("micro f1", "f1 micro", "f1_micro"),
+        ),
         Metric("f1", lambda y, p: float(skm.f1_score(y, p)), True, "label", ("f1-score", "f1 score", "f1-мера")),
-        Metric("accuracy", lambda y, p: float(skm.accuracy_score(y, p)), True, "label", ("accuracy", "доля правильных", "точность классификации")),
-        Metric("balanced_accuracy", lambda y, p: float(skm.balanced_accuracy_score(y, p)), True, "label", ("balanced accuracy", "balanced_accuracy")),
+        Metric(
+            "accuracy",
+            lambda y, p: float(skm.accuracy_score(y, p)),
+            True,
+            "label",
+            ("accuracy", "доля правильных", "точность классификации"),
+        ),
+        Metric(
+            "balanced_accuracy",
+            lambda y, p: float(skm.balanced_accuracy_score(y, p)),
+            True,
+            "label",
+            ("balanced accuracy", "balanced_accuracy"),
+        ),
         Metric("mcc", lambda y, p: float(skm.matthews_corrcoef(y, p)), True, "label", ("mcc", "matthews")),
-        Metric("qwk", lambda y, p: float(skm.cohen_kappa_score(y, p, weights="quadratic")), True, "label", ("quadratic weighted kappa", "qwk", "cohen")),
+        Metric(
+            "qwk",
+            lambda y, p: float(skm.cohen_kappa_score(y, p, weights="quadratic")),
+            True,
+            "label",
+            ("quadratic weighted kappa", "qwk", "cohen"),
+        ),
         # --- классификация по вероятностям
         Metric("roc_auc", _roc_auc, True, "proba", ("roc-auc", "roc auc", "roc_auc", "auc")),
-        Metric("logloss", _logloss, False, "proba", ("logloss", "log loss", "log_loss", "cross-entropy", "кросс-энтропи")),
+        Metric(
+            "logloss", _logloss, False, "proba", ("logloss", "log loss", "log_loss", "cross-entropy", "кросс-энтропи")
+        ),
     ]
 }
 
 # Порядок проверки при поиске в тексте: сначала длинные/специфичные имена,
 # иначе «f1» найдётся раньше «macro f1», а «mse» — внутри «rmse».
 SEARCH_ORDER = [
-    "f1_macro", "f1_weighted", "f1_micro", "balanced_accuracy", "rmsle", "rmse", "mape",
-    "medae", "mae", "mse", "r2", "roc_auc", "logloss", "mcc", "qwk", "accuracy", "f1",
+    "f1_macro",
+    "f1_weighted",
+    "f1_micro",
+    "balanced_accuracy",
+    "rmsle",
+    "rmse",
+    "mape",
+    "medae",
+    "mae",
+    "mse",
+    "r2",
+    "roc_auc",
+    "logloss",
+    "mcc",
+    "qwk",
+    "accuracy",
+    "f1",
 ]
 
 

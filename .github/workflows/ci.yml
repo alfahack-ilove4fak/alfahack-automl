@@ -31,6 +31,9 @@ jobs:
       - name: Ruff — стиль и типичные ошибки
         run: uv run ruff check .
 
+      - name: Ruff — формат (иначе хук Claude переформатирует чужие файлы в PR)
+        run: uv run ruff format --check .
+
       - name: Тесты — контракты, юнит, дымовой прогон
         run: uv run pytest -v
 

@@ -34,13 +34,16 @@ def run_one(task_md: Path, minutes: float, mock_llm: bool) -> bool:
     if mock_llm:
         env["LLM_MOCK"] = "1"
     started = time.time()
-    proc = subprocess.run([sys.executable, str(ROOT / "solution.py"), str(run_dir / "task" / task_md.name)],
-                          env=env, cwd=run_dir)
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "solution.py"), str(run_dir / "task" / task_md.name)], env=env, cwd=run_dir
+    )
     spec = parse_task(run_dir / "task" / task_md.name)
     report = validate_submission(spec.submission_path, spec, pd.read_csv(spec.test_path))
     status = "✅" if proc.returncode == 0 and report.ok else "❌"
-    print(f"{status} {name}: {time.time() - started:.0f} с, код выхода {proc.returncode}, "
-          f"сабмит {'валиден' if report.ok else report.problems}\n   лог: {run_dir / 'agent.log'}")
+    print(
+        f"{status} {name}: {time.time() - started:.0f} с, код выхода {proc.returncode}, "
+        f"сабмит {'валиден' if report.ok else report.problems}\n   лог: {run_dir / 'agent.log'}"
+    )
     return status == "✅"
 
 

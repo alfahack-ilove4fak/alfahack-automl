@@ -52,16 +52,16 @@ ZONES = {
 REVIEWER_ROLE = {"captain": "qa", "agent": "ml", "ml": "research", "research": "ml", "qa": "captain"}
 PARTNERS = {
     "captain": "- **qa** — проверка перед каждым сабмитом и релизы `dev → main`.\n"
-               "- **agent** — цикл AutoResearch и бюджет времени.\n- **все** — стендап, окна интеграции, контракты.",
+    "- **agent** — цикл AutoResearch и бюджет времени.\n- **все** — стендап, окна интеграции, контракты.",
     "agent": "- **ml** — ежедневно в 13:00: формат гипотез (`Hypothesis.params`).\n"
-             "- **research** — 22.10 13:00: playbook v1 (примеры гипотез).\n"
-             "- **капитан** — ключ LLM (лично), песочница для кода LLM, доли бюджета.",
+    "- **research** — 22.10 13:00: playbook v1 (примеры гипотез).\n"
+    "- **капитан** — ключ LLM (лично), песочница для кода LLM, доли бюджета.",
     "ml": "- **agent** — ежедневно в 13:00: какие `params` ты поддерживаешь.\n"
-          "- **research** — схема валидации, идеи признаков и моделей.\n- **капитан** — финальное обучение и бюджет.",
+    "- **research** — схема валидации, идеи признаков и моделей.\n- **капитан** — финальное обучение и бюджет.",
     "research": "- **agent** — 22.10 13:00: playbook v1.\n- **qa** — 22.10 18:30: тренировочные задачи.\n"
-                "- **ml** — валидация и признаки.\n- **все** — каждый вечер материал для питча.",
+    "- **ml** — валидация и признаки.\n- **все** — каждый вечер материал для питча.",
     "qa": "- **research** — 22.10 18:30: тренировочные задачи для харнесса.\n"
-          "- **капитан** — проверка перед каждым сабмитом.\n- **все** — помогаешь пройти CP0, разбираешь красный CI.",
+    "- **капитан** — проверка перед каждым сабмитом.\n- **все** — помогаешь пройти CP0, разбираешь красный CI.",
 }
 
 
@@ -87,11 +87,21 @@ def build_context(name: str, github: str, role: str) -> dict:
     members = team_members()
     rev_role = REVIEWER_ROLE[role]
     rev = members.get(rev_role, [])
-    reviewer = (", ".join(f"@{n}" for n in rev) + f" ({ROLES[rev_role]})" if rev
-                else f"капитан @{PROJECT_OWNER} — пока в команде нет роли «{ROLES[rev_role]}»")
-    return {"name": name, "github": github, "role": role, "role_title": ROLES[role], "zone": ZONES[role],
-            "reviewer": reviewer, "partners": PARTNERS[role],
-            "first_task": f"{first['id']} · {first['title']}" if first else "см. /next-task"}
+    reviewer = (
+        ", ".join(f"@{n}" for n in rev) + f" ({ROLES[rev_role]})"
+        if rev
+        else f"капитан @{PROJECT_OWNER} — пока в команде нет роли «{ROLES[rev_role]}»"
+    )
+    return {
+        "name": name,
+        "github": github,
+        "role": role,
+        "role_title": ROLES[role],
+        "zone": ZONES[role],
+        "reviewer": reviewer,
+        "partners": PARTNERS[role],
+        "first_task": f"{first['id']} · {first['title']}" if first else "см. /next-task",
+    }
 
 
 def render_start_here(worktree: Path, ctx: dict, old: str | None = None) -> str:
@@ -129,15 +139,30 @@ def add_team_row(text: str, ctx: dict) -> str:
 
 def grant_board_access(github: str, dry: bool) -> None:
     """Доступ на запись к доске (GraphQL updateProjectV2Collaborators)."""
-    project_id = run(["gh", "api", "graphql", "-f",
-                      f'query={{user(login:"{PROJECT_OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
-                      "--jq", ".data.user.projectV2.id"], dry=dry)
-    user_id = run(["gh", "api", "graphql", "-f", f'query={{user(login:"{github}"){{id}}}}',
-                   "--jq", ".data.user.id"], dry=dry)
-    mutation = ("mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,"
-                "collaborators:[{userId:$u,role:WRITER}]}){clientMutationId}}")
-    run(["gh", "api", "graphql", "-f", f"query={mutation}", "-f", f"p={project_id}", "-f", f"u={user_id}"],
-        dry=dry, check=False)
+    project_id = run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f'query={{user(login:"{PROJECT_OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
+            "--jq",
+            ".data.user.projectV2.id",
+        ],
+        dry=dry,
+    )
+    user_id = run(
+        ["gh", "api", "graphql", "-f", f'query={{user(login:"{github}"){{id}}}}', "--jq", ".data.user.id"], dry=dry
+    )
+    mutation = (
+        "mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,"
+        "collaborators:[{userId:$u,role:WRITER}]}){clientMutationId}}"
+    )
+    run(
+        ["gh", "api", "graphql", "-f", f"query={mutation}", "-f", f"p={project_id}", "-f", f"u={user_id}"],
+        dry=dry,
+        check=False,
+    )
 
 
 def write_personal_branch(branch: str, ctx: dict, tmp: Path, dry: bool, refresh: bool) -> None:
@@ -154,8 +179,12 @@ def write_personal_branch(branch: str, ctx: dict, tmp: Path, dry: bool, refresh:
         template_src = ROOT if refresh else wt
         target.write_text(render_start_here(template_src, ctx, old), encoding="utf-8")
     run(["git", "add", "START_HERE.md"], cwd=wt, dry=dry)
-    run(["git", "commit", "-m", f"docs: {'обновить ' if refresh else ''}START_HERE для {ctx['name']} ({ctx['role']})"],
-        cwd=wt, dry=dry, check=not refresh)
+    run(
+        ["git", "commit", "-m", f"docs: {'обновить ' if refresh else ''}START_HERE для {ctx['name']} ({ctx['role']})"],
+        cwd=wt,
+        dry=dry,
+        check=not refresh,
+    )
     run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=wt, dry=dry)
 
 
@@ -209,10 +238,23 @@ def main() -> int:
         run(["git", "add", str(CODEOWNERS), str(TEAM_FILE)], cwd=wt2, dry=dry)
         run(["git", "commit", "-m", f"chore: добавить {args.name} (@{github}) в команду"], cwd=wt2, dry=dry)
         run(["git", "push", "-u", "origin", pr_branch], cwd=wt2, dry=dry)
-        pr = run(["gh", "pr", "create", "--base", "dev", "--head", pr_branch,
-                  "--title", f"chore: добавить {args.name} в команду",
-                  "--body", f"Новый участник: @{github}, роль `{args.role}`. Личная ветка: `{branch}`."],
-                 cwd=wt2, dry=dry)
+        pr = run(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                "dev",
+                "--head",
+                pr_branch,
+                "--title",
+                f"chore: добавить {args.name} в команду",
+                "--body",
+                f"Новый участник: @{github}, роль `{args.role}`. Личная ветка: `{branch}`.",
+            ],
+            cwd=wt2,
+            dry=dry,
+        )
     finally:
         for sub in ("personal", "codeowners"):
             if (tmp / sub).exists():
