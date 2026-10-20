@@ -225,7 +225,7 @@ def check_llm_call() -> Check:
 
 def check_tests(quick: bool) -> Check:
     target = ["tests/contracts", "tests/unit"] if quick else ["tests"]
-    code, text = run([sys.executable, "-m", "pytest", "-q", "-x", *target], timeout=900)
+    code, text = run([sys.executable, "-m", "pytest", "-x", *target], timeout=900)  # -q уже в addopts
     lines = [ln.strip("= ") for ln in text.splitlines() if ln.strip()]
     summary = [ln for ln in lines if any(w in ln for w in ("passed", "failed", "error"))]
     tail = (summary or lines or [""])[-1][:150]

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "sonnet",
+  "permissions": {
+    "allow": [
+      "Bash(uv sync)",
+      "Bash(uv sync *)",
+      "Bash(uv run pytest)",
+      "Bash(uv run pytest *)",
+      "Bash(uv run ruff *)",
+      "Bash(uv run python solution.py *)",
+      "Bash(uv run python scripts/doctor.py *)",
+      "Bash(uv run python scripts/run_local.py *)",
+      "Bash(uv run python scripts/package_submission.py)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git switch *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git stash *)",
+      "Bash(git restore *)",
+      "Bash(gh api user *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh issue view *)",
+      "Bash(gh issue list *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "mcp__context7"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh pr review *)",
+      "Bash(gh issue create *)",
+      "Edit(./interfaces/**)",
+      "Edit(./.github/**)",
+      "Edit(./.claude/**)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(**/.env)",
+      "Edit(./.env)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push * --force)",
+      "Bash(git push * --force-with-lease*)",
+      "Bash(git push * -f)",
+      "Bash(git push --no-verify *)",
+      "Bash(git push * --no-verify*)",
+      "Bash(git push * main)",
+      "Bash(git push * dev)",
+      "Bash(git push * --delete *)",
+      "Bash(git reset --hard *)",
+      "Bash(git branch -D *)",
+      "Bash(git clean *)",
+      "Bash(gh repo delete *)",
+      "Bash(gh pr merge * --admin*)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(rm -rf ..*)",
+      "Bash(sudo *)"
+    ]
+  },
+  "enabledMcpjsonServers": ["context7"],
+  "enabledPlugins": {
+    "commit-commands@claude-plugins-official": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-sync --quiet python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/format.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

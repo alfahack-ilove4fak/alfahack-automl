@@ -1,0 +1,17 @@
+{
+  "_comment": "Что doctor.py проверяет у каждого. Опциональные плагины по ролям — в SETUP_CLAUDE.md.",
+  "plugins": [
+    {
+      "name": "commit-commands@claude-plugins-official",
+      "why": "команды /commit-commands:commit и :commit-push-pr — коммит и PR в одно действие",
+      "install": "claude plugin marketplace add anthropics/claude-plugins-official ; claude plugin install commit-commands@claude-plugins-official --scope local"
+    }
+  ],
+  "mcp": [
+    {
+      "name": "context7",
+      "why": "актуальная документация библиотек (pandas, lightgbm, openai…) вместо устаревших знаний модели",
+      "fix": "запусти claude в папке репозитория и разреши сервер context7 из .mcp.json (или /mcp → context7 → Enable)"
+    }
+  ]
+}
