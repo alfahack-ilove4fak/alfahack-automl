@@ -24,7 +24,7 @@ def collect() -> list[Path]:
             files.append(path)
         else:
             files += [p for p in path.rglob("*") if p.is_file() and not SKIP & set(p.parts)
-                      and p.suffix in (".py", ".yaml", ".yml", ".json", ".txt", ".md")]
+                      and p.suffix in (".py", ".yaml", ".yml", ".json", ".txt", ".md") and p.name != "CLAUDE.md"]
     return sorted(files)
 
 
