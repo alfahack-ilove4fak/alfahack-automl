@@ -65,4 +65,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

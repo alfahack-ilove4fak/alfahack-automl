@@ -383,8 +383,8 @@ def role_checks(role: str, args) -> list[Check]:
 
 
 def main() -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")  # иначе на Windows значки ✅ ломают вывод
+    for stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → значки ✅ и кириллица ломают вывод
+        stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--role", choices=ROLES, help="твоя роль — добавит ролевые проверки")
     parser.add_argument("--quick", action="store_true", help="не запускать дымовой прогон агента")

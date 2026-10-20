@@ -62,6 +62,8 @@ def _run_solution(task_md: Path, tmp_path: Path) -> subprocess.CompletedProcess:
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         cwd=tmp_path,
     )
