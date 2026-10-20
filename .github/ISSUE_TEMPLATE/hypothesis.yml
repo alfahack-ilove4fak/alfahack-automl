@@ -1,0 +1,29 @@
+name: Гипотеза
+description: Идея, которая может улучшить агента (модель, признаки, валидация, промпт)
+title: "[гипотеза] "
+labels: ["type:hypothesis"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Гипотеза
+      placeholder: "Если <сделать X>, то <метрика> улучшится, потому что <причина>"
+    validations:
+      required: true
+  - type: dropdown
+    id: universal
+    attributes:
+      label: Работает на любой табличной задаче, а не только на публичных?
+      options: ["Да", "Нет — только для публичных (в агента НЕ берём)", "Не уверен"]
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: Как проверить
+      description: Какой эксперимент, на каких задачах, какое изменение метрики считаем успехом
+  - type: textarea
+    id: result
+    attributes:
+      label: Результат
+      description: Заполняется после эксперимента (и строка в docs/experiments.md)

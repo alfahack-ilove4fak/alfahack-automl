@@ -1,0 +1,82 @@
+[project]
+name = "alfahack-automl"
+version = "0.1.0"
+description = "AI-агент AutoML для Альфа Хак: читает task.md, проверяет гипотезы, сдаёт submission.csv"
+readme = "README.md"
+requires-python = "==3.12.*"
+# Версии — строго как в requirements.txt организаторов (он лежит в корне и в reference/).
+# Здесь только ЛЁГКОЕ ядро: его хватает, чтобы запустить solution.py и все тесты.
+dependencies = [
+    "numpy==1.26.4",
+    "scipy==1.12.0",
+    "pandas==2.2.3",
+    "joblib==1.4.2",
+    "threadpoolctl==3.6.0",
+    "scikit-learn==1.5.2",
+    "lightgbm==4.6.0",
+    "optuna==4.2.1",
+    "openai==1.68.2",
+    "httpx==0.28.1",
+    "tenacity==9.0.0",
+    "pydantic==2.10.6",
+    "python-dotenv==1.0.1",
+    "PyYAML==6.0.2",
+    "orjson==3.10.15",
+    "jsonschema==4.23.0",
+    "tqdm==4.67.1",
+    "psutil==6.1.1",
+    "cloudpickle==3.1.1",
+    "setuptools==80.9.0",
+]
+
+[dependency-groups]
+# Ставится всем по умолчанию: тесты и линтер
+dev = ["pytest==8.3.4", "ruff==0.8.6"]
+# Research/DS: графики и ноутбуки (ipykernel — только для разработки, на платформу не едет)
+research = ["matplotlib==3.9.4", "seaborn==0.13.2", "ipykernel==6.29.5"]
+# Всё остальное из requirements.txt: тяжёлое (сотни МБ). Ставим, когда реально нужно:
+#   uv sync --group full
+full = [
+    "polars==1.26.0",
+    "pyarrow==19.0.1",
+    "catboost==1.2.8",
+    "xgboost==2.1.4",
+    "imbalanced-learn==0.12.4",
+    "category-encoders==2.6.4",
+    "feature-engine==1.8.3",
+    "statsmodels==0.14.0",
+    "torch==2.5.1",
+    "autogluon.tabular[lightgbm,catboost,xgboost]==1.3.1",
+    "lightautoml==0.4.2",
+    "flaml[automl]==2.3.6",
+    "langchain==0.3.27",
+    "langchain-openai==0.3.23",
+    "langgraph==0.6.7",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+package = false
+
+# torch без CUDA: в 5–10 раз меньше скачивать, на платформе GPU всё равно нет
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["reference"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "UP042"]  # UP042: оставляем (str, Enum) — понятнее новичкам, чем StrEnum

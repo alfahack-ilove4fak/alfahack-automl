@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Застрял больше 30 минут?
+    url: https://github.com/thenlaooo/alfahack-automl/blob/dev/docs/team-process.md
+    about: Сначала напиши в Telegram-чат команды — это быстрее, чем issue.
