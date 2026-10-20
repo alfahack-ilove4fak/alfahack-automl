@@ -3,6 +3,7 @@
     uv run python scripts/tasks.py render              # обновить чек-листы в docs/roles/<роль>.md
     uv run python scripts/tasks.py issues --dry-run    # показать, какие issue будут созданы
     uv run python scripts/tasks.py issues              # создать недостающие issue и добавить на доску
+    uv run python scripts/tasks.py board               # доложить на доску все открытые issue
 
 Повторный запуск безопасен: issue ищутся по id задачи в заголовке и не дублируются.
 Исполнитель назначается по docs/team.md (роль без человека — без исполнителя).
@@ -99,6 +100,32 @@ def gh(*args: str, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
+_PROJECT_ID: str | None = None
+
+
+def add_to_board(issue_url: str) -> None:
+    """Добавить issue на доску. Через GraphQL: `gh project item-add` в gh 2.46 молча не срабатывает."""
+    global _PROJECT_ID
+    if _PROJECT_ID is None:
+        _PROJECT_ID = gh("api", "graphql", "-f",
+                         f'query={{user(login:"{OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
+                         "--jq", ".data.user.projectV2.id")
+    number = issue_url.rstrip("/").rsplit("/", 1)[-1]
+    node_id = gh("api", f"repos/{REPO}/issues/{number}", "--jq", ".node_id")
+    gh("api", "graphql", "-f",
+       "query=mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}",
+       "-f", f"p={_PROJECT_ID}", "-f", f"c={node_id}")
+
+
+def board() -> int:
+    """Положить на доску все открытые issue, которых там ещё нет (повторный запуск безопасен)."""
+    urls = json.loads(gh("issue", "list", "--repo", REPO, "--state", "open", "--limit", "500", "--json", "url"))
+    for i in urls:
+        add_to_board(i["url"])  # повторное добавление GitHub просто игнорирует
+    print(f"✅ на доске: {len(urls)} открытых issue")
+    return 0
+
+
 def issue_body(t: dict) -> str:
     return (task_markdown(t).split("\n", 2)[2]
             + f"\n---\nРоль: `{t['role']}` · уровень {LEVELS[t['level']]} · чек-поинт {t['cp']}.\n"
@@ -120,7 +147,7 @@ def issues(dry: bool) -> int:
                      "Когда `uv run python scripts/doctor.py --role <роль>` показывает «✅ ГОТОВ К РАБОТЕ», "
                      "оставь здесь комментарий: роль + последняя строка вывода doctor.\n\n"
                      "Капитан закрывает issue, когда отметились все. Застрял — ONBOARDING.md и чат команды.")
-            gh("project", "item-add", str(PROJECT_NUMBER), "--owner", OWNER, "--url", url, check=False)
+            add_to_board(url)
     for t in tasks:
         if t["id"] in have:
             continue
@@ -134,7 +161,7 @@ def issues(dry: bool) -> int:
         if dry:
             continue
         url = gh(*args)
-        gh("project", "item-add", str(PROJECT_NUMBER), "--owner", OWNER, "--url", url, check=False)
+        add_to_board(url)
         created += 1
     print(f"✅ создано {created}, уже было {len(have & {t['id'] for t in tasks})}"
           + (" (dry-run)" if dry else f". Доска: https://github.com/users/{OWNER}/projects/{PROJECT_NUMBER}"))
@@ -143,9 +170,11 @@ def issues(dry: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["render", "issues"])
+    parser.add_argument("command", choices=["render", "issues", "board"])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.command == "board":
+        return board()
     return render() if args.command == "render" else issues(args.dry_run)
 
 
