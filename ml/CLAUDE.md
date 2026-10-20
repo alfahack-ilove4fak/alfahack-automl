@@ -1,4 +1,4 @@
-# ml/ — владелец: ML-pipeline инженер
+# ml/ — роль: ML-pipeline инженер (кто сейчас — docs/team.md, ревью — .github/CODEOWNERS)
 
 Пакет роли: @docs/roles/ml.md · Материалы: docs/resources/ml.md
 

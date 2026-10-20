@@ -132,10 +132,12 @@ def add_team_row(text: str, ctx: dict) -> str:
         text = (
             "# Состав команды\n\n"
             "Файл обновляет `scripts/add_member.py`. Роли и ответственность — `docs/roles/`.\n\n"
-            "| Имя | GitHub | Роль | Личная ветка |\n|---|---|---|---|\n"
+            "| Имя | GitHub | Роль | Личная ветка | Статус |\n|---|---|---|---|---|\n"
         )
-    row = f"| {ctx['name']} | @{ctx['github']} | {ctx['role_title']} | `team/{ctx['name']}` |"
-    return text if row in text else text.rstrip("\n") + "\n" + row + "\n"
+    row = (
+        f"| {ctx['name']} | @{ctx['github']} | {ctx['role_title']} | `team/{ctx['name']}` | ⏳ приглашение не принято |"
+    )
+    return text if f"@{ctx['github']} |" in text else text.rstrip("\n") + "\n" + row + "\n"
 
 
 def grant_board_access(github: str, dry: bool) -> None:

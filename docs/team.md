@@ -1,10 +1,10 @@
 # Состав команды
 
-Файл обновляет `scripts/add_member.py`. Роли и ответственность — `docs/roles/`.
+Таблицу пополняет `scripts/add_member.py`, колонку «Статус» обновляет `scripts/team_sync.py` по данным GitHub. Роли и ответственность — `docs/roles/`.
 
-| Имя | GitHub | Роль | Личная ветка |
-|---|---|---|---|
-| artem | @n0h4ndy | LLM/agent-инженер | `team/artem` |
-| egor | @dzigoku-ku | QA / MLOps | `team/egor` |
-| danil | @marenkov17 | ML-pipeline инженер | `team/danil` |
-| vasya | @thenlaooo | Капитан / интегратор | `team/vasya` |
+| Имя | GitHub | Роль | Личная ветка | Статус |
+|---|---|---|---|---|
+| artem | @n0h4ndy | LLM/agent-инженер | `team/artem` | ⏳ приглашение не принято |
+| egor | @dzigoku-ku | QA / MLOps | `team/egor` | ✅ в организации |
+| danil | @marenkov17 | ML-pipeline инженер | `team/danil` | ✅ в организации |
+| vasya | @thenlaooo | Капитан / интегратор | `team/vasya` | ✅ в организации |
