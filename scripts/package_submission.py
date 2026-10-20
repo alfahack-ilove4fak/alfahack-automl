@@ -23,8 +23,14 @@ def collect() -> list[Path]:
         if path.is_file():
             files.append(path)
         else:
-            files += [p for p in path.rglob("*") if p.is_file() and not SKIP & set(p.parts)
-                      and p.suffix in (".py", ".yaml", ".yml", ".json", ".txt", ".md") and p.name != "CLAUDE.md"]
+            files += [
+                p
+                for p in path.rglob("*")
+                if p.is_file()
+                and not SKIP & set(p.parts)
+                and p.suffix in (".py", ".yaml", ".yml", ".json", ".txt", ".md")
+                and p.name != "CLAUDE.md"
+            ]
     return sorted(files)
 
 
@@ -44,4 +50,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

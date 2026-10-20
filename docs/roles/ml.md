@@ -12,7 +12,7 @@ uv sync --group full
 ```
 → Должно появиться: `Installed N packages` (⚠️ ~1.5 ГБ; на медленном интернете — делай в GitHub Codespaces: `Code → Codespaces → Create codespace on dev`, там `uv sync --group full` за пару минут).
 **Проверка:** `uv run python scripts/doctor.py --role ml` → `✅ библиотеки роли ml`.
-macOS: для LightGBM/XGBoost может понадобиться OpenMP — `brew install libomp`.
+Системная библиотека для LightGBM/XGBoost (VC runtime на Windows, `libomp` на macOS) — общий шаг [docs/install.md, 3а](../install.md#3а-системная-библиотека-для-lightgbm-одна-команда).
 
 ## 3.2 Git в твоей роли
 

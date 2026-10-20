@@ -1,0 +1,60 @@
+# Онбординг глазами новичка на Windows: ставим всё «с нуля» по ONBOARDING.md и проверяем,
+# что хук, тесты и doctor работают. Минуты Windows-раннера считаются ×2 — запускаем только
+# вручную и при изменениях того, что влияет на установку.
+name: onboarding-windows
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".githooks/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".claude/hooks/**"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash   # Git Bash — тот же, что у участников на Windows и у хуков git/Claude
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Шаг 3 (install.md): uv + Python 3.12"
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: "Шаг 3.3 (ONBOARDING): uv sync"
+        run: uv sync
+
+      - name: "Шаг 3.4: хук защиты веток"
+        run: uv run python scripts/install_hooks.py && test "$(git config core.hooksPath)" = ".githooks"
+
+      - name: "Хук: пуш в dev блокируется, в ветку задачи — проходит"
+        run: |
+          Z=0000000000000000000000000000000000000000
+          if echo "refs/heads/x $(git rev-parse HEAD) refs/heads/dev $Z" | sh .githooks/pre-push origin url; then
+            echo "❌ хук пропустил пуш в dev"; exit 1
+          fi
+          echo "refs/heads/x $(git rev-parse HEAD) refs/heads/ml/test $Z" | sh .githooks/pre-push origin url
+          echo "✅ хук работает на Windows"
+
+      - name: "Шаг 3.5: .env из шаблона (copy в PowerShell)"
+        shell: pwsh
+        run: copy .env.example .env
+
+      - name: "Хук форматирования Claude (.claude/hooks/format.py)"
+        run: |
+          echo '{"tool_input":{"file_path":"solution.py"}}' | uv run --no-sync --quiet python .claude/hooks/format.py
+          git diff --exit-code solution.py && echo "✅ хук форматирования отработал без изменений"
+
+      - name: "Все тесты, включая дымовой прогон агента"
+        run: uv run pytest -v
+
+      - name: "Шаг 5: doctor (Claude Code и gh здесь не настроены — ❌ по ним ожидаемы)"
+        continue-on-error: true
+        run: uv run python scripts/doctor.py --role ml --quick

@@ -16,10 +16,16 @@ ROOT = Path(__file__).resolve().parents[2]
 SHIPPED = ["solution.py", "interfaces", "runtime", "agent", "ml", "evaluation"]
 LOCAL_PACKAGES = {"interfaces", "runtime", "agent", "ml", "evaluation", "research"}
 # имя при импорте → имя пакета в requirements.txt
-IMPORT_TO_PACKAGE = {"sklearn": "scikit-learn", "yaml": "pyyaml", "dotenv": "python-dotenv",
-                     "category_encoders": "category-encoders", "feature_engine": "feature-engine",
-                     "imblearn": "imbalanced-learn", "autogluon": "autogluon.tabular",
-                     "langchain_openai": "langchain-openai"}
+IMPORT_TO_PACKAGE = {
+    "sklearn": "scikit-learn",
+    "yaml": "pyyaml",
+    "dotenv": "python-dotenv",
+    "category_encoders": "category-encoders",
+    "feature_engine": "feature-engine",
+    "imblearn": "imbalanced-learn",
+    "autogluon": "autogluon.tabular",
+    "langchain_openai": "langchain-openai",
+}
 
 
 def allowed_packages() -> set[str]:

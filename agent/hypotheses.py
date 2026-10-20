@@ -17,8 +17,13 @@ PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "research" / "playbook.
 
 
 def baseline_hypothesis() -> Hypothesis:
-    return Hypothesis(id="baseline", kind=HypothesisKind.BASELINE, title="LightGBM с параметрами по умолчанию",
-                      params={"model": "lightgbm"}, source="baseline")
+    return Hypothesis(
+        id="baseline",
+        kind=HypothesisKind.BASELINE,
+        title="LightGBM с параметрами по умолчанию",
+        params={"model": "lightgbm"},
+        source="baseline",
+    )
 
 
 def load_playbook(path: Path = PLAYBOOK_PATH) -> list[dict]:
@@ -46,8 +51,16 @@ def propose_hypotheses(
     for item in load_playbook():
         if item["id"] in tried or not _applies(item, spec, profile):
             continue
-        out.append(Hypothesis(id=item["id"], kind=HypothesisKind(item["kind"]), title=item["title"],
-                              rationale=item.get("rationale", ""), params=item.get("params", {}), source="playbook"))
+        out.append(
+            Hypothesis(
+                id=item["id"],
+                kind=HypothesisKind(item["kind"]),
+                title=item["title"],
+                rationale=item.get("rationale", ""),
+                params=item.get("params", {}),
+                source="playbook",
+            )
+        )
         if len(out) == k:
             break
     return out

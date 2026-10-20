@@ -67,17 +67,31 @@ def main() -> int:
         gh(["label", "create", name, "--repo", REPO, "--color", color, "--description", desc, "--force"], dry)
 
     print("2/3 Вехи (чек-поинты)")
-    existing = set() if dry else set(json.loads(gh(["api", f"repos/{REPO}/milestones?state=all", "--jq",
-                                                   "[.[].title]"], dry) or "[]"))
+    existing = (
+        set()
+        if dry
+        else set(json.loads(gh(["api", f"repos/{REPO}/milestones?state=all", "--jq", "[.[].title]"], dry) or "[]"))
+    )
     for title, due, desc in MILESTONES:
         if title in existing:
             print(f"   = {title} уже есть")
             continue
-        gh(["api", f"repos/{REPO}/milestones", "-f", f"title={title}", "-f", f"due_on={due}",
-            "-f", f"description={desc}"], dry)
+        gh(
+            [
+                "api",
+                f"repos/{REPO}/milestones",
+                "-f",
+                f"title={title}",
+                "-f",
+                f"due_on={due}",
+                "-f",
+                f"description={desc}",
+            ],
+            dry,
+        )
 
     print("3/3 Доска задач (GitHub Projects)")
-    auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
+    auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if "project" not in auth.stdout + auth.stderr and not dry:
         print("   ⚠️ Нет права project. Выполни:  gh auth refresh -s project   и запусти скрипт снова.")
         return 0
@@ -96,4 +110,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

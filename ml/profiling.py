@@ -54,8 +54,14 @@ def profile_data(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> Dat
         memory_mb=float((train.memory_usage(deep=True).sum() + test.memory_usage(deep=True).sum()) / 2**20),
         warnings=warnings,
     )
-    log.info("Данные: train=%d, test=%d, числовых=%d, категориальных=%d, выброшено=%d",
-             len(train), len(test), len(numeric), len(categorical), len(dropped))
+    log.info(
+        "Данные: train=%d, test=%d, числовых=%d, категориальных=%d, выброшено=%d",
+        len(train),
+        len(test),
+        len(numeric),
+        len(categorical),
+        len(dropped),
+    )
     return profile
 
 

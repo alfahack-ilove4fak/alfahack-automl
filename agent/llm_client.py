@@ -66,8 +66,9 @@ class LLMClient:
         self.calls += 1
         text = response.choices[0].message.content or ""
         if response.usage:
-            self.rub_spent += (response.usage.prompt_tokens * self._price_in
-                               + response.usage.completion_tokens * self._price_out) / 1000
+            self.rub_spent += (
+                response.usage.prompt_tokens * self._price_in + response.usage.completion_tokens * self._price_out
+            ) / 1000
         self._cache_put(key, text)
         return text
 
