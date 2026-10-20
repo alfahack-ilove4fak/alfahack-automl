@@ -43,8 +43,8 @@ gantt
 
 Перед каждым сабмитом:
 1. PR `dev → main` слит капитаном, CI зелёный.
-2. `uv run python scripts/package_submission.py` → `dist/submission-<дата>.zip`.
-3. Прогон из zip на обеих публичных задачах в чистой папке, проверка формата (QA, задача L1 — `scripts/pre_submit.py`).
+2. `uv run python scripts/package_submission.py` → `dist/submission-<дата>.zip` — в корне **только** `solution.py` и `requirements.txt` (платформа копирует лишь корневые `.py`; см. `reference/platform_instructions.md`). **Никогда не собирать zip руками.**
+3. `uv run pytest tests/smoke/test_package.py` — запуск «как на платформе»; полный прогон на всех задачах — `scripts/pre_submit.py` (задача QA Q-L1-2).
 4. Тег: `git tag sub-2026-10-21-1 origin/main && git push origin sub-2026-10-21-1`.
 5. Загрузка на платформу, строка в [docs/submissions.md](submissions.md) — локальный скор рядом с public.
 

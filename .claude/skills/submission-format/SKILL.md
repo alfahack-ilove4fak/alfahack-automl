@@ -5,10 +5,10 @@ description: Правила формата сдачи на платформу А
 
 # Навык: формат сдачи
 
-Источник истины — PDF кейса (`reference/case_alfahack_automl.pdf`) и `reference/baseline.py`.
+Источник истины — `reference/platform_instructions.md` (инструкция Boosters), PDF кейса и `reference/baseline.py`.
 
-- **Архив**: ZIP, в корне `solution.py`; остальные модули рядом. Собирает `scripts/package_submission.py`.
-- **Запуск**: `python solution.py <путь>/task.md`; env `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`. ⚠️ В приложении 2 упомянут `script.py` — уточнить у организаторов.
+- **Архив**: в корне ровно `solution.py` + `requirements.txt`, **без папок** — платформа копирует только корневые `.py` и `requirements.txt`. Собирает `scripts/package_submission.py`: код агента упакован внутрь самораспаковывающегося `solution.py`. Никогда не собирай zip руками из папок репозитория — получишь 0 баллов. Проверка — `uv run pytest tests/smoke/test_package.py`.
+- **Запуск**: `python3 solution.py task.md` в каталоге задачи; env `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`. Свой `pip` запускать нельзя; временные файлы — в каталоге задачи или `/tmp`.
 - **Среда**: Docker, 8 CPU, 32 ГБ, Python 3.12, без интернета, только `requirements.txt`. ⚠️ `baseline.py` импортирует `mcp`, которого нет в `requirements.txt` — не используем.
 - **Время**: 3 часа на задачу, затем принудительная остановка; оценивается файл, который есть к этому моменту.
 - **Ответ**: `submission.csv` рядом с `task.md`, UTF-8, запятая, без индекса, колонки = заголовок `sample_submission.csv`, порядок `id` = `test.csv`, без пропусков/inf/дублей, метки только из допустимых классов. Проверка — `evaluation/submission.py::validate_submission`.

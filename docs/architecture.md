@@ -3,7 +3,7 @@
 ## 1. Что делает агент
 
 На платформу уходит ZIP с `solution.py`. Платформа запускает его отдельно на каждой задаче:
-`python solution.py <путь>/task.md` (+ переменные `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`).
+`python3 solution.py task.md` в каталоге задачи (+ переменные `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`).
 За **3 часа** на машине **8 CPU / 32 ГБ, без интернета** агент должен положить `submission.csv` рядом с `task.md`.
 Итоговое место решают **две скрытые задачи** с неизвестными заранее данными и метрикой.
 
@@ -89,11 +89,13 @@ uv run python solution.py tasks/public/regression/task.md
 | Факт | Источник |
 |---|---|
 | ZIP, в корне `solution.py`; интерфейс как в `reference/baseline.py` | PDF кейса, с. 6 |
+| **В каталог задачи копируются только корневые `.py` и `requirements.txt`** — папки теряются. Поэтому `scripts/package_submission.py` собирает самораспаковывающийся `solution.py` (код агента внутри, распаковка в `/tmp`), проверка — `tests/smoke/test_package.py` | `reference/platform_instructions.md`, ADR 0007 |
+| Запуск: `python3 solution.py task.md`, рабочая папка = папка с `task.md`; временные файлы — там же или в `/tmp`; ZIP ≤ 100 МБ; свой `pip` запускать нельзя | `reference/platform_instructions.md` |
 | Docker, 8 CPU, 32 ГБ, без интернета, Python 3.12, только `requirements.txt` | с. 7 |
 | 3 часа на задачу, после — принудительная остановка | с. 7, 17 |
 | LLM — только Qwen через выданный ключ; 600 ₽/день на команду на время разработки | с. 7 |
 | 3 сабмита в день, сброс в 00:00 МСК | с. 6 |
 | Балл задачи = 100·max(0, улучшение над бейзлайном); public = среднее двух задач | с. 18–19 |
 | На private берётся версия с лучшим public score | с. 16 |
-| ⚠️ В приложении 2 написано `script.py`, в остальном тексте — `solution.py` | с. 17 — спросить организаторов |
+| ✅ Точка входа — `solution.py` (в приложении 2 PDF `script.py` — опечатка) | `reference/platform_instructions.md` |
 | ⚠️ `baseline.py` импортирует `mcp`, которого нет в `requirements.txt` — в своём коде `mcp` не используем, пока организаторы не подтвердят | `reference/` |
