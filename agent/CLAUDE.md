@@ -1,4 +1,4 @@
-# agent/ — владелец: LLM/agent-инженер (@n0h4ndy)
+# agent/ — роль: LLM/agent-инженер (кто сейчас — docs/team.md, ревью — .github/CODEOWNERS)
 
 Пакет роли: @docs/roles/agent.md · Материалы: docs/resources/agent.md
 

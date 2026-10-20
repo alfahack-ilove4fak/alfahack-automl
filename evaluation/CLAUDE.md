@@ -1,4 +1,4 @@
-# evaluation/ — владелец: QA / MLOps (@dzigoku-ku)
+# evaluation/ — роль: QA / MLOps (кто сейчас — docs/team.md, ревью — .github/CODEOWNERS)
 
 Пакет роли: @docs/roles/qa.md · Материалы: docs/resources/qa.md
 

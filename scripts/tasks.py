@@ -53,7 +53,9 @@ def team_members() -> dict[str, list[str]]:
     for line in (ROOT / "docs" / "team.md").read_text(encoding="utf-8").splitlines():
         cells = [c.strip() for c in line.strip("|").split("|")]
         if len(cells) >= 3 and cells[1].startswith("@") and cells[2] in titles:
-            members.setdefault(titles[cells[2]], []).append(cells[1][1:])
+            nicks = members.setdefault(titles[cells[2]], [])
+            if cells[1][1:] not in nicks:
+                nicks.append(cells[1][1:])
     return members
 
 

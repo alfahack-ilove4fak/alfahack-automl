@@ -1,4 +1,4 @@
-# research/ — владелец: Исследователь / Data Scientist
+# research/ — роль: Исследователь / Data Scientist (кто сейчас — docs/team.md, ревью — .github/CODEOWNERS)
 
 Пакет роли: @docs/roles/research.md · Материалы: docs/resources/research.md
 

@@ -1,4 +1,4 @@
-# runtime/ и solution.py — владелец: капитан (@thenlaooo)
+# runtime/ и solution.py — роль: капитан / интегратор (кто сейчас — docs/team.md)
 
 Пакет роли: @docs/roles/captain.md · Материалы: docs/resources/captain.md
 

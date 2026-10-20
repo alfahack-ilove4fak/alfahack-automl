@@ -7,4 +7,5 @@
 
 | Дата | Кто | Задача | Гипотеза | Было | Стало | Вывод | Ветка/PR |
 |---|---|---|---|---|---|---|---|
-| 2026-10-20 | @thenlaooo | обе | Скелет: LightGBM по умолчанию, 5 фолдов | — | см. CI | точка отсчёта | `captain/stage3-infra` |
+| 2026-10-20 | @thenlaooo | multiclass | Скелет без LLM: бейзлайн LightGBM + playbook (5 гипотез), 15 мин | — | CV Macro F1 0.567 → **0.604** (lgbm_slow_lr, lgbm_small_leaves) | playbook помогает; balanced_classes и big_leaves хуже | run-agent #1, PR #2 |
+| 2026-10-20 | @thenlaooo | regression | Скелет без LLM: бейзлайн LightGBM + playbook, 15 мин | — | CV RMSE **41.81** (бейзлайн) | lgbm_slow_lr дал 41.62, но отсеян порогом шума 0.32 (A-L2-3); вероятная утечка в CV — здания по годам (R-L2-1) | run-agent #1, PR #2 |

@@ -17,6 +17,8 @@
 - **Теги сабмитов:** `git tag sub-ГГГГ-ММ-ДД-N origin/main && git push origin sub-ГГГГ-ММ-ДД-N`.
 - **PR с `interfaces/`** сливаешь ты, после одобрения всех затронутых владельцев.
 - **Подключение участника:** `python3 scripts/add_member.py --name <латиница> --github <ник> --role <роль>` → слить созданный PR.
+- **Кто принял приглашение:** `uv run python scripts/team_sync.py` — обновит статусы в `docs/team.md` и таблицу ролей (закоммить через PR).
+  Для себя `add_member.py` запускай только с `--skip-invite` — иначе скрипт «пригласит» тебя участником и понизит с владельца.
 - **Сторож веток** создаёт issue «⛔ Нарушение правил» — разбери: случайность → объяснить; нужно откатить → `git revert` в новом PR.
 - **Задачи на доске:** правишь `docs/roles/tasks.yaml` → `uv run python scripts/tasks.py render` → PR; новые задачи на доску — `uv run python scripts/tasks.py issues`.
 
