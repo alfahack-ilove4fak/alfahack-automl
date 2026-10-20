@@ -83,3 +83,4 @@ claude plugin install commit-commands@claude-plugins-official --scope local
 | Claude спрашивает разрешение на каждый `uv run pytest` | не доверил папку (шаг 2): `/permissions` в терминальном `claude` или перезапусти и согласись |
 | Хук форматирования ругается | `uv sync` (нужен ruff в окружении). На Windows нужен Git for Windows (Claude запускает хуки через Git Bash) |
 | Claude хочет прочитать `.env` | он не сможет — это запрещено настройками. Ключ никогда не отправляй в чат |
+| Чат на claude.ai говорит «не вижу репозиторий thenlaooo/alfahack-automl» | это **чат**, а не Claude Code. Чат видит приватный репозиторий только через приложение Claude на GitHub, которое ставит владелец. Работай в **Claude Code** (терминал `claude` в папке проекта или вкладка **Code** в десктопном приложении) — там репозиторий виден через твой `git clone`, и работают наши команды и скиллы |
