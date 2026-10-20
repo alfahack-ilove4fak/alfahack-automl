@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -227,7 +226,9 @@ def check_llm_call() -> Check:
 def check_tests(quick: bool) -> Check:
     target = ["tests/contracts", "tests/unit"] if quick else ["tests"]
     code, text = run([sys.executable, "-m", "pytest", "-q", "-x", *target], timeout=900)
-    tail = text.strip().splitlines()[-1] if text.strip() else ""
+    lines = [ln.strip("= ") for ln in text.splitlines() if ln.strip()]
+    summary = [ln for ln in lines if any(w in ln for w in ("passed", "failed", "error"))]
+    tail = (summary or lines or [""])[-1][:150]
     return Check("тесты" + (" (без дымовых)" if quick else " (включая дымовой прогон агента)"),
                  OK if code == 0 else FAIL, tail, "uv run pytest -x   — и пришли хвост вывода в чат")
 

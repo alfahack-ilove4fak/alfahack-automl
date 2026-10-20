@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from interfaces import stubs
 from interfaces.schemas import CONTRACT_VERSION, ExperimentResult, ExperimentStatus, RunBudget, TaskSpec
@@ -40,7 +41,7 @@ def test_schemas_roundtrip_json():
 
 
 def test_schema_rejects_unknown_fields():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ExperimentResult(hypothesis_id="x", status="ok", metric_name="rmse", typo_field=1)
 
 
