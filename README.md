@@ -4,7 +4,7 @@
 
 Кейс Альфа Хак «AI-агент для разработки ML-моделей» (Альфа-Банк × Changellenge). Условия — [reference/case_alfahack_automl.pdf](reference/case_alfahack_automl.pdf).
 
-![CI](https://github.com/thenlaooo/alfahack-automl/actions/workflows/ci.yml/badge.svg?branch=dev)
+![CI](https://github.com/alfahack-ilove4fak/alfahack-automl/actions/workflows/ci.yml/badge.svg?branch=dev)
 
 ## Как это работает
 
@@ -25,7 +25,7 @@ flowchart LR
 Новичок в команде? Начни с **[ONBOARDING.md](ONBOARDING.md)** — путь на 1 час.
 
 ```
-gh repo clone thenlaooo/alfahack-automl && cd alfahack-automl
+gh repo clone alfahack-ilove4fak/alfahack-automl && cd alfahack-automl
 uv sync
 uv run python scripts/install_hooks.py
 uv run python scripts/doctor.py --role <captain|agent|ml|research|qa>

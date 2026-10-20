@@ -36,7 +36,7 @@
 
 ## 3.4 Чек-лист задач
 
-Задачи также заведены на доске (https://github.com/users/thenlaooo/projects/2) с тем же id. В Claude Code — `/next-task`.
+Задачи также заведены на доске (https://github.com/orgs/alfahack-ilove4fak/projects/1) с тем же id. В Claude Code — `/next-task`.
 
 <!-- tasks:start (генерирует scripts/tasks.py render — не править руками) -->
 

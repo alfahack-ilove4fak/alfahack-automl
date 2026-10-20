@@ -15,9 +15,8 @@ import json
 import subprocess
 import sys
 
-REPO = "thenlaooo/alfahack-automl"
-OWNER = "thenlaooo"
-PROJECT_TITLE = "Альфа Хак — AutoML-агент"
+from team_config import ORG as OWNER  # noqa: E402
+from team_config import PROJECT_TITLE, REPO  # noqa: E402
 
 LABELS = {
     "role:captain": ("5319e7", "Капитан / интегратор"),
@@ -105,7 +104,9 @@ def main() -> int:
         created = gh(["project", "create", "--owner", OWNER, "--title", PROJECT_TITLE, "--format", "json"], dry)
         number = json.loads(created)["number"] if created else "N"
     gh(["project", "link", str(number), "--owner", OWNER, "--repo", REPO], dry, check=False)
-    print(f"✅ Доска: https://github.com/users/{OWNER}/projects/{number}")
+    print(
+        f"✅ Доска: https://github.com/orgs/{OWNER}/projects/{number} — проверь PROJECT_NUMBER в scripts/team_config.py"
+    )
     return 0
 
 

@@ -39,7 +39,7 @@ uv sync --group full
 
 ## 3.4 Чек-лист задач
 
-Задачи также на доске (https://github.com/users/thenlaooo/projects/2). В Claude Code — `/next-task`.
+Задачи также на доске (https://github.com/orgs/alfahack-ilove4fak/projects/1). В Claude Code — `/next-task`.
 
 <!-- tasks:start (генерирует scripts/tasks.py render — не править руками) -->
 

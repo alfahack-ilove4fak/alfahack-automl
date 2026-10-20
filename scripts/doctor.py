@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REPO = "thenlaooo/alfahack-automl"
+from team_config import INVITATION_URL, REPO  # noqa: E402 — соседний файл scripts/
+
 OS = platform.system()  # Windows | Darwin | Linux
 OK, FAIL, WARN = "✅", "❌", "⚠️"
 
@@ -186,7 +187,7 @@ def check_gh() -> list[Check]:
             "доступ к репозиторию",
             OK if code == 0 else FAIL,
             REPO,
-            f"прими приглашение: https://github.com/{REPO}/invitations (или напиши капитану)",
+            f"прими приглашение в организацию: {INVITATION_URL} (или напиши капитану)",
         )
     )
     return out
