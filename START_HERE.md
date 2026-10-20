@@ -8,7 +8,7 @@
 | **Твоя зона** | `agent/` — разбор задачи, LLM, гипотезы, цикл AutoResearch |
 | **Твой пакет роли** | [docs/roles/agent.md](https://github.com/thenlaooo/alfahack-automl/blob/dev/docs/roles/agent.md) — что установить, инструменты, задачи L0–L3, Claude Code |
 | **Проверенные материалы** | [docs/resources/agent.md](https://github.com/thenlaooo/alfahack-automl/blob/dev/docs/resources/agent.md) |
-| **Тебя ревьюит** | капитан @thenlaooo — пока в команде нет роли «ML-pipeline инженер» |
+| **Тебя ревьюит** | @marenkov17 (ML-pipeline инженер) |
 
 ## 1. Что скачать и как проверить готовность (≈ 1 час)
 
