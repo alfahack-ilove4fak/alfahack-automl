@@ -266,8 +266,11 @@ def main() -> int:
     print(f"Сообщение для {args.name} в чат:")
     print(f"   Прими приглашение: {INVITATION_URL}")
     print(f"   Твоя инструкция:   https://github.com/{repo}/blob/{branch}/START_HERE.md")
-    print(f"   Путь на 1 час:     https://github.com/{repo}/blob/dev/ONBOARDING.md")
-    print(f"   Доска задач:       {BOARD_URL}")
+    print(
+        f"   Путь на 1 час:     https://github.com/{repo}/blob/dev/ONBOARDING.md"
+        " — сначала прочитай документацию, потом открывай репозиторий в Claude"
+    )
+    print(f"   Доска задач:       {BOARD_URL} — сохрани ссылку, туда капитан кидает задачи")
     return 0
 
 
