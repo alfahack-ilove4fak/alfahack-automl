@@ -5,3 +5,4 @@
 | Имя | GitHub | Роль | Личная ветка |
 |---|---|---|---|
 | artem | @n0h4ndy | LLM/agent-инженер | `team/artem` |
+| egor | @dzigoku-ku | QA / MLOps | `team/egor` |
