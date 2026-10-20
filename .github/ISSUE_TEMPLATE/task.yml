@@ -1,0 +1,49 @@
+name: Задача
+description: Задача из чек-листа роли или новая работа
+title: "[роль] "
+labels: ["type:task"]
+body:
+  - type: dropdown
+    id: role
+    attributes:
+      label: Роль
+      options: [captain, agent, ml, research, qa]
+    validations:
+      required: true
+  - type: dropdown
+    id: level
+    attributes:
+      label: Уровень
+      options: ["L0 — разогрев", "L1 — базовая", "L2 — основная", "L3 — на победу"]
+    validations:
+      required: true
+  - type: dropdown
+    id: checkpoint
+    attributes:
+      label: Чек-поинт
+      options: [CP0, CP1, CP2, CP3, CP4, CP5]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги
+      description: Что сделать, по шагам
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Критерий «готово»
+      placeholder: "- [ ] тест X зелёный\n- [ ] PR слит в dev"
+    validations:
+      required: true
+  - type: textarea
+    id: handoff
+    attributes:
+      label: Стыковка
+      description: С кем, когда, что передаём друг другу
+      placeholder: "agent → ml, к 13:00 22.10: формат params для CatBoost"

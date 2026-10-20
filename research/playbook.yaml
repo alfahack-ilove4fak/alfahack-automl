@@ -1,0 +1,46 @@
+# Playbook гипотез. Владелец — Research/DS.
+# Агент берёт отсюда гипотезы, когда LLM недоступна, и показывает их LLM как примеры.
+# Каждая гипотеза должна быть ПОЛЕЗНОЙ НА ЛЮБОЙ табличной задаче, а не только на публичных.
+#
+# Поля:
+#   id          — уникальный, латиница
+#   kind        — baseline | model | hyperparams | features | preprocessing | validation | ensemble
+#   title       — что делаем, по-русски
+#   rationale   — почему это может помочь
+#   task_types  — [regression, binary, multiclass]; нет поля — подходит всем
+#   requires    — categorical | imbalance (необязательно)
+#   params      — то, что понимает ml/experiment.py (список поддерживаемых — в его docstring)
+
+hypotheses:
+  - id: lgbm_slow_lr
+    kind: hyperparams
+    title: LightGBM с меньшим шагом обучения
+    rationale: Меньший learning_rate с ранней остановкой почти всегда даёт чуть лучше качество ценой времени
+    params: {model: lightgbm, model_params: {learning_rate: 0.02}}
+
+  - id: lgbm_small_leaves
+    kind: hyperparams
+    title: LightGBM с меньшим числом листьев и регуляризацией
+    rationale: Защита от переобучения на небольших и шумных данных
+    params: {model: lightgbm, model_params: {num_leaves: 31, min_child_samples: 50, reg_lambda: 1.0}}
+
+  - id: log_target
+    kind: preprocessing
+    title: Обучение на log1p(target)
+    rationale: Скошенный положительный таргет — модель меньше «гоняется» за редкими большими значениями
+    task_types: [regression]
+    params: {model: lightgbm, log_target: true}
+
+  - id: balanced_classes
+    kind: hyperparams
+    title: Веса классов balanced
+    rationale: При дисбалансе Macro F1 сильно зависит от редких классов; веса заставляют модель их замечать
+    task_types: [binary, multiclass]
+    requires: imbalance
+    params: {model: lightgbm, class_weight: balanced}
+
+  - id: lgbm_big_leaves
+    kind: hyperparams
+    title: LightGBM с большим числом листьев
+    rationale: На больших данных с сложными взаимодействиями признаков более ёмкая модель может выиграть
+    params: {model: lightgbm, model_params: {num_leaves: 255, min_child_samples: 10}}

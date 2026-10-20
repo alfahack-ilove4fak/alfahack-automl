@@ -1,0 +1,51 @@
+# Запуск агента на публичных задачах в облаке GitHub — по кнопке.
+# Зачем: у нас медленный интернет и слабые ноутбуки, а здесь всё ставится за секунды.
+# Как: вкладка Actions → run-agent → Run workflow → выбрать ветку и минуты на задачу.
+# Результат (Artifacts внизу страницы запуска): zip для платформы, submission.csv по задачам, логи.
+# ⚠️ Раннер для приватного репозитория слабее платформы (2 CPU / 7 ГБ) — это проверка работоспособности, а не точная копия.
+name: run-agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Минут на каждую задачу (на платформе — 180)"
+        default: "15"
+        required: true
+      use_llm:
+        description: "Использовать LLM (нужен секрет OPENAI_API_KEY в настройках репозитория)"
+        type: boolean
+        default: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+
+      - name: Агент на всех задачах
+        env:
+          LLM_MOCK: ${{ inputs.use_llm && '0' || '1' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        run: uv run python scripts/run_local.py --all --minutes ${{ inputs.minutes }}
+
+      - name: Собрать zip для платформы
+        if: always()
+        run: uv run python scripts/package_submission.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-run-${{ github.run_number }}
+          path: |
+            dist/*.zip
+            runs/*/task/submission.csv
+            runs/*/agent.log
