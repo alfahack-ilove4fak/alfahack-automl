@@ -29,13 +29,13 @@
 
 ## Шаг 3. Получить репозиторий и зависимости (15 мин)
 
-**3.1. Прими приглашение.** Открой https://github.com/thenlaooo/alfahack-automl/invitations → **Accept invitation**.
+**3.1. Прими приглашение в организацию.** Открой https://github.com/orgs/alfahack-ilove4fak/invitation → **Join alfahack-ilove4fak** (письмо с приглашением тоже придёт на почту).
 → Должно появиться: страница репозитория открывается.
 → Если «404»: приглашение ещё не отправлено или ник другой — напиши капитану.
 
 **3.2. Склонируй.** Перейди в папку, где хранишь проекты (Windows — `C:\dev`, без русских букв и пробелов в пути), и выполни:
 ```
-gh repo clone thenlaooo/alfahack-automl
+gh repo clone alfahack-ilove4fak/alfahack-automl
 cd alfahack-automl
 ```
 → Должно появиться: папка `alfahack-automl`, внутри `README.md`. Команда `git branch` показывает `* dev`.
@@ -81,6 +81,6 @@ uv run python scripts/doctor.py --role <твоя-роль>
 
 ## Что дальше
 
-1. Открой свой `START_HERE.md`: `https://github.com/thenlaooo/alfahack-automl/blob/team/<твоё-имя>/START_HERE.md`.
+1. Открой свой `START_HERE.md`: `https://github.com/alfahack-ilove4fak/alfahack-automl/blob/team/<твоё-имя>/START_HERE.md`.
 2. Первая задача — **L0** из твоего чек-листа в `docs/roles/<роль>.md`. В Claude Code: `/next-task`.
 3. Как устроена работа в git — [docs/git-guide.md](docs/git-guide.md); правила — [CONTRIBUTING.md](CONTRIBUTING.md); ритм дня — [docs/team-process.md](docs/team-process.md).

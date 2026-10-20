@@ -17,7 +17,7 @@ flowchart LR
 
 ## 1. Взять задачу
 
-1. Открой доску: https://github.com/users/thenlaooo/projects (проект «Альфа Хак»).
+1. Открой доску: https://github.com/orgs/alfahack-ilove4fak/projects (проект «Альфа Хак»).
 2. Выбери задачу своей роли из колонки **Todo**, назначь себя (**Assignees → себя**) и перетащи в **In progress**.
 
 Из терминала то же самое: `gh issue list --label role:ml` → `gh issue edit 12 --add-assignee @me`.
@@ -52,7 +52,7 @@ git commit -m "feat: добавить CatBoost в реестр моделей"
 git push -u origin ml/catboost
 gh pr create --base dev --fill --reviewer <ник-ревьюера>
 ```
-→ Должна появиться ссылка `https://github.com/thenlaooo/alfahack-automl/pull/N`. Открой её и заполни шаблон.
+→ Должна появиться ссылка `https://github.com/alfahack-ilove4fak/alfahack-automl/pull/N`. Открой её и заполни шаблон.
 → Кто твой ревьюер — таблица в CONTRIBUTING.md, раздел 2. Ник — в `docs/team.md`.
 → Если `⛔ pre-push остановил пуш`: ты пытаешься пушить в `dev`/`main`. Создай ветку (шаг 2) и пушь её.
 

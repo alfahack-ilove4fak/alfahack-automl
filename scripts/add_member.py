@@ -1,7 +1,7 @@
 """Подключить нового участника команды одной командой (запускает капитан).
 
 Что делает:
-  1. Отправляет приглашение в репозиторий (коллаборатор с правом записи).
+  1. Приглашает в организацию (у её участников право записи в репозиторий).
   2. Даёт доступ на запись к доске задач (GitHub Projects).
   3. Создаёт личную ветку team/<имя> от dev и кладёт туда START_HERE.md
      (из шаблона docs/templates/START_HERE.md.tmpl: роль, зона, ревьюер, первая задача, стыковки).
@@ -29,7 +29,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-PROJECT_OWNER, PROJECT_NUMBER = "thenlaooo", 2
+from team_config import BOARD_URL, CAPTAIN, INVITATION_URL, ORG, PROJECT_ID_JQ, PROJECT_ID_QUERY  # noqa: E402
+
 TEMPLATE = Path("docs/templates/START_HERE.md.tmpl")
 TEAM_FILE = Path("docs/team.md")
 CODEOWNERS = Path(".github/CODEOWNERS")
@@ -90,7 +91,7 @@ def build_context(name: str, github: str, role: str) -> dict:
     reviewer = (
         ", ".join(f"@{n}" for n in rev) + f" ({ROLES[rev_role]})"
         if rev
-        else f"капитан @{PROJECT_OWNER} — пока в команде нет роли «{ROLES[rev_role]}»"
+        else f"капитан @{CAPTAIN} — пока в команде нет роли «{ROLES[rev_role]}»"
     )
     return {
         "name": name,
@@ -145,9 +146,9 @@ def grant_board_access(github: str, dry: bool) -> None:
             "api",
             "graphql",
             "-f",
-            f'query={{user(login:"{PROJECT_OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
+            PROJECT_ID_QUERY,
             "--jq",
-            ".data.user.projectV2.id",
+            PROJECT_ID_JQ,
         ],
         dry=dry,
     )
@@ -217,8 +218,8 @@ def main() -> int:
 
         print(f"\n👤 Подключаю {args.name} (@{github}) как «{ROLES[args.role]}» в {repo}\n")
         if not args.skip_invite:
-            print("1/4 Приглашение в репозиторий")
-            run(["gh", "api", "-X", "PUT", f"repos/{repo}/collaborators/{github}", "-f", "permission=push"], dry=dry)
+            print(f"1/4 Приглашение в организацию {ORG} (право записи в репозиторий даёт организация)")
+            run(["gh", "api", "-X", "PUT", f"orgs/{ORG}/memberships/{github}", "-f", "role=member"], dry=dry)
         print("2/4 Доступ к доске задач")
         grant_board_access(github, dry)
         print(f"3/4 Личная ветка {branch}")
@@ -263,10 +264,10 @@ def main() -> int:
 
     print(f"\n✅ Готово. Слей PR: gh pr merge {pr.rsplit('/', 1)[-1] or '<номер>'} --squash")
     print(f"Сообщение для {args.name} в чат:")
-    print(f"   Прими приглашение: https://github.com/{repo}/invitations")
+    print(f"   Прими приглашение: {INVITATION_URL}")
     print(f"   Твоя инструкция:   https://github.com/{repo}/blob/{branch}/START_HERE.md")
     print(f"   Путь на 1 час:     https://github.com/{repo}/blob/dev/ONBOARDING.md")
-    print(f"   Доска задач:       https://github.com/users/{PROJECT_OWNER}/projects/{PROJECT_NUMBER}")
+    print(f"   Доска задач:       {BOARD_URL}")
     return 0
 
 

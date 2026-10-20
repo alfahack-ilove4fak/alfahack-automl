@@ -22,10 +22,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "docs" / "roles" / "tasks.yaml"
-REPO = "thenlaooo/alfahack-automl"
-OWNER = "thenlaooo"
-PROJECT_NUMBER = 2
-CAPTAIN = "thenlaooo"
+from team_config import BOARD_URL, CAPTAIN, PROJECT_ID_JQ, PROJECT_ID_QUERY, REPO  # noqa: E402
+
 LEVELS = {"L0": "L0 — разогрев", "L1": "L1 — базовые", "L2": "L2 — основные", "L3": "L3 — на победу"}
 MILESTONES = {
     "CP0": "CP0 Окружение готово",
@@ -112,14 +110,7 @@ def add_to_board(issue_url: str) -> None:
     """Добавить issue на доску. Через GraphQL: `gh project item-add` в gh 2.46 молча не срабатывает."""
     global _PROJECT_ID
     if _PROJECT_ID is None:
-        _PROJECT_ID = gh(
-            "api",
-            "graphql",
-            "-f",
-            f'query={{user(login:"{OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
-            "--jq",
-            ".data.user.projectV2.id",
-        )
+        _PROJECT_ID = gh("api", "graphql", "-f", PROJECT_ID_QUERY, "--jq", PROJECT_ID_JQ)
     number = issue_url.rstrip("/").rsplit("/", 1)[-1]
     node_id = gh("api", f"repos/{REPO}/issues/{number}", "--jq", ".node_id")
     gh(
@@ -209,7 +200,7 @@ def issues(dry: bool) -> int:
         created += 1
     print(
         f"✅ создано {created}, уже было {len(have & {t['id'] for t in tasks})}"
-        + (" (dry-run)" if dry else f". Доска: https://github.com/users/{OWNER}/projects/{PROJECT_NUMBER}")
+        + (" (dry-run)" if dry else f". Доска: {BOARD_URL}")
     )
     return 0
 
