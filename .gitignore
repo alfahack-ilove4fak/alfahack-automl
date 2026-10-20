@@ -1,0 +1,40 @@
+# --- Секреты: НИКОГДА не коммитим ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Результаты запусков агента ---
+# агент пишет submission.csv рядом с task.md — в git он не нужен
+tasks/**/submission.csv
+runs/
+artifacts/
+llm_cache/
+catboost_info/
+AutogluonModels/
+lightautoml_*/
+mlruns/
+*.zip
+
+# --- Личные настройки Claude Code (общие лежат в .claude/settings.json) ---
+.claude/settings.local.json
+CLAUDE.local.md
+
+# --- ОС и редакторы ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.ipynb_checkpoints/

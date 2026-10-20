@@ -1,0 +1,11 @@
+#!/bin/sh
+# Обёртка: находит Python и запускает настоящую проверку.
+# Git for Windows тоже исполняет такие sh-хуки, поэтому работает на всех ОС.
+HOOK="$(git rev-parse --show-toplevel)/scripts/hooks/pre_push.py"
+for py in python3 python py; do
+  if command -v "$py" >/dev/null 2>&1; then
+    exec "$py" "$HOOK" "$@"
+  fi
+done
+echo "pre-push: не найден Python. Установите его (см. docs/install.md) или запустите: uv run python scripts/doctor.py" >&2
+exit 1

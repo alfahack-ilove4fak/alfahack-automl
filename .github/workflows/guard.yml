@@ -1,0 +1,52 @@
+# Сторож веток main и dev.
+# На GitHub Free в приватном репозитории нельзя включить защиту веток,
+# поэтому этот workflow ловит нарушения постфактум: красный ❌ + issue капитану.
+name: guard
+
+on:
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Проверить, что изменения пришли через Pull Request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          problems=""
+
+          # Служебные коммиты капитана при первичной настройке репозитория
+          if [ "$ACTOR" = "$OWNER" ] && printf '%s' "$MESSAGE" | grep -q '\[guard-skip\]'; then
+            echo "Служебный коммит капитана — пропускаю проверку."
+            exit 0
+          fi
+
+          prs=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[] | select(.merged_at != null)] | length')
+          if [ "$prs" = "0" ]; then
+            problems="$problems- Коммит $SHA попал в \`$BRANCH\` без Pull Request (автор пуша: @$ACTOR).\n"
+          fi
+
+          if [ "$BRANCH" = "main" ] && [ "$ACTOR" != "$OWNER" ]; then
+            problems="$problems- В \`main\` слил @$ACTOR, а по правилам это делает только капитан @$OWNER.\n"
+          fi
+
+          if [ -n "$problems" ]; then
+            body=$(printf "Сторож веток нашёл нарушение правил (CONTRIBUTING.md):\n\n$problems\nЧто делать: капитан решает — оставить или откатить через \`git revert\` в новом PR.\n\nRun: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID")
+            gh issue create --repo "$REPO" --title "⛔ Нарушение правил ветки $BRANCH" --body "$body" --assignee "$OWNER" || true
+            printf "$problems"
+            exit 1
+          fi
+          echo "✅ Всё по правилам."

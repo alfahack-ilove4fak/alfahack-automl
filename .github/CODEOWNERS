@@ -1,0 +1,29 @@
+# Кто отвечает за какую папку и кого звать на ревью.
+# ⚠️ На GitHub Free в приватном репозитории этот файл НЕ блокирует слияние —
+#    это карта ответственности. Ревьюера указываем сами: gh pr create --reviewer <ник>
+#
+# scripts/add_member.py дописывает ник участника в строки после метки «# role:<роль>».
+# Капитан стоит везде как запасной ревьюер. Порядок важен: побеждает последнее совпадение.
+
+# role:captain
+*                   @thenlaooo
+/solution.py        @thenlaooo
+/runtime/           @thenlaooo
+/interfaces/        @thenlaooo
+/.github/           @thenlaooo
+/.claude/           @thenlaooo
+
+# role:agent
+/agent/             @thenlaooo
+
+# role:ml
+/ml/                @thenlaooo
+
+# role:research
+/research/          @thenlaooo
+/tasks/practice/    @thenlaooo
+
+# role:qa
+/evaluation/        @thenlaooo
+/scripts/           @thenlaooo
+/tests/             @thenlaooo

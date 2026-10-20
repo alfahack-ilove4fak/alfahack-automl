@@ -1,0 +1,13 @@
+# Весь текст хранится с LF — чтобы у Windows и Mac не было «изменённых» файлов на ровном месте
+* text=auto eol=lf
+
+# Скрипты Windows должны оставаться с CRLF
+*.bat eol=crlf
+*.cmd eol=crlf
+*.ps1 eol=crlf
+
+# Данные организаторов не трогаем побайтно
+*.csv -text
+*.pdf binary
+*.png binary
+*.zip binary
