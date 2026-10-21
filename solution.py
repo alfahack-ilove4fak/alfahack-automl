@@ -29,7 +29,7 @@ from agent.hypotheses import baseline_hypothesis
 from agent.loop import run_autoresearch
 from agent.task_parser import find_task_files, parse_task
 from evaluation.metrics import METRICS
-from evaluation.submission import validate_submission, write_submission_atomic
+from evaluation.submission import per_class_columns, validate_submission, write_submission_atomic
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
@@ -38,9 +38,26 @@ from runtime.log import setup_logging
 from runtime.watchdog import Watchdog
 
 
+def _class_share_answer(spec: TaskSpec, y, test, class_columns: list[str]):
+    """Шаблон «колонка на класс» (#117): доли классов train. Колонка ↔ класс — по имени, иначе по порядку class_labels."""
+    shares = y.astype(str).value_counts(normalize=True)
+    labels = spec.class_labels or []
+    by_name = set(class_columns) == set(labels)
+    values = []
+    for i, col in enumerate(class_columns):
+        label = col if by_name else (labels[i] if i < len(labels) else None)
+        values.append(float(shares.get(label, 0.0)) if label is not None else 0.0)
+    probs = pd.Series(values).clip(lower=1e-6)  # нулевая вероятность ломает logloss
+    probs = probs / probs.sum()
+    return test[[spec.id_column]].assign(**dict(zip(class_columns, probs, strict=True)))[spec.submission_columns]
+
+
 def trivial_answer(spec: TaskSpec, train, test):
     """Ответ без модели: страховка на случай, если всё остальное упадёт."""
     y = train[spec.target]
+    class_columns = per_class_columns(spec)
+    if class_columns and spec.task_type != TaskType.REGRESSION:
+        return _class_share_answer(spec, y, test, class_columns)
     if spec.task_type == TaskType.REGRESSION:
         value = float(y.mean())
     elif METRICS[spec.metric.name].prediction == "proba" and spec.class_labels:
