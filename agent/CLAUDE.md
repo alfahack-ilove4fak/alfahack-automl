@@ -9,6 +9,7 @@
 | `llm_client.py` | Qwen через OpenAI-совместимый API: кэш на диск, учёт ₽, `available()` = False без ключа |
 | `hypotheses.py` | откуда берутся гипотезы: сейчас только `research/playbook.yaml`, дальше — LLM |
 | `prompting.py` | сборка промптов из `agent/prompts/*.md` (string.Template, `$плейсхолдеры`); нет файла → `None` → playbook |
+| `feature_code.py` | код признаков от LLM: промпт `prompts/features.md`, разбор ответа, проверка кода до песочницы (AST) |
 | `loop.py` | цикл AutoResearch: гипотеза → `ml.run_experiment` → принять, если лучше на `min_delta` |
 
 ## Контракты
