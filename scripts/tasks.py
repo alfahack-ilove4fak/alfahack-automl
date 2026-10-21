@@ -4,6 +4,7 @@
     uv run python scripts/tasks.py issues --dry-run    # показать, какие issue будут созданы
     uv run python scripts/tasks.py issues              # создать недостающие issue и добавить на доску
     uv run python scripts/tasks.py board               # доложить на доску все открытые issue
+    uv run python scripts/tasks.py assign              # назначить исполнителей на issue без исполнителя (по docs/team.md)
 
 Повторный запуск безопасен: issue ищутся по id задачи в заголовке и не дублируются.
 Исполнитель назначается по docs/team.md (роль без человека — без исполнителя).
@@ -144,6 +145,33 @@ def issue_body(t: dict) -> str:
     )
 
 
+def pick_assignments(open_issues: list[dict], members: dict[str, list[str]]) -> list[tuple[int, list[str]]]:
+    """Какие issue назначить: открытые, без исполнителя, с меткой `role:<роль>`, у роли есть люди."""
+    todo = []
+    for issue in open_issues:
+        if issue.get("assignees"):
+            continue  # чужих исполнителей не трогаем
+        role = next((lb["name"][5:] for lb in issue.get("labels", []) if lb["name"].startswith("role:")), "")
+        if members.get(role):
+            todo.append((issue["number"], members[role]))
+    return todo
+
+
+def assign(dry: bool, members: dict[str, list[str]] | None = None) -> int:
+    """Назначить исполнителей на уже созданные issue (после подключения человека или правки docs/team.md)."""
+    members = members or team_members()
+    raw = gh(
+        "issue", "list", "--repo", REPO, "--state", "open", "--limit", "500", "--json", "number,title,labels,assignees"
+    )
+    todo = pick_assignments(json.loads(raw), members)
+    for number, nicks in todo:
+        print(f"   → #{number}: {', '.join(nicks)}")
+        if not dry:
+            gh("issue", "edit", str(number), "--repo", REPO, *sum((["--add-assignee", n] for n in nicks), []))
+    print(f"✅ назначено issue: {len(todo)}" + (" (dry-run)" if dry else ""))
+    return 0
+
+
 def issues(dry: bool) -> int:
     tasks = load_tasks()
     members = team_members()
@@ -204,16 +232,18 @@ def issues(dry: bool) -> int:
         f"✅ создано {created}, уже было {len(have & {t['id'] for t in tasks})}"
         + (" (dry-run)" if dry else f". Доска: {BOARD_URL}")
     )
-    return 0
+    return 0 if dry else assign(dry=False, members=members)  # уже созданным issue тоже ставим исполнителей
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["render", "issues", "board"])
+    parser.add_argument("command", choices=["render", "issues", "board", "assign"])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.command == "board":
         return board()
+    if args.command == "assign":
+        return assign(args.dry_run)
     return render() if args.command == "render" else issues(args.dry_run)
 
 
