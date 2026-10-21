@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from pathlib import Path
 from string import Template
@@ -112,6 +113,11 @@ def params_doc() -> str:
     if marker in doc:
         doc = doc.split(marker, 1)[1].split("\n", 1)[-1]
     return textwrap.dedent(doc).strip()
+
+
+def allowed_param_keys() -> set[str]:
+    """Ключи params, которые понимает исполнитель: первые слова строк вида «ключ — описание»."""
+    return set(re.findall(r"^(\w+)\s+—", params_doc(), re.MULTILINE))
 
 
 def playbook_examples(spec: TaskSpec, profile: DataProfile, n: int = 2) -> str:
