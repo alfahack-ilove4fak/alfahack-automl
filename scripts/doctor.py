@@ -18,6 +18,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -158,6 +159,10 @@ def check_git() -> list[Check]:
     return out
 
 
+AUTH_ATTEMPTS = 3  # сколько раз спрашиваем `gh auth status`, прежде чем поверить в ❌
+AUTH_PAUSE_SEC = 2.0
+
+
 def check_gh() -> list[Check]:
     if not have("gh"):
         return [
@@ -173,20 +178,34 @@ def check_gh() -> list[Check]:
             )
         ]
     out = [Check("GitHub CLI (gh)", OK, run(["gh", "--version"])[1].splitlines()[0])]
-    code, text = run(["gh", "auth", "status"])
-    out.append(
-        Check(
-            "вход в GitHub",
-            OK if code == 0 else FAIL,
-            next((ln.strip() for ln in text.splitlines() if "Logged in" in ln), text[:120]),
-            "gh auth login",
+    # `gh auth status` проверяет токен запросом к API: при обрыве сети пишет «token is invalid»,
+    # хотя вход есть. Поэтому повторяем, а итог сверяем с доступом к репозиторию (#103).
+    for attempt in range(AUTH_ATTEMPTS):
+        auth_code, auth_text = run(["gh", "auth", "status"])
+        if auth_code == 0 or "not logged in" in auth_text.lower():
+            break
+        if attempt < AUTH_ATTEMPTS - 1:
+            time.sleep(AUTH_PAUSE_SEC)
+    repo_code, _ = run(["gh", "repo", "view", REPO, "--json", "name"])
+    login = next((ln.strip() for ln in auth_text.splitlines() if "Logged in" in ln), auth_text[:120])
+    if auth_code == 0:
+        out.append(Check("вход в GitHub", OK, login))
+    elif repo_code == 0:
+        out.append(
+            Check(
+                "вход в GitHub",
+                WARN,
+                "вход есть, но связь с GitHub API нестабильна (gh auth status не прошёл с "
+                f"{AUTH_ATTEMPTS} попыток, а репозиторий открылся)",
+                "проверь сеть/VPN; если повторяется — gh auth login",
+            )
         )
-    )
-    code, text = run(["gh", "repo", "view", REPO, "--json", "name"])
+    else:
+        out.append(Check("вход в GitHub", FAIL, login, "gh auth login"))
     out.append(
         Check(
             "доступ к репозиторию",
-            OK if code == 0 else FAIL,
+            OK if repo_code == 0 else FAIL,
             REPO,
             f"прими приглашение в организацию: {INVITATION_URL} (или напиши капитану)",
         )
