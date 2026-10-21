@@ -14,8 +14,14 @@ log = get_logger("profiling")
 
 
 def load_data(spec: TaskSpec) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train = pd.read_csv(spec.train_path, low_memory=False)
-    test = pd.read_csv(spec.test_path, low_memory=False)
+    """train и test. id читается строкой («001300» не превращается в 1300), строки с пустым target выкидываются."""
+    dtype = {spec.id_column: str}
+    train = pd.read_csv(spec.train_path, low_memory=False, dtype=dtype)
+    test = pd.read_csv(spec.test_path, low_memory=False, dtype=dtype)
+    missing = train[spec.target].isna()
+    if missing.any():
+        log.warning("В train %d строк с пустым target — выкидываем, учиться на них нельзя", int(missing.sum()))
+        train = train.loc[~missing].reset_index(drop=True)
     return train, test
 
 

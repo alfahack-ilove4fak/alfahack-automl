@@ -166,3 +166,43 @@ def test_models_accept_special_column_names(model):
     )
 
     assert result.status == ExperimentStatus.OK, result.error
+
+
+def _multiclass_with_rare_class() -> tuple[TaskSpec, pd.DataFrame, DataProfile]:
+    rng = np.random.default_rng(0)
+    n = 200
+    df = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "c": rng.choice(["x", "y"], size=n)})
+    df["y"] = np.where(df["a"] > 0, "up", "down")
+    df.loc[0, "y"] = "rare"  # класс с одним объектом
+    spec = _spec(TaskType.MULTICLASS, "f1_macro", greater=True, labels=["down", "rare", "up"])
+    profile = DataProfile(n_train=n, n_test=0, numeric_features=["a"], categorical_features=["c"])
+    return spec, df, profile
+
+
+@pytest.mark.parametrize("model", ["lightgbm", *MODELS])
+def test_class_with_one_object(model):
+    package, model_params, _ = MODELS.get(model, (None, {}, True))
+    if package:
+        pytest.importorskip(package)
+    spec, train, profile = _multiclass_with_rare_class()
+
+    result = run_experiment(spec, profile, _hyp(model=model, model_params=model_params), train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+
+
+def test_split_keeps_rare_class_in_train_and_old_folds_otherwise():
+    from sklearn.model_selection import StratifiedKFold
+
+    from ml.experiment import SEED, _split
+
+    spec, _, _ = _multiclass_with_rare_class()
+    y = np.array([0] + [1, 2] * 50)  # объект 0 — единственный в своём классе
+    for tr, va in _split(spec, y, 5):
+        assert 0 in tr and 0 not in va
+        assert len(np.intersect1d(tr, va)) == 0
+
+    y_common = np.array([1, 2] * 50)
+    old = StratifiedKFold(5, shuffle=True, random_state=SEED).split(np.zeros(len(y_common)), y_common)
+    for (tr, va), (tr_old, va_old) in zip(_split(spec, y_common, 5), old, strict=True):
+        assert (tr == tr_old).all() and (va == va_old).all()
