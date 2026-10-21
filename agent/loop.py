@@ -45,6 +45,8 @@ def run_autoresearch(
     if llm is None:
         llm = LLMClient(rub_limit=budget.llm_rub_limit)  # без ключа или с LLM_MOCK=1 — сразу недоступна
     memory = memory if memory is not None else ResearchMemory()
+    if memory.best_id is None:
+        memory.best_id = best[0].id  # на входе лучший — бейзлайн
     queue: list[Hypothesis] = []
     batch_start = len(history)  # с какого места истории начинается текущая пачка гипотез
     baseline_seconds = best[1].fit_seconds  # на входе best — бейзлайн: от него считаем цену гипотез
