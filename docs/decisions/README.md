@@ -11,7 +11,7 @@
 | [0005](0005-ci-as-test-machine.md) | Проверка кода в GitHub Actions и Codespaces | принято |
 | [0006](0006-move-to-organization.md) | Переезд в организацию alfahack-ilove4fak | принято |
 | [0007](0007-self-extracting-solution.md) | Самораспаковывающийся solution.py для платформы | принято |
-| [0008](0008-acceptance-rule.md) | Правило принятия гипотезы: попарно по фолдам, t-тест Nadeau–Bengio | предложено |
+| [0010](0010-acceptance-rule.md) | Правило принятия гипотезы: попарно по фолдам, t-тест Nadeau–Bengio | предложено |
 
 ## Шаблон
 
