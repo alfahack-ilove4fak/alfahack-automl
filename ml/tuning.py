@@ -72,7 +72,7 @@ def tune(
     x: pd.DataFrame,
     y: np.ndarray,
     y_fit: np.ndarray,
-    ops: list[str],
+    ops,  # params.feature_ops в любом формате parse_feature_ops
     log_target: bool,
     budget: RunBudget,
 ) -> dict:

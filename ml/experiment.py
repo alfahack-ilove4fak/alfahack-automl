@@ -15,8 +15,9 @@
   n_folds        — число фолдов (по умолчанию 5)
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
   class_weight   — для классификации: "balanced" или None
-  feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops
-                   (ml/features.py); обучаются только на train-части фолда, без утечки
+  feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
+                   элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
+                   фолда, без утечки
   optuna         — {trials: 30, timeout: 600, folds: 3, rows: 100000}: подбор model_params выбранной модели
                    (ml/tuning.py) на подвыборке и меньшем числе фолдов, потом обычная CV с найденными параметрами
 
@@ -48,7 +49,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
-from ml.features import apply_feature_ops
+from ml.features import apply_feature_ops, parse_feature_ops
 from ml.profiling import make_matrix
 from runtime.budget import used_ram_mb
 from runtime.log import get_logger
@@ -393,7 +394,7 @@ def _fold_score(
     y_fit: np.ndarray,
     tr: np.ndarray,
     va: np.ndarray,
-    ops: list[str],
+    ops,  # params.feature_ops в любом формате parse_feature_ops
     log_target: bool,
 ) -> tuple[float, int]:
     """Один фолд: признаки из feature_ops (учатся на train-части) → модель → метрика на валидации."""
@@ -411,9 +412,11 @@ def run_experiment(
     peak = used_ram_mb()
     params = hypothesis.params
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
-    n_folds = int(params.get("n_folds", 5))
-    ops = list(params.get("feature_ops") or [])
     try:
+        # Разбор params — внутри try: кривой n_folds или feature_ops от LLM → FAILED, а не падение цикла агента
+        n_folds = int(params.get("n_folds", 5))
+        ops = params.get("feature_ops")
+        parse_feature_ops(ops)
         y = _encode_target(spec, train[spec.target])
         rows = _cv_rows(spec, profile, y, budget)
         if rows is not None:
@@ -486,7 +489,7 @@ def fit_predict_final(
     x, x_test = make_matrix(profile, train, test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
-    ops = list(params.get("feature_ops") or [])
+    ops = params.get("feature_ops")
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
     # На всех данных деревьев нужно чуть больше, чем на 4/5 из CV

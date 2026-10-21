@@ -437,3 +437,24 @@ def test_optuna_not_repeated_for_same_hypothesis(monkeypatch):
     run_experiment(spec, profile, hyp, train, RunBudget())
 
     assert calls == [1] and hyp.params["model_params"]["num_leaves"] == 20
+
+
+@pytest.mark.parametrize(
+    "bad", [{"feature_ops": 5}, {"feature_ops": [{"op": "pair_ops", "depth": 3}]}, {"n_folds": None}]
+)
+def test_malformed_params_fail_hypothesis_not_agent(bad):
+    """Кривые params от LLM — FAILED, а не исключение наверх: цикл агента его не ловит (раньше падали до try)."""
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    result = run_experiment(spec, profile, _hyp(**bad), train, RunBudget())
+    assert result.status == ExperimentStatus.FAILED
+
+
+def test_feature_ops_with_params_in_experiment():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    ops = [{"op": "target_encoding", "smoothing": 5}, {"op": "pair_ops", "top_k": 2}]
+    hyp = _hyp(feature_ops=ops, model_params={"n_estimators": 50})
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+    assert len(fit_predict_final(spec, profile, hyp, train, test)) == 20
