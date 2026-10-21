@@ -7,6 +7,9 @@ $profile
 ## История экспериментов
 $history
 
+## Выводы из прошлых неудач
+$lessons
+
 ## Что умеет исполнитель
 Допустимые kind: hyperparams, preprocessing, model.
 Допустимые ключи params:

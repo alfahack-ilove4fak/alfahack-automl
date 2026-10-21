@@ -48,6 +48,9 @@ def accept(new: ExperimentResult, best: ExperimentResult, greater_is_better: boo
         return False, f"эксперимент не удался ({new.status.value})"
     if best.mean_score is None:
         return True, "прежнего результата нет"
+    if new.validation != best.validation:
+        # разные схемы CV несравнимы (контракт 1.1, D1): схему выбирают один раз до цикла
+        return False, f"другая схема валидации: {new.validation} против {best.validation}"
     gains = fold_gains(new, best, greater_is_better)
     if gains is None:
         delta = NOISE_FACTOR * (best.std_score or 0.0)

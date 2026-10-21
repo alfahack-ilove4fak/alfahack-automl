@@ -87,3 +87,10 @@ def test_corrected_t():
     assert corrected_t(gains) == pytest.approx(0.2 / math.sqrt((1 / 5 + 1 / 4) * 0.01))
     assert corrected_t(gains) < plain_t  # поправка делает тест осторожнее
     assert T_MIN > 0
+
+
+def test_different_validation_scheme_rejected():
+    # контракт 1.1 (D1): результаты разных схем CV несравнимы, даже если «лучше» по числам
+    better = res([f - 1.0 for f in BEST.fold_scores]).model_copy(update={"validation": "group-5"})
+    ok, reason = accept(better, BEST, greater_is_better=False)
+    assert not ok and "схема валидации" in reason
