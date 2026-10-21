@@ -8,4 +8,4 @@
 | egor | @dzigoku-ku | QA / MLOps | `team/egor` | ✅ в организации |
 | danil | @marenkov17 | ML-pipeline инженер | `team/danil` | ✅ в организации |
 | vasya | @thenlaooo | Капитан / интегратор | `team/vasya` | ✅ в организации |
-| roma | @Richi-Marqez | Исследователь / Data Scientist | `team/roma` | ⏳ приглашение не принято |
+| roma | @Richi-Marqez | Исследователь / Data Scientist | `team/roma` | ✅ в организации |
