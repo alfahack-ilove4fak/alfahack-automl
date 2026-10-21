@@ -1,0 +1,93 @@
+# Отчёт харнесса в PR (Q-L3-1): метка `harness` на PR → харнесс на агенте из dev («было») и на агенте из PR,
+# слитого с dev («стало»), на одних и тех же задачах и отложенных частях → таблица комментарием в PR.
+# Тяжёлый (два прогона агента на каждую задачу), поэтому только по метке или вручную — бережём минуты Actions.
+# Пока метка стоит, каждый новый пуш в PR обновляет таблицу (один комментарий, правится на месте).
+name: harness-pr
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Номер PR"
+        required: true
+      minutes:
+        description: "Бюджет агента на задачу, минут"
+        default: "1"
+      rows:
+        description: "Урезать train до N строк (пусто — полные данные)"
+        default: "5000"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: harness-pr-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'harness') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'harness'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PR: ${{ github.event.pull_request.number || inputs.pr }}
+      MINUTES: ${{ inputs.minutes || '1' }}
+      ROWS: ${{ inputs.rows || '5000' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Код PR, слитого с базой, и код базы
+        run: |
+          base=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+          if ! git fetch --no-tags origin "+refs/pull/$PR/merge:pr-merge" "$base"; then
+            echo "::error::Нет слияния PR с $base — скорее всего, конфликт. Подтяни $base в ветку и перезапусти."
+            exit 1
+          fi
+          git checkout -q pr-merge
+          git worktree add -q ../base "origin/$base"
+          echo "BASE=$base" >> "$GITHUB_ENV"
+
+      - name: Установить uv и Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Установить зависимости
+        run: uv sync
+
+      - name: Харнесс — было (агент из базы)
+        run: |
+          rows=(); if [ -n "$ROWS" ]; then rows=(--rows "$ROWS"); fi
+          uv run python -m evaluation.harness --all --minutes "$MINUTES" "${rows[@]}" --agent-root ../base --out base.csv || true
+
+      - name: Харнесс — стало (агент из PR)
+        run: |
+          rows=(); if [ -n "$ROWS" ]; then rows=(--rows "$ROWS"); fi
+          uv run python -m evaluation.harness --all --minutes "$MINUTES" "${rows[@]}" --out head.csv || true
+
+      - name: Таблица «было/стало»
+        run: |
+          rows=(); if [ -n "$ROWS" ]; then rows=(--rows "$ROWS"); fi
+          uv run python scripts/harness_compare.py base.csv head.csv --minutes "$MINUTES" "${rows[@]}" --out comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Комментарий в PR (один, обновляется на месте)
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- harness-report -->")) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi

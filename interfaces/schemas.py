@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 
 class _Contract(BaseModel):
@@ -62,7 +62,11 @@ class TaskSpec(_Contract):
 
 
 class DataProfile(_Contract):
-    """Паспорт данных. Создаёт ml (profile_data), читает agent для гипотез."""
+    """Паспорт данных. Создаёт ml (profile_data), читает agent для гипотез.
+
+    target_summary (часть контракта, ADR 0008, D5): регрессия — `count`, `mean`, `std`, `min`, `25%`, `50%`, `75%`, `max`,
+    `skew`; классификация — `class_counts` и `imbalance_ratio` (наибольший класс / наименьший; его читает playbook).
+    """
 
     n_train: int
     n_test: int
@@ -91,8 +95,12 @@ class HypothesisKind(str, Enum):
 class Hypothesis(_Contract):
     """Что пробуем. Создаёт agent, исполняет ml.
 
-    params — словарь, который понимает ml.run_experiment:
-      {"model": "lightgbm", "model_params": {...}, "feature_ops": [...], "n_folds": 5}
+    params — словарь, который понимает ml.run_experiment: список ключей — SUPPORTED_PARAMS в ml/experiment.py
+      (пример: {"model": "lightgbm", "model_params": {...}, "n_folds": 5}).
+
+    code — код признаков от LLM (ADR 0008, D4): обязан определять `add_features(df) -> df`; получает таблицу признаков
+    train и test вместе БЕЗ target (иначе утечка) и возвращает её с новыми колонками, не меняя число строк и их порядок.
+    Исполняется только в песочнице (runtime/sandbox.py), результат запуска — CodeResult.
     """
 
     id: str
@@ -113,7 +121,15 @@ class ExperimentStatus(str, Enum):
 
 
 class ExperimentResult(_Contract):
-    """Чем закончился эксперимент. Создаёт ml, читают agent и evaluation."""
+    """Чем закончился эксперимент. Создаёт ml, читают agent и evaluation.
+
+    validation — схема кросс-валидации в формате `<схема>-<число фолдов>` (`kfold-5`, `group-5`). Результаты разных
+    схем несравнимы, поэтому `beats()` их не сравнивает: схему выбираем один раз до цикла (ADR 0008, D1).
+    refit_params — что нужно знать финальному обучению (сейчас `n_estimators`); solution.py подставляет их в копию
+    гипотезы перед `fit_predict_final` (ADR 0008, D2).
+    oof_path и test_pred_path — файлы `.npy`, строки в порядке train и test; регрессия — вектор `(n,)`,
+    классификация — вероятности `(n, n_классов)` в порядке `TaskSpec.class_labels` (ADR 0008, D5).
+    """
 
     hypothesis_id: str
     status: ExperimentStatus
@@ -126,13 +142,17 @@ class ExperimentResult(_Contract):
     error: str | None = None
     oof_path: Path | None = None
     test_pred_path: Path | None = None
+    validation: str = "kfold-5"
+    refit_params: dict[str, Any] = Field(default_factory=dict)
 
     def beats(self, other: ExperimentResult | None, greater_is_better: bool, min_delta: float = 0.0) -> bool:
-        """Лучше ли этот результат, чем other, с запасом min_delta (защита от шума)."""
+        """Лучше ли этот результат, чем other, с запасом min_delta (защита от шума). Разные схемы CV — не лучше."""
         if self.status != ExperimentStatus.OK or self.mean_score is None:
             return False
         if other is None or other.mean_score is None:
             return True
+        if self.validation != other.validation:
+            return False
         diff = self.mean_score - other.mean_score
         return diff > min_delta if greater_is_better else -diff > min_delta
 
@@ -163,3 +183,13 @@ class ValidationReport(_Contract):
     ok: bool
     problems: list[str] = Field(default_factory=list)
     n_rows: int = 0
+
+
+class CodeResult(_Contract):
+    """Результат запуска кода в песочнице (runtime/sandbox.py). Создаёт captain, читает agent (ADR 0008, D4)."""
+
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+    seconds: float = 0.0
