@@ -136,3 +136,21 @@ def test_loop_skips_noop_without_running(regression, monkeypatch):
     ran, results = run_loop(regression, [noop], seconds_left=10_000, monkeypatch=monkeypatch)
     assert ran == []
     assert results["noop"].status == ExperimentStatus.SKIPPED
+
+
+def test_model_slowdown():
+    assert slowdown(hyp({"model": "catboost"})) == pytest.approx(8.0)
+    assert slowdown(hyp({"model": "XGBoost"})) == pytest.approx(4.0)
+    assert slowdown(hyp({"model": "something_new"})) == pytest.approx(4.0)  # неизвестная — осторожно
+    # learning_rate/num_leaves откалиброваны только для LightGBM — у других моделей не умножаем
+    assert slowdown(hyp({"model": "catboost", "model_params": {"learning_rate": 0.005}})) == pytest.approx(8.0)
+    assert slowdown(hyp({"model": "catboost", "n_folds": 10})) == pytest.approx(16.0)
+
+
+def test_num_leaves_only_for_lightgbm(multiclass):
+    assert "не действует в catboost" in review(
+        hyp({"model": "catboost", "model_params": {"num_leaves": 255}}), multiclass
+    )
+    lossguide = {"model": "catboost", "model_params": {"num_leaves": 255, "grow_policy": "Lossguide"}}
+    assert review(hyp(lossguide), multiclass) is None
+    assert review(hyp({"model": "xgboost", "model_params": {"max_depth": 8}}), multiclass) is None

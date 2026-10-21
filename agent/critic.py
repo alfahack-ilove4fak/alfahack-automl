@@ -18,6 +18,9 @@ from ml.experiment import BASE_PARAMS
 DEFAULT_FOLDS = 5
 TIME_SAFETY = 1.5
 MAX_SLOWDOWN = 20.0  # оценка не больше ×20 — дальше модель времени всё равно не верна
+# Во сколько раз модель дольше LightGBM при параметрах по умолчанию (замер ml, ревью #97; уточняется в #27)
+MODEL_SLOWDOWN = {"lightgbm": 1.0, "catboost": 8.0, "xgboost": 4.0, "linear": 2.0}
+UNKNOWN_MODEL_SLOWDOWN = 4.0
 
 
 def review(hyp: Hypothesis, spec: TaskSpec) -> str | None:
@@ -37,14 +40,24 @@ def review(hyp: Hypothesis, spec: TaskSpec) -> str | None:
     lr = model_params.get("learning_rate", BASE_PARAMS["learning_rate"])
     if not isinstance(lr, int | float) or not 0 < lr <= 1:
         return f"learning_rate={lr!r}: нужно число в (0, 1]"
+    model = _model(hyp)
+    if model != "lightgbm":
+        # CatBoost принимает num_leaves только при grow_policy=Lossguide, иначе параметр ничего не меняет
+        if "num_leaves" in model_params and model_params.get("grow_policy") != "Lossguide":
+            return f"num_leaves не действует в {model} — гипотеза совпадёт с моделью по умолчанию"
+        return None
     leaves = model_params.get("num_leaves", BASE_PARAMS["num_leaves"])
     if not isinstance(leaves, int) or isinstance(leaves, bool) or not 2 <= leaves <= 4096:
         return f"num_leaves={leaves!r}: нужно целое от 2 до 4096"
     return None
 
 
+def _model(hyp: Hypothesis) -> str:
+    return str(hyp.params.get("model") or "lightgbm").lower()
+
+
 def slowdown(hyp: Hypothesis) -> float:
-    """Во сколько раз эксперимент дольше бейзлайна (без запаса). Не меньше 1: дешевле бейзлайна не считаем."""
+    """Во сколько раз эксперимент дольше бейзлайна-LightGBM (без запаса). Не меньше 1: дешевле не считаем."""
     model_params = hyp.params.get("model_params", {})
     try:
         lr = float(model_params.get("learning_rate", BASE_PARAMS["learning_rate"]))
@@ -52,13 +65,15 @@ def slowdown(hyp: Hypothesis) -> float:
         folds = float(hyp.params.get("n_folds", DEFAULT_FOLDS))
     except (TypeError, ValueError):
         return 1.0
-    factor = 1.0
-    if 0 < lr < BASE_PARAMS["learning_rate"]:
-        factor *= (BASE_PARAMS["learning_rate"] / lr) ** 0.5
-    if leaves > BASE_PARAMS["num_leaves"]:
-        factor *= (leaves / BASE_PARAMS["num_leaves"]) ** 0.4
+    model = _model(hyp)
+    factor = MODEL_SLOWDOWN.get(model, UNKNOWN_MODEL_SLOWDOWN)
+    if model == "lightgbm":  # learning_rate и num_leaves откалиброваны только для LightGBM
+        if 0 < lr < BASE_PARAMS["learning_rate"]:
+            factor *= (BASE_PARAMS["learning_rate"] / lr) ** 0.5
+        if leaves > BASE_PARAMS["num_leaves"]:
+            factor *= (leaves / BASE_PARAMS["num_leaves"]) ** 0.4
     factor *= max(1.0, folds / DEFAULT_FOLDS)
-    return min(factor, MAX_SLOWDOWN)
+    return min(max(factor, 1.0), MAX_SLOWDOWN)
 
 
 def estimated_seconds(hyp: Hypothesis, baseline_seconds: float) -> float:
