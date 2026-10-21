@@ -207,3 +207,16 @@ def test_split_keeps_rare_class_in_train_and_old_folds_otherwise():
     old = StratifiedKFold(5, shuffle=True, random_state=SEED).split(np.zeros(len(y_common)), y_common)
     for (tr, va), (tr_old, va_old) in zip(_split(spec, y_common, 5), old, strict=True):
         assert (tr == tr_old).all() and (va == va_old).all()
+
+
+def test_split_when_all_classes_are_rare():
+    from ml.experiment import _split
+
+    spec, _, _ = _multiclass_with_rare_class()
+    y = np.array([0, 0, 0, 1, 1, 1, 2, 2, 2])  # по 3 объекта, а фолдов 5
+
+    folds = _split(spec, y, 5)
+
+    assert len(folds) == 3
+    for tr, va in folds:
+        assert set(y[tr]) == {0, 1, 2} and len(va) == 3
