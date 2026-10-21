@@ -1,5 +1,6 @@
 """Playbook: поля по шапке файла, params понимает ml/experiment.py, ни одна гипотеза не падает."""
 
+import importlib.util
 import re
 
 import numpy as np
@@ -46,6 +47,15 @@ def test_playbook_item_schema(item):
     assert (
         set(item["params"]) <= SUPPORTED_PARAMS
     ), f"новые ключи согласовать с ml: {set(item['params']) - SUPPORTED_PARAMS}"
+
+
+# Модели из группы зависимостей full: в CI (`uv sync` без --group full) их нет
+OPTIONAL_MODEL_PACKAGES = {"xgboost": "xgboost", "catboost": "catboost"}
+
+
+def _model_installed(model: str) -> bool:
+    package = OPTIONAL_MODEL_PACKAGES.get(str(model).lower())
+    return package is None or importlib.util.find_spec(package) is not None
 
 
 def _toy_task(task_type: TaskType) -> tuple[TaskSpec, DataProfile, pd.DataFrame]:
@@ -101,6 +111,8 @@ def test_playbook_hypotheses_run(task_type, monkeypatch):
     for item in PLAYBOOK:
         if item.get("task_types") and task_type.value not in item["task_types"]:
             continue
+        if not _model_installed(item["params"].get("model", "lightgbm")):
+            continue  # xgboost/catboost — группа full, в CI их нет (их проверяет tests/unit/test_experiment.py)
         params = {**item["params"], "n_folds": 2}
         hyp = Hypothesis(id=item["id"], kind=HypothesisKind(item["kind"]), title=item["title"], params=params)
         result = run_experiment(spec, profile, hyp, train, RunBudget())

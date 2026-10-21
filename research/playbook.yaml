@@ -108,32 +108,32 @@ hypotheses:
     rationale: Деревья плохо строят отношения признаков сами; 5 лучших признаков → 20 новых колонок
     params: {model: lightgbm, feature_ops: [pair_ops]}
 
-  - id: missing_flags_linear
+  - id: missing_flags
     kind: features
-    title: Линейная модель с флагами пропусков
-    rationale: Сам факт пропуска бывает информативен; бустинг это ловит, линейная модель — только с флагами; другой тип модели — разнообразие
-    params: {model: linear, feature_ops: [missing_flags]}
+    title: Флаги пропусков и число пропусков в строке (LightGBM)
+    rationale: Факт пропуска и число пропусков в строке бустинг сам не выводит; без пропусков в train признаков не добавляет
+    params: {model: lightgbm, feature_ops: [missing_flags]}
 
-  - id: xgboost_default
+  - id: model_xgboost
     kind: model
-    title: XGBoost с параметрами по умолчанию
+    title: XGBoost с настройками реестра (ml/experiment.py)
     rationale: Другой бустинг (рост деревьев по уровням, а не по листьям) — часто лучше на шумных данных и разнообразнее для ансамбля
     params: {model: xgboost}
 
-  - id: catboost_default
+  - id: model_catboost
     kind: model
-    title: CatBoost с параметрами по умолчанию
+    title: CatBoost с настройками реестра (ml/experiment.py)
     rationale: Симметричные деревья и упорядоченный target encoding категорий — сильный выбор при многих категориях
     requires: categorical
     params: {model: catboost}
 
-  - id: hist_gb_default
+  - id: model_hist_gb
     kind: model
     title: HistGradientBoosting из scikit-learn
-    rationale: Самый быстрый бустинг с нативными категориями — запасной вариант при большом объёме данных
+    rationale: Бустинг из scikit-learn с нативными категориями и ранней остановкой по внутренней выборке — другой код и другая остановка, чем у LightGBM
     params: {model: hist_gb}
 
-  - id: linear_default
+  - id: model_linear
     kind: model
     title: Линейная модель (Ridge / LogisticRegression)
     rationale: Экстраполирует за пределы train и не запоминает объекты — полезна при сдвиге test и как противовес бустингам
