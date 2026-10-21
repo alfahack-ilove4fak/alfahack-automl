@@ -531,3 +531,15 @@ def test_per_class_column_count_mismatch_is_error():
     run_experiment(spec, profile, hyp, train, RunBudget())
     with pytest.raises(ValueError, match="колонок ответа 2"):
         fit_predict_final(spec, profile, hyp, train, test)
+
+
+def test_optuna_hidden_from_agent_until_honest_validation():
+    """Ревью #115: подбор на KFold честно хуже бейзлайна — LLM и playbook не должны видеть ключ optuna (до #29)."""
+    import re
+    import textwrap
+
+    import ml.experiment
+
+    section = ml.experiment.__doc__.split("Поддерживаемые params", 1)[1].split("\n", 1)[-1]
+    keys = set(re.findall(r"^(\w+)\s+—", textwrap.dedent(section), re.MULTILINE))
+    assert "optuna" not in keys

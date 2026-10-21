@@ -4,6 +4,11 @@
 не помещается в свободную память; после первого фолда — прогноз, и если остальные не успеют, эксперимент
 останавливается с TIMEOUT. Подвыборка детерминированная — все гипотезы видят одни и те же строки.
 
+Скрытый ключ optuna — {trials, timeout, folds, rows}: подбор model_params (ml/tuning.py). Его нет в списке ниже,
+поэтому LLM и playbook его не выбирают: на public/regression подбор на KFold честно хуже бейзлайна (год 5: RMSE 53.99
+против 51.25, ревью #115) — он оптимизирует утечку через повторы объектов. Вернуть в список вместе с #29, когда подбор
+пойдёт на честной схеме валидации.
+
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
   model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
                    hist_gb — HistGradientBoosting из scikit-learn: самый быстрый бустинг, категории нативно
@@ -18,8 +23,6 @@
   feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
                    элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
                    фолда, без утечки
-  optuna         — {trials: 30, timeout: 600, folds: 3, rows: 100000}: подбор model_params выбранной модели
-                   (ml/tuning.py) на подвыборке и меньшем числе фолдов, потом обычная CV с найденными параметрами
   proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
                    (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
 
@@ -419,8 +422,10 @@ def _fold_score(
     if ops:
         x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
     model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
-    pred = _predict(spec, model, x_va, log_target)
-    proba = model.predict_proba(x_va) if _is_classification(spec) else None
+    if not _is_classification(spec):
+        return compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)), best_iter, None
+    proba = model.predict_proba(x_va)  # один раз: и для метрики, и для proba_weights
+    pred = proba if METRICS[spec.metric.name].prediction == "proba" else proba.argmax(axis=1)
     return compute_metric(spec.metric.name, y[va], pred), best_iter, proba
 
 
@@ -449,6 +454,7 @@ def run_experiment(
             params["_optuna_best"] = best  # повторный запуск той же гипотезы не подбирает заново
             params["model_params"] = {**(params.get("model_params") or {}), **best}
         scores, best_iters, oof = [], [], []
+        keep_oof = _use_proba_weights(spec, params)  # OOF-вероятности копим только когда они нужны (память)
         for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
             fold_started = time.time()
             if not budget.has_time():
@@ -463,7 +469,8 @@ def run_experiment(
             score, best_iter, proba = _fold_score(spec, hypothesis, x, y, y_fit, tr, va, ops, log_target)
             best_iters.append(best_iter)
             scores.append(score)
-            oof.append((y[va], proba))
+            if keep_oof:
+                oof.append((y[va], proba))
             peak = max(peak, used_ram_mb())
             if fold == 0 and n_folds > 1:
                 # Прогноз по первому фолду: не успеем остальные — стоп сейчас, а не через час на последнем фолде
