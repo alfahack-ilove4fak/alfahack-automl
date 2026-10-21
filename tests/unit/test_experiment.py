@@ -209,6 +209,106 @@ def test_split_keeps_rare_class_in_train_and_old_folds_otherwise():
         assert (tr == tr_old).all() and (va == va_old).all()
 
 
+def test_params_doc_keys_parse_after_dedent():
+    """Ключи params в docstring разбирает agent (prompting.allowed_param_keys): текст после «Поддерживаемые params»,
+    textwrap.dedent, ключ — в начале строки. Абзац без отступа в этом куске ломает разбор у всех ключей."""
+    import re
+    import textwrap
+
+    import ml.experiment
+
+    section = ml.experiment.__doc__.split("Поддерживаемые params", 1)[1].split("\n", 1)[-1]
+    keys = set(re.findall(r"^(\w+)\s+—", textwrap.dedent(section), re.MULTILINE))
+    assert {"model", "model_params", "n_folds", "log_target", "class_weight"} <= keys
+
+
+def test_cv_subsample_when_too_many_rows(monkeypatch):
+    import ml.experiment
+
+    monkeypatch.setattr(ml.experiment, "MAX_CV_ROWS", 150)
+    monkeypatch.setattr(ml.experiment, "MIN_CV_ROWS", 10)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    y = train["y"].to_numpy()
+
+    rows = ml.experiment._cv_rows(spec, profile, y, RunBudget())
+    assert rows is not None and len(rows) == 150
+    assert (rows == ml.experiment._cv_rows(spec, profile, y, RunBudget())).all()  # детерминированно
+
+    result = run_experiment(spec, profile, _hyp(model_params={"n_estimators": 50}), train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+
+
+def test_cv_subsample_keeps_rare_class():
+    from ml.experiment import _sample_rows
+
+    spec, _, _ = _multiclass_with_rare_class()
+    y = np.array([0] * 3 + [1] * 5000 + [2] * 5000)
+    rows = _sample_rows(spec, y, 1000)
+    assert set(y[rows]) == {0, 1, 2} and (y[rows] == 0).sum() == 3
+    assert 950 <= len(rows) <= 1050
+
+
+def test_not_enough_memory_fails_cleanly(monkeypatch):
+    from runtime.budget import used_ram_mb
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    budget = RunBudget(ram_limit_mb=used_ram_mb())  # свободной памяти нет
+
+    result = run_experiment(spec, profile, _hyp(), train, budget)
+
+    assert result.status == ExperimentStatus.FAILED
+    assert "MemoryError" in result.error
+
+
+def test_first_fold_forecast_stops_early(monkeypatch):
+    import time
+
+    import ml.experiment
+
+    class ShortBudget(RunBudget):
+        def seconds_left(self) -> float:
+            return 0.5  # время ещё есть, но на 4 фолда по 0.3 с — нет
+
+    real_fit = ml.experiment._fit_model
+
+    def slow_fit(*args, **kwargs):
+        time.sleep(0.3)
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(ml.experiment, "_fit_model", slow_fit)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+
+    result = run_experiment(spec, profile, _hyp(model_params={"n_estimators": 20}), train, ShortBudget())
+
+    assert result.status == ExperimentStatus.TIMEOUT
+    assert len(result.fold_scores) == 1 and "прогноз" in result.error
+
+
+@pytest.mark.skipif(not __import__("os").getenv("ML_BIG_TEST"), reason="долгий: ML_BIG_TEST=1 uv run pytest …")
+def test_big_synthetic_fits_budget():
+    """M-L1-3: 1.5 млн строк, 6 признаков — не падает и укладывается в бюджет 10 минут."""
+    import time
+
+    rng = np.random.default_rng(1)
+    n = 1_500_000
+    train = pd.DataFrame(rng.normal(size=(n, 5)).astype(np.float32), columns=[f"x{i}" for i in range(5)])
+    train["c"] = rng.choice(list("abcdefghij"), size=n)
+    train["y"] = train["x0"] * 2 + train["x1"] ** 2 + (train["c"] == "a") + rng.normal(size=n)
+    profile = DataProfile(n_train=n, n_test=0, numeric_features=[f"x{i}" for i in range(5)], categorical_features=["c"])
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    budget = RunBudget(total_seconds=600, safety_seconds=0)
+
+    started = time.time()
+    result = run_experiment(spec, profile, _hyp(n_folds=5), train, budget)
+
+    print(f"\n1.5 млн строк: {result.status.value}, {time.time() - started:.0f} с, RAM {result.peak_ram_mb:.0f} МБ")
+    assert result.status == ExperimentStatus.OK, result.error
+    assert time.time() - started < budget.total_seconds
+
+
 def test_split_when_all_classes_are_rare():
     from ml.experiment import _split
 
