@@ -222,15 +222,28 @@ def ensure_reviewers(pr: dict, roles: dict[str, str], dry: bool) -> None:
     if nicks:
         print(f"   👀 #{pr['number']}: прошу в ревьюеры {', '.join('@' + n for n in nicks)}")
         if not dry:
-            gh("pr", "edit", str(pr["number"]), "--repo", REPO, "--add-reviewer", ",".join(nicks), check=False)
+            # REST, по одному: `gh pr edit` в старых gh падает на Projects (classic), а пакетный запрос теряет часть людей
+            for nick in nicks:
+                gh(
+                    "api",
+                    "-X",
+                    "POST",
+                    f"repos/{REPO}/pulls/{pr['number']}/requested_reviewers",
+                    "-f",
+                    f"reviewers[]={nick}",
+                    check=False,
+                )
 
 
 def ensure_zone_label(pr: dict, dry: bool) -> None:
     has = any(label["name"] == LABEL_TWO for label in pr.get("labels", []))
     want = is_protected([f["path"] for f in pr.get("files", [])])
     if has != want and not dry:
-        flag = "--add-label" if want else "--remove-label"
-        gh("pr", "edit", str(pr["number"]), "--repo", REPO, flag, LABEL_TWO, check=False)
+        base = f"repos/{REPO}/issues/{pr['number']}/labels"
+        if want:
+            gh("api", "-X", "POST", base, "-f", f"labels[]={LABEL_TWO}", check=False)
+        else:
+            gh("api", "-X", "DELETE", f"{base}/{LABEL_TWO}", check=False)
 
 
 def do_update(pr: dict, dry: bool) -> None:
