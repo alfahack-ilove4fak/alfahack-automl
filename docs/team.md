@@ -4,7 +4,8 @@
 
 | Имя | GitHub | Роль | Личная ветка | Статус |
 |---|---|---|---|---|
-| artem | @n0h4ndy | LLM/agent-инженер | `team/artem` | ⏳ приглашение не принято |
+| artem | @n0h4ndy | LLM/agent-инженер | `team/artem` | ✅ в организации |
 | egor | @dzigoku-ku | QA / MLOps | `team/egor` | ✅ в организации |
 | danil | @marenkov17 | ML-pipeline инженер | `team/danil` | ✅ в организации |
 | vasya | @thenlaooo | Капитан / интегратор | `team/vasya` | ✅ в организации |
+| roma | @Richi-Marqez | Исследователь / Data Scientist | `team/roma` | ✅ в организации |

@@ -10,6 +10,7 @@
 | [0004](0004-data-in-repo.md) | Данные организаторов лежат в git | принято |
 | [0005](0005-ci-as-test-machine.md) | Проверка кода в GitHub Actions и Codespaces | принято |
 | [0006](0006-move-to-organization.md) | Переезд в организацию alfahack-ilove4fak | принято |
+| [0007](0007-self-extracting-solution.md) | Самораспаковывающийся solution.py для платформы | принято |
 
 ## Шаблон
 
