@@ -42,3 +42,14 @@ def test_model_predicts_on_unseen_test_category():
 
     assert pred.shape == (3,)
     assert np.isfinite(pred).all()
+
+
+def test_special_characters_in_column_names_are_replaced():
+    cols = ["income[usd]", "age<30", 'name"q', "income usd", "Площадь, м2"]
+    train = pd.DataFrame({c: [1.0, 2.0, 3.0] for c in cols})
+    profile = DataProfile(n_train=3, n_test=3, numeric_features=cols, categorical_features=[])
+
+    x_train, x_test = make_matrix(profile, train, train)
+
+    assert list(x_train.columns) == ["income_usd", "age_30", "name_q", "income_usd_1", "Площадь_м2"]
+    assert list(x_test.columns) == list(x_train.columns)

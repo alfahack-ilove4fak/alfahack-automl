@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -76,4 +78,22 @@ def make_matrix(profile: DataProfile, train: pd.DataFrame, test: pd.DataFrame) -
     for col in profile.numeric_features:
         x_train[col] = pd.to_numeric(x_train[col], errors="coerce").astype(np.float32)
         x_test[col] = pd.to_numeric(x_test[col], errors="coerce").astype(np.float32)
+    names = _safe_names(cols)
+    x_train.columns, x_test.columns = names, names
     return x_train, x_test
+
+
+def _safe_names(cols: list[str]) -> list[str]:
+    """Имена признаков, которые примут все модели: LightGBM падает на спецсимволах JSON, XGBoost — на [ ] <.
+
+    Всё, кроме букв, цифр и _, заменяется на _; совпавшие после замены имена получают суффикс _1, _2…
+    """
+    names, seen = [], set()
+    for col in cols:
+        base = re.sub(r"\W+", "_", str(col)).strip("_") or "feature"
+        name, k = base, 1
+        while name in seen:
+            name, k = f"{base}_{k}", k + 1
+        seen.add(name)
+        names.append(name)
+    return names

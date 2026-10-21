@@ -147,3 +147,22 @@ def test_catboost_rejects_lightgbm_params():
 
     assert result.status == ExperimentStatus.FAILED
     assert "colsample_bytree" in result.error
+
+
+@pytest.mark.parametrize("model", ["lightgbm", *MODELS])
+def test_models_accept_special_column_names(model):
+    package = MODELS.get(model, (None,))[0]
+    if package:
+        pytest.importorskip(package)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, _ = _data(TaskType.REGRESSION)
+    train = train.rename(columns={"a": "income[usd]", "c": 'city<"x">'})
+    profile = DataProfile(
+        n_train=len(train), n_test=0, numeric_features=["income[usd]"], categorical_features=['city<"x">']
+    )
+
+    result = run_experiment(
+        spec, profile, _hyp(model=model, model_params=MODELS.get(model, (None, {}))[1]), train, RunBudget()
+    )
+
+    assert result.status == ExperimentStatus.OK, result.error
