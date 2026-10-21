@@ -37,6 +37,23 @@ jobs:
       - name: Тесты — контракты, юнит, дымовой прогон
         run: uv run pytest -v
 
+  contracts:
+    # Процесс изменения контрактов (ADR 0009): правка schemas.py/protocols.py требует новой версии и строки в CHANGELOG
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Проверить версию контрактов и журнал изменений
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE"
+          python3 scripts/check_contract_change.py --base "origin/$BASE"
+
   lock:
     # Обновляет uv.lock и выкладывает его артефактом (у капитана медленный интернет — lock собираем здесь)
     if: github.event_name == 'workflow_dispatch'

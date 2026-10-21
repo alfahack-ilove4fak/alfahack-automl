@@ -5,13 +5,17 @@ requirements.txt, запуск — `python3 solution.py task.md` из этого
 Если этот тест красный — сабмит на платформе получит 0 баллов.
 """
 
+import base64
+import io
 import os
+import re
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
@@ -28,6 +32,31 @@ def test_zip_has_only_root_files(tmp_path):
     with zipfile.ZipFile(out) as zf:
         assert sorted(zf.namelist()) == ["requirements.txt", "solution.py"]
         assert zf.read("requirements.txt") == (ROOT / "requirements.txt").read_bytes()
+
+
+def _payload_names(zip_path: Path) -> set[str]:
+    """Файлы агента, упакованные внутрь solution.py (ZIP в base64 в _PAYLOAD)."""
+    with zipfile.ZipFile(zip_path) as zf:
+        code = zf.read("solution.py").decode("utf-8")
+    encoded = re.search(r'^_PAYLOAD = "([A-Za-z0-9+/=]*)"', code, re.MULTILINE).group(1)
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(encoded))) as payload:
+        return set(payload.namelist())
+
+
+def test_prompts_are_packed(tmp_path):
+    """Промпты агента (.md) едут на платформу, а инструкции CLAUDE.md — нет."""
+    names = _payload_names(build(tmp_path / "submission.zip"))
+    prompts = {p.relative_to(ROOT).as_posix() for p in (ROOT / "agent" / "prompts").rglob("*.md")}
+    assert prompts <= names, f"нет в архиве: {sorted(prompts - names)}"
+    assert not any(n.endswith("CLAUDE.md") for n in names)
+
+
+@pytest.mark.skipif(
+    not (ROOT / "agent" / "prompts" / "hypotheses.md").exists(),
+    reason="agent/prompts ещё не в этой ветке — проверка включится сама после слияния",
+)
+def test_hypotheses_prompt_in_archive(tmp_path):
+    assert "agent/prompts/hypotheses.md" in _payload_names(build(tmp_path / "submission.zip"))
 
 
 def test_platform_like_run(tmp_path):

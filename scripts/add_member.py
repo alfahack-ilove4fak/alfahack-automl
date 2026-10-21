@@ -224,6 +224,10 @@ def main() -> int:
             run(["gh", "api", "-X", "PUT", f"orgs/{ORG}/memberships/{github}", "-f", "role=member"], dry=dry)
         print("2/4 Доступ к доске задач")
         grant_board_access(github, dry)
+        print(f"    Назначаю @{github} на открытые задачи роли {args.role} без исполнителя")
+        from tasks import assign  # scripts/tasks.py; docs/team.md пока не обновлён — состав передаём явно
+
+        assign(dry, {args.role: [github]})
         print(f"3/4 Личная ветка {branch}")
         write_personal_branch(branch, ctx, tmp, dry, refresh=False)
 
