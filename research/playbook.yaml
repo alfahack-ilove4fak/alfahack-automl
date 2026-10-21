@@ -86,3 +86,55 @@ hypotheses:
     title: LightGBM с более точной сеткой порогов
     rationale: Для непрерывных признаков 1023 бина вместо 255 позволяют найти более точные пороги разбиения
     params: {model: lightgbm, model_params: {max_bin: 1023}}
+
+  # --- кандидаты v1.2 (признаки ml/features.py и модели реестра; проверяются стендом v2) ---
+  - id: target_encoding
+    kind: features
+    title: Target encoding категорий (out-of-fold)
+    rationale: Среднее target по категории со сглаживанием — даёт бустингу то, что CatBoost делает сам; без утечки
+    requires: categorical
+    params: {model: lightgbm, feature_ops: [target_encoding]}
+
+  - id: freq_encoding
+    kind: features
+    title: Частота категории как признак
+    rationale: Редкие и новые значения получают маленькую частоту, а не «неизвестно» — устойчивее к сдвигу test
+    requires: categorical
+    params: {model: lightgbm, feature_ops: [freq_encoding]}
+
+  - id: pair_ops
+    kind: features
+    title: Разности и отношения пар информативных признаков
+    rationale: Деревья плохо строят отношения признаков сами; 5 лучших признаков → 20 новых колонок
+    params: {model: lightgbm, feature_ops: [pair_ops]}
+
+  - id: missing_flags_linear
+    kind: features
+    title: Линейная модель с флагами пропусков
+    rationale: Сам факт пропуска бывает информативен; бустинг это ловит, линейная модель — только с флагами; другой тип модели — разнообразие
+    params: {model: linear, feature_ops: [missing_flags]}
+
+  - id: xgboost_default
+    kind: model
+    title: XGBoost с параметрами по умолчанию
+    rationale: Другой бустинг (рост деревьев по уровням, а не по листьям) — часто лучше на шумных данных и разнообразнее для ансамбля
+    params: {model: xgboost}
+
+  - id: catboost_default
+    kind: model
+    title: CatBoost с параметрами по умолчанию
+    rationale: Симметричные деревья и упорядоченный target encoding категорий — сильный выбор при многих категориях
+    requires: categorical
+    params: {model: catboost}
+
+  - id: hist_gb_default
+    kind: model
+    title: HistGradientBoosting из scikit-learn
+    rationale: Самый быстрый бустинг с нативными категориями — запасной вариант при большом объёме данных
+    params: {model: hist_gb}
+
+  - id: linear_default
+    kind: model
+    title: Линейная модель (Ridge / LogisticRegression)
+    rationale: Экстраполирует за пределы train и не запоминает объекты — полезна при сдвиге test и как противовес бустингам
+    params: {model: linear}
