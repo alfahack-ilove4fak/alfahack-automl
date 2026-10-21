@@ -9,7 +9,7 @@
 | `budget.py` | `RunBudget` из переменных окружения, доли времени по этапам (`plan_stages`), память (с учётом лимита Docker) |
 | `watchdog.py` | сторож: жёсткий дедлайн и сигналы SIGTERM/SIGINT → проверить `submission.csv` и завершить процесс |
 | `log.py` | единый лог: stderr + `runs/.../agent.log`, время от старта в каждой строке |
-| (план) `sandbox.py` | запуск кода от LLM в отдельном процессе с таймаутом и лимитом памяти |
+| `sandbox.py` | `run_code(code, workdir, timeout, mem_mb) -> CodeResult`: код от LLM в отдельном процессе, таймаут, лимит памяти (Linux, mem_mb ≥ 2048 для pandas), чистое окружение |
 
 ## Правила
 - `solution.py` — тонкий: логика — в модулях. Интерфейс строго как в `reference/baseline.py` (argv[1] = путь к task.md, env `OPENAI_*`).

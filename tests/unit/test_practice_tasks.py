@@ -11,7 +11,7 @@ from agent.task_parser import parse_task
 PRACTICE = Path(__file__).resolve().parents[2] / "tasks" / "practice"
 MANIFEST = json.loads((PRACTICE / "_answers" / "manifest.json").read_text(encoding="utf-8"))
 # Известные проблемы агента, которые тренировочные задачи и должны ловить. Починили — убрать отсюда.
-KNOWN_PARSER_BUGS: dict[str, str] = {}  # «we do NOT use it» починен веткой agent/metric-guard (#83, #85)
+KNOWN_PARSER_BUGS: dict[str, str] = {}  # ловушку с метрикой в network_binary_logloss_crooked починили в #104
 
 
 def _cases():
