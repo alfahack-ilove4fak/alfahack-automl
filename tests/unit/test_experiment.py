@@ -307,3 +307,16 @@ def test_big_synthetic_fits_budget():
     print(f"\n1.5 млн строк: {result.status.value}, {time.time() - started:.0f} с, RAM {result.peak_ram_mb:.0f} МБ")
     assert result.status == ExperimentStatus.OK, result.error
     assert time.time() - started < budget.total_seconds
+
+
+def test_split_when_all_classes_are_rare():
+    from ml.experiment import _split
+
+    spec, _, _ = _multiclass_with_rare_class()
+    y = np.array([0, 0, 0, 1, 1, 1, 2, 2, 2])  # по 3 объекта, а фолдов 5
+
+    folds = _split(spec, y, 5)
+
+    assert len(folds) == 3
+    for tr, va in folds:
+        assert set(y[tr]) == {0, 1, 2} and len(va) == 3

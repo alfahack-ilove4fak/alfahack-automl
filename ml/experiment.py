@@ -330,8 +330,14 @@ def _split(spec: TaskSpec, y: np.ndarray, n_folds: int) -> list[tuple[np.ndarray
     if not _is_classification(spec):
         return list(KFold(n_folds, shuffle=True, random_state=SEED).split(idx))
     counts = pd.Series(y).value_counts()
+    if (counts < n_folds).all():
+        # Все классы редкие — не на чем делить: фолдов столько, сколько объектов в самом малом классе (≥ 2)
+        n_folds = max(2, int(counts.min()))
+        log.info("Во всех классах меньше объектов, чем фолдов — CV на %d фолдах", n_folds)
     rare = np.isin(y, counts.index[counts < n_folds].to_numpy())
     common = idx[~rare]
+    if len(np.unique(y[common])) < 2:
+        raise ValueError("слишком мало объектов на класс для кросс-валидации")
     if rare.any():
         log.info("Редкие классы (< %d объектов): %d строк всегда в обучении, в валидацию не идут", n_folds, rare.sum())
     splitter = StratifiedKFold(n_folds, shuffle=True, random_state=SEED)
