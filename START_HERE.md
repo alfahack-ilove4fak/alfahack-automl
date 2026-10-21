@@ -8,7 +8,7 @@
 | **Твоя зона** | `ml/` — данные, модели, кросс-валидация, финальное обучение |
 | **Твой пакет роли** | [docs/roles/ml.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/docs/roles/ml.md) — что установить, инструменты, задачи L0–L3, Claude Code |
 | **Проверенные материалы** | [docs/resources/ml.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/docs/resources/ml.md) |
-| **Тебя ревьюит** | капитан @thenlaooo — пока в команде нет роли «Исследователь / Data Scientist» |
+| **Тебя ревьюит** | @Richi-Marqez (Исследователь / Data Scientist) |
 
 ## 1. Что скачать и как проверить готовность (≈ 1 час)
 
