@@ -257,6 +257,27 @@ def _predict(spec: TaskSpec, model, x: pd.DataFrame, log_target: bool):
     return proba.argmax(axis=1)
 
 
+def _split(spec: TaskSpec, y: np.ndarray, n_folds: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Индексы (train, valid) фолдов: KFold для регрессии, StratifiedKFold для классов.
+
+    Объекты редких классов (меньше n_folds штук) всегда в train-части каждого фолда и не попадают в валидацию:
+    иначе в части фолдов модель не увидит класс и упадёт («unseen labels», XGBoost требует все метки 0..K-1).
+    Без редких классов разбиение то же, что у StratifiedKFold на всех данных, — скоры сравнимы со старыми.
+    """
+    idx = np.arange(len(y))
+    if not _is_classification(spec):
+        return list(KFold(n_folds, shuffle=True, random_state=SEED).split(idx))
+    counts = pd.Series(y).value_counts()
+    rare = np.isin(y, counts.index[counts < n_folds].to_numpy())
+    common = idx[~rare]
+    if rare.any():
+        log.info("Редкие классы (< %d объектов): %d строк всегда в обучении, в валидацию не идут", n_folds, rare.sum())
+    splitter = StratifiedKFold(n_folds, shuffle=True, random_state=SEED)
+    return [
+        (np.sort(np.concatenate([common[tr], idx[rare]])), common[va]) for tr, va in splitter.split(common, y[common])
+    ]
+
+
 def run_experiment(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, budget: RunBudget
 ) -> ExperimentResult:
@@ -269,9 +290,8 @@ def run_experiment(
         x, _ = make_matrix(profile, train, train.head(0))
         y = _encode_target(spec, train[spec.target])
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
-        splitter = (StratifiedKFold if _is_classification(spec) else KFold)(n_folds, shuffle=True, random_state=SEED)
         scores, best_iters = [], []
-        for fold, (tr, va) in enumerate(splitter.split(x, y)):
+        for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
             if not budget.has_time():
                 return ExperimentResult(
                     hypothesis_id=hypothesis.id,
