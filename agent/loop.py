@@ -1,7 +1,7 @@
 """Цикл AutoResearch: гипотеза → эксперимент → оценка → решение. Владелец — LLM/agent-инженер.
 
-Правило принятия: новая гипотеза принимается, только если она лучше текущей лучшей
-с запасом min_delta (часть разброса по фолдам). Это защита от «улучшений», которые являются шумом.
+Правило принятия — agent/acceptance.py: попарное сравнение по фолдам со скорректированным t-тестом
+(ADR 0008). Это защита от «улучшений», которые являются шумом.
 """
 
 from __future__ import annotations
@@ -10,18 +10,13 @@ from collections.abc import Callable
 
 import pandas as pd
 
+from agent.acceptance import accept
 from agent.hypotheses import propose_hypotheses
 from interfaces.schemas import DataProfile, ExperimentResult, ExperimentStatus, Hypothesis, RunBudget, TaskSpec
 from ml.experiment import run_experiment
 from runtime.log import get_logger
 
 log = get_logger("loop")
-
-NOISE_FACTOR = 0.25  # какую долю std лучшего результата считаем шумом
-
-
-def min_delta(best: ExperimentResult | None) -> float:
-    return NOISE_FACTOR * (best.std_score or 0.0) if best else 0.0
 
 
 def run_autoresearch(
@@ -51,10 +46,11 @@ def run_autoresearch(
         if result.status != ExperimentStatus.OK:
             log.info("  ✗ %s: %s", result.status.value, result.error)
             continue
-        if result.beats(best[1], gib, min_delta(best[1])):
-            log.info("  ✓ лучше: %.5f → %.5f", best[1].mean_score, result.mean_score)
+        accepted, reason = accept(result, best[1], gib)
+        if accepted:
+            log.info("  ✓ лучше: %.5f → %.5f — %s", best[1].mean_score, result.mean_score, reason)
             best = (hyp, result)
             on_new_best(hyp, result)
         else:
-            log.info("  · не лучше: %.5f (лучший %.5f)", result.mean_score, best[1].mean_score)
+            log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
     return best
