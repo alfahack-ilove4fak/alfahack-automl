@@ -62,3 +62,22 @@ def test_harness_run_on_public_task(tmp_path):
     row = board.iloc[0]
     assert row.status == "OK" and row.metric == "f1_macro"
     assert 0 <= row.score <= 100 and row.value > row.baseline
+
+
+def test_agent_root_runs_other_agent(tmp_path):
+    """--agent-root: харнесс запускает solution.py из другой папки (так считается «было» в PR-отчёте)."""
+    agent = tmp_path / "other_agent"
+    agent.mkdir()
+    (agent / "solution.py").write_text(
+        "import shutil, sys\nfrom pathlib import Path\n"
+        "task = Path(sys.argv[1]).parent\n"
+        "shutil.copy(task / 'sample_submission.csv', task / 'submission.csv')\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "leaderboard.csv"
+    task = ROOT / "tasks" / "public" / "multiclass" / "task.md"
+    main(["--task", str(task), "--minutes", "0.5", "--rows", "1500", "--agent-root", str(agent), "--out", str(out)])
+    row = pd.read_csv(out).iloc[0]
+    # Ответ-копия шаблона валиден, но это константа — балл 0, а не балл настоящего агента
+    assert row.status == "OK" and row.score == 0
+    assert row.seconds < 30
