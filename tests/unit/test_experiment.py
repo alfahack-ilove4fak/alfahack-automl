@@ -592,3 +592,25 @@ def test_fold_proba_has_all_classes_when_train_part_misses_one():
     assert proba.shape == (20, 3)
     assert (proba[:, 1] == 0).all()
     assert np.allclose(proba.sum(axis=1), 1.0)
+
+
+def test_optuna_tunes_on_the_same_validation_scheme(monkeypatch):
+    """Ревью #115: подбор на KFold оптимизирует утечку — фолды подбора должны идти по схеме гипотезы (здесь время)."""
+    import ml.tuning
+
+    seen = {}
+
+    def fake_tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget, split=None):
+        seen["folds"] = split(np.arange(len(y)), 3)
+        return {}
+
+    monkeypatch.setattr(ml.tuning, "tune", fake_tune)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    train["year"] = np.repeat([1, 2, 3, 4, 5, 6], len(train) // 6)
+    profile = profile.model_copy(update={"numeric_features": [*profile.numeric_features, "year"]})
+    hyp = _hyp(validation="time:year", optuna={"trials": 2}, model_params={"n_estimators": 20})
+
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    for tr, va in seen["folds"]:
+        assert train["year"].iloc[tr].max() < train["year"].iloc[va].min()

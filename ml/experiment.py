@@ -465,14 +465,18 @@ def run_experiment(
             train, y = train.iloc[rows], y[rows]
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
+        scheme, column = parse_validation(params.get("validation"), spec)
+        features = profile.numeric_features + profile.categorical_features
         if params.get("optuna") and "_optuna_best" not in params:
             from ml.tuning import tune  # здесь: tuning сам импортирует этот модуль
 
-            best = tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget)
+            # Подбор — на той же схеме валидации, что и CV: на KFold он оптимизировал бы утечку (ревью #115)
+            def split(rows: np.ndarray, k: int) -> list[tuple[np.ndarray, np.ndarray]]:
+                return make_folds(spec, scheme, column, train.iloc[rows], features, y[rows], k, _split)
+
+            best = tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget, split=split)
             params["_optuna_best"] = best  # повторный запуск той же гипотезы не подбирает заново
             params["model_params"] = {**(params.get("model_params") or {}), **best}
-        scheme, column = parse_validation(params.get("validation"), spec)
-        features = profile.numeric_features + profile.categorical_features
         folds = make_folds(spec, scheme, column, train, features, y, n_folds, _split)
         n_folds = len(folds)  # group/time могут дать меньше фолдов, чем просили
         validation = f"{scheme}:{column}-{n_folds}" if column else f"{scheme}-{n_folds}"
