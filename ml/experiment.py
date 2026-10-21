@@ -1,5 +1,9 @@
 """Эксперимент = гипотеза → кросс-валидация → ExperimentResult. Владелец — ML-pipeline инженер.
 
+Защита по времени и памяти (без params, всегда): CV идёт на подвыборке, если строк больше MAX_CV_ROWS или матрица
+не помещается в свободную память; после первого фолда — прогноз, и если остальные не успеют, эксперимент
+останавливается с TIMEOUT. Подвыборка детерминированная — все гипотезы видят одни и те же строки.
+
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
   model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
                    hist_gb — HistGradientBoosting из scikit-learn: самый быстрый бустинг, категории нативно
@@ -11,6 +15,7 @@
   n_folds        — число фолдов (по умолчанию 5)
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
   class_weight   — для классификации: "balanced" или None
+
 """
 
 from __future__ import annotations
@@ -58,6 +63,9 @@ BASE_PARAMS = {
     "n_jobs": -1,
 }
 EARLY_STOPPING = 100
+MAX_CV_ROWS = 500_000  # больше строк для сравнения гипотез не нужно: скор стабилен, а время растёт линейно
+MIN_CV_ROWS = 1_000  # меньше — оценка бессмысленна, лучше честно упасть по памяти
+RAM_FACTOR = 6  # пик памяти эксперимента ≈ RAM_FACTOR × размер матрицы (копии фолдов, бины и деревья модели)
 # Скорость подобрана на public/multiclass (10 классов, 87 тыс. строк, 1 фолд): по умолчанию ~30 мин на фолд,
 # с этими настройками 142 с и Macro F1 0.552. max_ctr_complexity=1 — без комбинаций категорий (×2 быстрее),
 # rsm=0.3 — 30% признаков на выбор разбиения (×2.5), learning_rate 0.15 — меньше итераций до ранней остановки
@@ -332,6 +340,40 @@ def _split(spec: TaskSpec, y: np.ndarray, n_folds: int) -> list[tuple[np.ndarray
     ]
 
 
+def _sample_rows(spec: TaskSpec, y: np.ndarray, size: int) -> np.ndarray:
+    """Детерминированная подвыборка size строк; для классов — пропорционально, редкие классы не теряются."""
+    rng = np.random.default_rng(SEED)
+    if not _is_classification(spec):
+        return np.sort(rng.choice(len(y), size, replace=False))
+    frac = size / len(y)
+    parts = []
+    for cls in np.unique(y):
+        rows = np.flatnonzero(y == cls)
+        keep = min(len(rows), max(round(len(rows) * frac), 10))
+        parts.append(rng.choice(rows, keep, replace=False))
+    return np.sort(np.concatenate(parts))
+
+
+def _cv_rows(spec: TaskSpec, profile: DataProfile, y: np.ndarray, budget: RunBudget) -> np.ndarray | None:
+    """Строки для CV или None — все. Ограничения: MAX_CV_ROWS и свободная память (оценка до построения матрицы)."""
+    n = len(y)
+    n_cols = max(len(profile.numeric_features) + len(profile.categorical_features), 1)
+    need_mb = RAM_FACTOR * n * n_cols * 4 / 2**20  # признаки — float32
+    free_mb = budget.ram_limit_mb - used_ram_mb()
+    limit, reason = MAX_CV_ROWS, f"строк больше {MAX_CV_ROWS}"
+    if need_mb > free_mb:
+        by_ram = int(n * max(free_mb, 0) / need_mb)
+        if by_ram < limit:
+            limit, reason = by_ram, f"нужно ~{need_mb:.0f} МБ, свободно {free_mb:.0f} МБ"
+    if n <= limit:
+        return None
+    if limit < MIN_CV_ROWS:
+        raise MemoryError(f"не хватает памяти даже на {MIN_CV_ROWS} строк: {reason}")
+    rows = _sample_rows(spec, y, limit)
+    log.warning("CV на подвыборке %d из %d строк: %s", len(rows), n, reason)
+    return rows
+
+
 def run_experiment(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, budget: RunBudget
 ) -> ExperimentResult:
@@ -341,11 +383,15 @@ def run_experiment(
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
     n_folds = int(params.get("n_folds", 5))
     try:
-        x, _ = make_matrix(profile, train, train.head(0))
         y = _encode_target(spec, train[spec.target])
+        rows = _cv_rows(spec, profile, y, budget)
+        if rows is not None:
+            train, y = train.iloc[rows], y[rows]
+        x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scores, best_iters = [], []
         for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
+            fold_started = time.time()
             if not budget.has_time():
                 return ExperimentResult(
                     hypothesis_id=hypothesis.id,
@@ -359,6 +405,19 @@ def run_experiment(
             best_iters.append(best_iter)
             scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x.iloc[va], log_target)))
             peak = max(peak, used_ram_mb())
+            if fold == 0 and n_folds > 1:
+                # Прогноз по первому фолду: не успеем остальные — стоп сейчас, а не через час на последнем фолде
+                forecast = (time.time() - fold_started) * (n_folds - 1)
+                if forecast > budget.seconds_left():
+                    return ExperimentResult(
+                        hypothesis_id=hypothesis.id,
+                        status=ExperimentStatus.TIMEOUT,
+                        metric_name=spec.metric.name,
+                        fold_scores=[float(s) for s in scores],
+                        fit_seconds=time.time() - started,
+                        peak_ram_mb=peak,
+                        error=f"не успеет: прогноз ещё {forecast:.0f} с, осталось {budget.seconds_left():.0f} с",
+                    )
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
         return ExperimentResult(
             hypothesis_id=hypothesis.id,
