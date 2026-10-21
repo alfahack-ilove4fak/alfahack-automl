@@ -37,6 +37,33 @@ def test_public_tasks_parsed(folder, task_type, target, metric, n_classes):
         ("Метрика: MAE", "mae"),
         ("Оцениваем по log loss", "logloss"),
         ("Без метрики", None),
+        # Дополнительная метрика стоит раньше основной — побеждает та, что после «основная метрика»
+        ("Дополнительно смотрим на Accuracy, но основная метрика — Macro F1", "f1_macro"),
+        # «mse» не должна находиться внутри «rmse» и наоборот
+        ("Метрика оценки: MSE (не путать с RMSE)", "mse"),
+        # «weighted f1» не должна проиграть простому «f1-score»
+        ("Submissions are scored using Weighted F1-score.", "f1_weighted"),
+        # Пока не находятся — чинить в задаче Q-L1-3 (реестр метрик), затем убрать xfail
+        pytest.param(
+            "Решения оцениваются по средней абсолютной ошибке",
+            "mae",
+            marks=pytest.mark.xfail(strict=True, reason="нет падежных форм в aliases"),
+        ),
+        pytest.param(
+            "Evaluation metric: Root Mean Squared Logarithmic Error",
+            "rmsle",
+            marks=pytest.mark.xfail(strict=True, reason="нет полного названия в aliases"),
+        ),
+        pytest.param(
+            "Submissions are evaluated on area under the ROC curve",
+            "roc_auc",
+            marks=pytest.mark.xfail(strict=True, reason="нет «area under the roc curve» в aliases"),
+        ),
+        pytest.param(
+            "Метрика — macro-averaged F1",
+            "f1_macro",
+            marks=pytest.mark.xfail(strict=True, reason="нет «macro-averaged f1» в aliases"),
+        ),
     ],
 )
 def test_find_metric_in_text(text, expected):
