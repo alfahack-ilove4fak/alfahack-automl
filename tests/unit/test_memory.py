@@ -156,3 +156,23 @@ def test_loop_reflects_only_after_fully_failed_batch(spec, profile, monkeypatch)
     assert list(memory.verdicts.values()).count("принята") == 1
     assert len(memory.verdicts) == 7
     assert "- Регуляризация не помогла" in llm.last_messages[1]["content"]  # вывод попал в промпт
+
+
+def test_best_mark_follows_accepted_not_best_mean():
+    # big_leaves: среднее лучше бейзлайна, но правило его отклонило — «(лучший)» остаётся у бейзлайна
+    history = [step(0, 41.810), step(1, 41.651)]
+    memory = ResearchMemory(best_id="h0")
+    memory.record("h1", False, "t=1.12 < 2.0")
+    text = prompting.describe_history(history, greater_is_better=False, memory=memory)
+    assert "41.81000 ± 0.10000 (лучший)" in text
+    assert "41.65100 ± 0.10000 |" in text  # без метки
+    memory.record("h1", True)
+    assert memory.best_id == "h1"
+    assert "41.65100 ± 0.10000 (лучший)" in prompting.describe_history(history, False, memory)
+
+
+def test_accepted_best_always_shown_in_long_history():
+    history = [step(0, 40.0)] + [step(i, 30.0 + i % 3) for i in range(1, 40)]  # много «лучших по среднему»
+    memory = ResearchMemory(best_id="h0")
+    text = prompting.describe_history(history, greater_is_better=False, memory=memory)
+    assert "| h0 |" in text and "(лучший)" in text.split("| h0 |")[1].split("\n")[0]

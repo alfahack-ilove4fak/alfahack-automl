@@ -108,12 +108,16 @@ def describe_history(
         return "Пока не было ни одного эксперимента."
     scored = [i for i, (_, r) in enumerate(history) if r.status == ExperimentStatus.OK and r.mean_score is not None]
     scored.sort(key=lambda i: history[i][1].mean_score, reverse=greater_is_better)
-    keep = sorted(set(scored[:best_k]) | set(range(max(0, len(history) - last_n), len(history))))
+    # «лучший» — тот, кого принял цикл (memory.best_id), а не максимум среднего: после правила принятия
+    # шумовая гипотеза может иметь лучшее среднее и быть отклонённой (ревью #95)
+    best_id = memory.best_id if memory and memory.best_id else (history[scored[0]][0].id if scored else None)
+    best_rows = {i for i, (h, _) in enumerate(history) if h.id == best_id}
+    keep = sorted(set(scored[:best_k]) | best_rows | set(range(max(0, len(history) - last_n), len(history))))
     verdicts = memory.verdicts if memory else {}
     rows = ["| id | kind | params | результат | решение |", "|---|---|---|---|---|"]
     for i in keep:
         hyp, res = history[i]
-        mark = " (лучший)" if scored and i == scored[0] else ""
+        mark = " (лучший)" if i in best_rows else ""
         params = json.dumps(hyp.params, ensure_ascii=False)
         verdict = verdicts.get(hyp.id, "—")
         rows.append(f"| {hyp.id} | {hyp.kind.value} | {params} | {_outcome(res)}{mark} | {verdict} |")
