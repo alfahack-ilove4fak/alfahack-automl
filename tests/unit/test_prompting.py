@@ -128,3 +128,8 @@ def test_unknown_placeholder_returns_none(spec, profile, monkeypatch, tmp_path):
     (tmp_path / "hypotheses.md").write_text("$task $опечатка_в_имени", encoding="utf-8")
     monkeypatch.setattr(prompting, "PROMPTS_DIR", tmp_path)
     assert prompting.build_hypothesis_messages(spec, profile, []) is None
+
+
+def test_prompt_asks_for_diverse_batch(spec, profile):
+    # прогон с настоящим Qwen: 2 из 3 гипотез были про log1p — пачка должна быть из разных направлений
+    assert "разных направлений" in user_prompt(spec, profile)
