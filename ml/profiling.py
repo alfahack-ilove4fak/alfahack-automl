@@ -25,6 +25,24 @@ def load_data(spec: TaskSpec) -> tuple[pd.DataFrame, pd.DataFrame]:
     return train, test
 
 
+LOG_SCALE_METRICS = {"rmsle", "msle"}  # ошибка считается на log1p(y): обучение на log1p(target) совпадает с метрикой
+
+
+def _skew_warning(skew: float, metric: str, non_negative: bool) -> str:
+    """Факт о скошенности и что он значит для метрики задачи. Это читает LLM — совет должен быть верным.
+
+    Для RMSLE/MSLE обучение на log1p(target) совпадает с метрикой. Для метрик в исходной шкале это смена цели:
+    на public/regression CV показывает проигрыш, а честная отложенная часть — выигрыш (docs/research/playbook-v1.md),
+    поэтому не советуем и не отговариваем — это гипотеза для проверки.
+    """
+    if metric in LOG_SCALE_METRICS and non_negative:
+        return f"Скошенный target (skew={skew:.1f}); метрика {metric} считается в логарифмах — log1p(target) совпадает с ней"
+    return (
+        f"Скошенный target (skew={skew:.1f}); метрика {metric} — в исходной шкале: log1p(target) меняет "
+        "оптимизируемую цель — это одна гипотеза для проверки, а не правило"
+    )
+
+
 def profile_data(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> DataProfile:
     features = [c for c in train.columns if c not in (spec.target, spec.id_column) and c in test.columns]
     numeric, categorical, dropped, warnings = [], [], [], []
@@ -44,7 +62,7 @@ def profile_data(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> Dat
         target_summary = {k: float(v) for k, v in y.describe().items()}
         target_summary["skew"] = float(y.skew())
         if y.skew() > 2:
-            warnings.append("Сильно скошенный target — стоит попробовать log1p-преобразование")
+            warnings.append(_skew_warning(float(y.skew()), spec.metric.name, bool((y >= 0).all())))
     else:
         counts = y.astype(str).value_counts()
         target_summary = {"class_counts": counts.to_dict(), "imbalance_ratio": float(counts.max() / counts.min())}
