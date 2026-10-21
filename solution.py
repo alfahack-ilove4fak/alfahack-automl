@@ -59,8 +59,13 @@ def main(argv: list[str]) -> int:
             answer = fit_predict_final(spec, profile, hyp, train, test)
             write_submission_atomic(answer[spec.submission_columns], spec.submission_path)
             report = validate_submission(spec.submission_path, spec, test)
-            log.info("Сохранён ответ «%s» (CV %s=%.5f), проверка: %s", hyp.id, res.metric_name, res.mean_score,
-                     "OK" if report.ok else report.problems)
+            log.info(
+                "Сохранён ответ «%s» (CV %s=%.5f), проверка: %s",
+                hyp.id,
+                res.metric_name,
+                res.mean_score,
+                "OK" if report.ok else report.problems,
+            )
         except Exception:  # noqa: BLE001 — старый валидный ответ остаётся на месте
             log.exception("Не удалось сохранить ответ гипотезы %s", hyp.id)
 
@@ -74,12 +79,21 @@ def main(argv: list[str]) -> int:
         return 0
     save(base, base_result, profile)
 
-    best = run_autoresearch(spec, profile, train, budget, history, (base, base_result),
-                            on_new_best=lambda h, r: save(h, r, profile))
-    log.info("Готово за %.0f с. Лучшая гипотеза: %s (%s=%.5f), всего экспериментов: %d",
-             time.time() - started, best[0].id, best[1].metric_name, best[1].mean_score, len(history))
+    best = run_autoresearch(
+        spec, profile, train, budget, history, (base, base_result), on_new_best=lambda h, r: save(h, r, profile)
+    )
+    log.info(
+        "Готово за %.0f с. Лучшая гипотеза: %s (%s=%.5f), всего экспериментов: %d",
+        time.time() - started,
+        best[0].id,
+        best[1].metric_name,
+        best[1].mean_score,
+        len(history),
+    )
     return 0
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main(sys.argv))

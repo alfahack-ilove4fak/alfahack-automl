@@ -22,10 +22,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "docs" / "roles" / "tasks.yaml"
-REPO = "thenlaooo/alfahack-automl"
-OWNER = "thenlaooo"
-PROJECT_NUMBER = 2
-CAPTAIN = "thenlaooo"
+from team_config import BOARD_URL, CAPTAIN, PROJECT_ID_JQ, PROJECT_ID_QUERY, REPO  # noqa: E402
+
 LEVELS = {"L0": "L0 — разогрев", "L1": "L1 — базовые", "L2": "L2 — основные", "L3": "L3 — на победу"}
 MILESTONES = {
     "CP0": "CP0 Окружение готово",
@@ -45,12 +43,19 @@ def load_tasks() -> list[dict]:
 def team_members() -> dict[str, list[str]]:
     """роль → ники из docs/team.md (капитан — всегда)."""
     members: dict[str, list[str]] = {"captain": [CAPTAIN]}
-    titles = {"LLM/agent-инженер": "agent", "ML-pipeline инженер": "ml", "Исследователь / Data Scientist": "research",
-              "QA / MLOps": "qa", "Капитан / интегратор": "captain"}
+    titles = {
+        "LLM/agent-инженер": "agent",
+        "ML-pipeline инженер": "ml",
+        "Исследователь / Data Scientist": "research",
+        "QA / MLOps": "qa",
+        "Капитан / интегратор": "captain",
+    }
     for line in (ROOT / "docs" / "team.md").read_text(encoding="utf-8").splitlines():
         cells = [c.strip() for c in line.strip("|").split("|")]
         if len(cells) >= 3 and cells[1].startswith("@") and cells[2] in titles:
-            members.setdefault(titles[cells[2]], []).append(cells[1][1:])
+            nicks = members.setdefault(titles[cells[2]], [])
+            if cells[1][1:] not in nicks:
+                nicks.append(cells[1][1:])
     return members
 
 
@@ -107,14 +112,19 @@ def add_to_board(issue_url: str) -> None:
     """Добавить issue на доску. Через GraphQL: `gh project item-add` в gh 2.46 молча не срабатывает."""
     global _PROJECT_ID
     if _PROJECT_ID is None:
-        _PROJECT_ID = gh("api", "graphql", "-f",
-                         f'query={{user(login:"{OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
-                         "--jq", ".data.user.projectV2.id")
+        _PROJECT_ID = gh("api", "graphql", "-f", PROJECT_ID_QUERY, "--jq", PROJECT_ID_JQ)
     number = issue_url.rstrip("/").rsplit("/", 1)[-1]
     node_id = gh("api", f"repos/{REPO}/issues/{number}", "--jq", ".node_id")
-    gh("api", "graphql", "-f",
-       "query=mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}",
-       "-f", f"p={_PROJECT_ID}", "-f", f"c={node_id}")
+    gh(
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}",
+        "-f",
+        f"p={_PROJECT_ID}",
+        "-f",
+        f"c={node_id}",
+    )
 
 
 def board() -> int:
@@ -127,34 +137,61 @@ def board() -> int:
 
 
 def issue_body(t: dict) -> str:
-    return (task_markdown(t).split("\n", 2)[2]
-            + f"\n---\nРоль: `{t['role']}` · уровень {LEVELS[t['level']]} · чек-поинт {t['cp']}.\n"
-            f"Полный пакет роли: `docs/roles/{t['role']}.md`. Источник задачи: `docs/roles/tasks.yaml` ({t['id']}).")
+    return (
+        task_markdown(t).split("\n", 2)[2]
+        + f"\n---\nРоль: `{t['role']}` · уровень {LEVELS[t['level']]} · чек-поинт {t['cp']}.\n"
+        f"Полный пакет роли: `docs/roles/{t['role']}.md`. Источник задачи: `docs/roles/tasks.yaml` ({t['id']})."
+    )
 
 
 def issues(dry: bool) -> int:
     tasks = load_tasks()
     members = team_members()
-    existing = json.loads(gh("issue", "list", "--repo", REPO, "--state", "all", "--limit", "500",
-                             "--json", "title")) if not dry else []
+    existing = (
+        json.loads(gh("issue", "list", "--repo", REPO, "--state", "all", "--limit", "500", "--json", "title"))
+        if not dry
+        else []
+    )
     have = {m.group(1) for i in existing if (m := re.match(r"\[([A-Z]-L\d-\d+)\]", i["title"]))}
     created = 0
     if not any(i["title"].startswith("CP0: окружение готово") for i in existing):
         print("   + CP0: окружение готово — отметься здесь")
         if not dry:
-            url = gh("issue", "create", "--repo", REPO, "--title", "CP0: окружение готово — отметься здесь",
-                     "--milestone", MILESTONES["CP0"], "--label", "type:task", "--body",
-                     "Когда `uv run python scripts/doctor.py --role <роль>` показывает «✅ ГОТОВ К РАБОТЕ», "
-                     "оставь здесь комментарий: роль + последняя строка вывода doctor.\n\n"
-                     "Капитан закрывает issue, когда отметились все. Застрял — ONBOARDING.md и чат команды.")
+            url = gh(
+                "issue",
+                "create",
+                "--repo",
+                REPO,
+                "--title",
+                "CP0: окружение готово — отметься здесь",
+                "--milestone",
+                MILESTONES["CP0"],
+                "--label",
+                "type:task",
+                "--body",
+                "Когда `uv run python scripts/doctor.py --role <роль>` показывает «✅ ГОТОВ К РАБОТЕ», "
+                "оставь здесь комментарий: роль + последняя строка вывода doctor.\n\n"
+                "Капитан закрывает issue, когда отметились все. Застрял — ONBOARDING.md и чат команды.",
+            )
             add_to_board(url)
     for t in tasks:
         if t["id"] in have:
             continue
         title = f"[{t['id']}] {t['title']}"
         labels = [f"role:{t['role']}", f"level:{t['level']}", "type:task"] + (["handoff"] if t.get("handoff") else [])
-        args = ["issue", "create", "--repo", REPO, "--title", title, "--body", issue_body(t),
-                "--milestone", MILESTONES[t["cp"]], *sum((["--label", lb] for lb in labels), [])]
+        args = [
+            "issue",
+            "create",
+            "--repo",
+            REPO,
+            "--title",
+            title,
+            "--body",
+            issue_body(t),
+            "--milestone",
+            MILESTONES[t["cp"]],
+            *sum((["--label", lb] for lb in labels), []),
+        ]
         for nick in members.get(t["role"], []):
             args += ["--assignee", nick]
         print(f"   + {title}  [{', '.join(members.get(t['role'], [])) or 'без исполнителя'}]")
@@ -163,8 +200,10 @@ def issues(dry: bool) -> int:
         url = gh(*args)
         add_to_board(url)
         created += 1
-    print(f"✅ создано {created}, уже было {len(have & {t['id'] for t in tasks})}"
-          + (" (dry-run)" if dry else f". Доска: https://github.com/users/{OWNER}/projects/{PROJECT_NUMBER}"))
+    print(
+        f"✅ создано {created}, уже было {len(have & {t['id'] for t in tasks})}"
+        + (" (dry-run)" if dry else f". Доска: {BOARD_URL}")
+    )
     return 0
 
 
@@ -179,4 +218,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

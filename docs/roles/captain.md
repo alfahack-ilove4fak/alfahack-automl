@@ -17,6 +17,8 @@
 - **Теги сабмитов:** `git tag sub-ГГГГ-ММ-ДД-N origin/main && git push origin sub-ГГГГ-ММ-ДД-N`.
 - **PR с `interfaces/`** сливаешь ты, после одобрения всех затронутых владельцев.
 - **Подключение участника:** `python3 scripts/add_member.py --name <латиница> --github <ник> --role <роль>` → слить созданный PR.
+- **Кто принял приглашение:** `uv run python scripts/team_sync.py` — обновит статусы в `docs/team.md` и таблицу ролей (закоммить через PR).
+  Для себя `add_member.py` запускай только с `--skip-invite` — иначе скрипт «пригласит» тебя участником и понизит с владельца.
 - **Сторож веток** создаёт issue «⛔ Нарушение правил» — разбери: случайность → объяснить; нужно откатить → `git revert` в новом PR.
 - **Задачи на доске:** правишь `docs/roles/tasks.yaml` → `uv run python scripts/tasks.py render` → PR; новые задачи на доску — `uv run python scripts/tasks.py issues`.
 
@@ -34,7 +36,7 @@
 
 ## 3.4 Чек-лист задач
 
-Задачи также на доске (https://github.com/users/thenlaooo/projects/2).
+Задачи также на доске (https://github.com/orgs/alfahack-ilove4fak/projects/1).
 
 <!-- tasks:start (генерирует scripts/tasks.py render — не править руками) -->
 
@@ -72,10 +74,9 @@
 
 *Зачем:* Неясности в условиях могут стоить нам сабмита или баллов.
 
-1. В чат хакатона: script.py или solution.py в приложении 2?
-2. `baseline.py` импортирует `mcp`, которого нет в requirements.txt — он есть в контейнере?
-3. Точное время дедлайна; формат защиты; цена токенов Qwen (для учёта ₽ в агенте).
-4. Ответы — в docs/architecture.md (раздел «Важные факты») и в чат команды.
+1. `baseline.py` импортирует `mcp`, которого нет в requirements.txt — он есть в контейнере?
+2. {'Точное время дедлайна; формат защиты; цена токенов Qwen (для учёта ₽ в агенте). (script.py vs solution.py уже снят': 'reference/platform_instructions.md)'}
+3. Ответы — в docs/architecture.md (раздел «Важные факты») и в чат команды.
 
 **Готово, когда:**
 - [ ] Все ⚠️ в docs/architecture.md заменены на ответы организаторов.

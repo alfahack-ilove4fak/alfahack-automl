@@ -104,8 +104,13 @@ def parse_task(task_md: Path) -> TaskSpec:
         description=text,
         notes=notes,
     )
-    log.info("Задача: %s, target=%s, метрика=%s, классов=%s", task_type.value, target, metric.name,
-             len(class_labels) if class_labels else "-")
+    log.info(
+        "Задача: %s, target=%s, метрика=%s, классов=%s",
+        task_type.value,
+        target,
+        metric.name,
+        len(class_labels) if class_labels else "-",
+    )
     return spec
 
 

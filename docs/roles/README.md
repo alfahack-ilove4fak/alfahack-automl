@@ -1,14 +1,20 @@
 # Ролевые пакеты (пункт 3)
 
+<!-- team:start (генерирует scripts/team_sync.py — не править руками) -->
+
 | Роль | Пакет | Материалы | Кто сейчас |
 |---|---|---|---|
 | Капитан / интегратор | [captain.md](captain.md) | [resources/captain.md](../resources/captain.md) | @thenlaooo |
 | LLM/agent-инженер | [agent.md](agent.md) | [resources/agent.md](../resources/agent.md) | @n0h4ndy |
-| ML-pipeline инженер | [ml.md](ml.md) | [resources/ml.md](../resources/ml.md) | — |
-| Исследователь / DS | [research.md](research.md) | [resources/research.md](../resources/research.md) | — |
+| ML-pipeline инженер | [ml.md](ml.md) | [resources/ml.md](../resources/ml.md) | @marenkov17 |
+| Исследователь / Data Scientist | [research.md](research.md) | [resources/research.md](../resources/research.md) | @Richi-Marqez |
 | QA / MLOps | [qa.md](qa.md) | [resources/qa.md](../resources/qa.md) | @dzigoku-ku |
 
-Актуальный состав — [docs/team.md](../team.md).
+⏳ — приглашение в организацию ещё не принято.
+
+<!-- team:end -->
+
+Полный состав с личными ветками — [docs/team.md](../team.md). Обновить статусы: `uv run python scripts/team_sync.py`.
 
 ## Что в каждом пакете
 
@@ -28,4 +34,4 @@ uv run python scripts/tasks.py render     # обновить чек-листы �
 uv run python scripts/tasks.py issues     # завести недостающие задачи на доске
 ```
 Уровни: **L0** — разогрев (первый час), **L1** — базовые, **L2** — основные, **L3** — «на победу».
-Роли без человека (ml, research): их L0–L1 в первые дни берут капитан и свободные участники по договорённости на стендапе.
+Если у роли нет человека — её задачи L0–L1 берут капитан и свободные участники по договорённости на стендапе.

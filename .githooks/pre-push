@@ -1,11 +1,32 @@
 #!/bin/sh
 # Обёртка: находит Python и запускает настоящую проверку.
 # Git for Windows тоже исполняет такие sh-хуки, поэтому работает на всех ОС.
-HOOK="$(git rev-parse --show-toplevel)/scripts/hooks/pre_push.py"
-for py in python3 python py; do
-  if command -v "$py" >/dev/null 2>&1; then
+#
+# Порядок поиска важен для Windows: uv ставит только python3.12, а «python»/«python3»
+# там часто — заглушки Microsoft Store (папка WindowsApps), которые не запускают код.
+ROOT="$(git rev-parse --show-toplevel)"
+HOOK="$ROOT/scripts/hooks/pre_push.py"
+
+# 1) Python из окружения проекта (есть у всех после «uv sync»)
+for py in "$ROOT/.venv/Scripts/python.exe" "$ROOT/.venv/bin/python"; do
+  if [ -x "$py" ]; then
     exec "$py" "$HOOK" "$@"
   fi
 done
-echo "pre-push: не найден Python. Установите его (см. docs/install.md) или запустите: uv run python scripts/doctor.py" >&2
+
+# 2) uv сам найдёт Python 3.12
+if command -v uv >/dev/null 2>&1; then
+  exec uv run --no-sync --quiet python "$HOOK" "$@"
+fi
+
+# 3) системный Python, но не заглушки Microsoft Store
+for py in python3.12 python3 python py; do
+  path="$(command -v "$py" 2>/dev/null)"
+  case "$path" in
+    ""|*WindowsApps*) continue ;;
+  esac
+  exec "$path" "$HOOK" "$@"
+done
+
+echo "pre-push: не найден Python. Выполните в папке проекта: uv sync   (см. docs/install.md)" >&2
 exit 1

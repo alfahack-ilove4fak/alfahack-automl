@@ -34,8 +34,17 @@ from runtime.log import get_logger
 log = get_logger("experiment")
 
 SEED = 42
-BASE_PARAMS = {"n_estimators": 3000, "learning_rate": 0.05, "num_leaves": 63, "subsample": 0.8,
-               "subsample_freq": 1, "colsample_bytree": 0.8, "random_state": SEED, "verbose": -1, "n_jobs": -1}
+BASE_PARAMS = {
+    "n_estimators": 3000,
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "subsample": 0.8,
+    "subsample_freq": 1,
+    "colsample_bytree": 0.8,
+    "random_state": SEED,
+    "verbose": -1,
+    "n_jobs": -1,
+}
 EARLY_STOPPING = 100
 
 
@@ -84,26 +93,44 @@ def run_experiment(
         scores, best_iters = [], []
         for fold, (tr, va) in enumerate(splitter.split(x, y)):
             if not budget.has_time():
-                return ExperimentResult(hypothesis_id=hypothesis.id, status=ExperimentStatus.TIMEOUT,
-                                        metric_name=spec.metric.name, fold_scores=scores,
-                                        fit_seconds=time.time() - started, error=f"кончилось время на фолде {fold}")
+                return ExperimentResult(
+                    hypothesis_id=hypothesis.id,
+                    status=ExperimentStatus.TIMEOUT,
+                    metric_name=spec.metric.name,
+                    fold_scores=scores,
+                    fit_seconds=time.time() - started,
+                    error=f"кончилось время на фолде {fold}",
+                )
             model = _make_model(spec, hypothesis)
-            model.fit(x.iloc[tr], y_fit[tr], eval_set=[(x.iloc[va], y_fit[va])],
-                      callbacks=[lgb.early_stopping(EARLY_STOPPING, verbose=False)])
+            model.fit(
+                x.iloc[tr],
+                y_fit[tr],
+                eval_set=[(x.iloc[va], y_fit[va])],
+                callbacks=[lgb.early_stopping(EARLY_STOPPING, verbose=False)],
+            )
             best_iters.append(model.best_iteration_ or BASE_PARAMS["n_estimators"])
             scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x.iloc[va], log_target)))
             peak = max(peak, used_ram_mb())
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
         return ExperimentResult(
-            hypothesis_id=hypothesis.id, status=ExperimentStatus.OK, metric_name=spec.metric.name,
-            fold_scores=[float(s) for s in scores], mean_score=float(np.mean(scores)),
-            std_score=float(np.std(scores)), fit_seconds=time.time() - started, peak_ram_mb=peak,
+            hypothesis_id=hypothesis.id,
+            status=ExperimentStatus.OK,
+            metric_name=spec.metric.name,
+            fold_scores=[float(s) for s in scores],
+            mean_score=float(np.mean(scores)),
+            std_score=float(np.std(scores)),
+            fit_seconds=time.time() - started,
+            peak_ram_mb=peak,
         )
     except Exception as exc:  # noqa: BLE001 — упавшая гипотеза не должна ронять агента
         log.exception("Гипотеза %s упала", hypothesis.id)
-        return ExperimentResult(hypothesis_id=hypothesis.id, status=ExperimentStatus.FAILED,
-                                metric_name=spec.metric.name, fit_seconds=time.time() - started,
-                                error=f"{type(exc).__name__}: {exc}")
+        return ExperimentResult(
+            hypothesis_id=hypothesis.id,
+            status=ExperimentStatus.FAILED,
+            metric_name=spec.metric.name,
+            fit_seconds=time.time() - started,
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def fit_predict_final(

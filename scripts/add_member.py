@@ -1,7 +1,7 @@
 """Подключить нового участника команды одной командой (запускает капитан).
 
 Что делает:
-  1. Отправляет приглашение в репозиторий (коллаборатор с правом записи).
+  1. Приглашает в организацию (у её участников право записи в репозиторий).
   2. Даёт доступ на запись к доске задач (GitHub Projects).
   3. Создаёт личную ветку team/<имя> от dev и кладёт туда START_HERE.md
      (из шаблона docs/templates/START_HERE.md.tmpl: роль, зона, ревьюер, первая задача, стыковки).
@@ -29,7 +29,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-PROJECT_OWNER, PROJECT_NUMBER = "thenlaooo", 2
+from team_config import BOARD_URL, CAPTAIN, INVITATION_URL, ORG, PROJECT_ID_JQ, PROJECT_ID_QUERY  # noqa: E402
+
 TEMPLATE = Path("docs/templates/START_HERE.md.tmpl")
 TEAM_FILE = Path("docs/team.md")
 CODEOWNERS = Path(".github/CODEOWNERS")
@@ -52,16 +53,16 @@ ZONES = {
 REVIEWER_ROLE = {"captain": "qa", "agent": "ml", "ml": "research", "research": "ml", "qa": "captain"}
 PARTNERS = {
     "captain": "- **qa** — проверка перед каждым сабмитом и релизы `dev → main`.\n"
-               "- **agent** — цикл AutoResearch и бюджет времени.\n- **все** — стендап, окна интеграции, контракты.",
+    "- **agent** — цикл AutoResearch и бюджет времени.\n- **все** — стендап, окна интеграции, контракты.",
     "agent": "- **ml** — ежедневно в 13:00: формат гипотез (`Hypothesis.params`).\n"
-             "- **research** — 22.10 13:00: playbook v1 (примеры гипотез).\n"
-             "- **капитан** — ключ LLM (лично), песочница для кода LLM, доли бюджета.",
+    "- **research** — 22.10 13:00: playbook v1 (примеры гипотез).\n"
+    "- **капитан** — ключ LLM (лично), песочница для кода LLM, доли бюджета.",
     "ml": "- **agent** — ежедневно в 13:00: какие `params` ты поддерживаешь.\n"
-          "- **research** — схема валидации, идеи признаков и моделей.\n- **капитан** — финальное обучение и бюджет.",
+    "- **research** — схема валидации, идеи признаков и моделей.\n- **капитан** — финальное обучение и бюджет.",
     "research": "- **agent** — 22.10 13:00: playbook v1.\n- **qa** — 22.10 18:30: тренировочные задачи.\n"
-                "- **ml** — валидация и признаки.\n- **все** — каждый вечер материал для питча.",
+    "- **ml** — валидация и признаки.\n- **все** — каждый вечер материал для питча.",
     "qa": "- **research** — 22.10 18:30: тренировочные задачи для харнесса.\n"
-          "- **капитан** — проверка перед каждым сабмитом.\n- **все** — помогаешь пройти CP0, разбираешь красный CI.",
+    "- **капитан** — проверка перед каждым сабмитом.\n- **все** — помогаешь пройти CP0, разбираешь красный CI.",
 }
 
 
@@ -87,11 +88,21 @@ def build_context(name: str, github: str, role: str) -> dict:
     members = team_members()
     rev_role = REVIEWER_ROLE[role]
     rev = members.get(rev_role, [])
-    reviewer = (", ".join(f"@{n}" for n in rev) + f" ({ROLES[rev_role]})" if rev
-                else f"капитан @{PROJECT_OWNER} — пока в команде нет роли «{ROLES[rev_role]}»")
-    return {"name": name, "github": github, "role": role, "role_title": ROLES[role], "zone": ZONES[role],
-            "reviewer": reviewer, "partners": PARTNERS[role],
-            "first_task": f"{first['id']} · {first['title']}" if first else "см. /next-task"}
+    reviewer = (
+        ", ".join(f"@{n}" for n in rev) + f" ({ROLES[rev_role]})"
+        if rev
+        else f"капитан @{CAPTAIN} — пока в команде нет роли «{ROLES[rev_role]}»"
+    )
+    return {
+        "name": name,
+        "github": github,
+        "role": role,
+        "role_title": ROLES[role],
+        "zone": ZONES[role],
+        "reviewer": reviewer,
+        "partners": PARTNERS[role],
+        "first_task": f"{first['id']} · {first['title']}" if first else "см. /next-task",
+    }
 
 
 def render_start_here(worktree: Path, ctx: dict, old: str | None = None) -> str:
@@ -121,23 +132,40 @@ def add_team_row(text: str, ctx: dict) -> str:
         text = (
             "# Состав команды\n\n"
             "Файл обновляет `scripts/add_member.py`. Роли и ответственность — `docs/roles/`.\n\n"
-            "| Имя | GitHub | Роль | Личная ветка |\n|---|---|---|---|\n"
+            "| Имя | GitHub | Роль | Личная ветка | Статус |\n|---|---|---|---|---|\n"
         )
-    row = f"| {ctx['name']} | @{ctx['github']} | {ctx['role_title']} | `team/{ctx['name']}` |"
-    return text if row in text else text.rstrip("\n") + "\n" + row + "\n"
+    row = (
+        f"| {ctx['name']} | @{ctx['github']} | {ctx['role_title']} | `team/{ctx['name']}` | ⏳ приглашение не принято |"
+    )
+    return text if f"@{ctx['github']} |" in text else text.rstrip("\n") + "\n" + row + "\n"
 
 
 def grant_board_access(github: str, dry: bool) -> None:
     """Доступ на запись к доске (GraphQL updateProjectV2Collaborators)."""
-    project_id = run(["gh", "api", "graphql", "-f",
-                      f'query={{user(login:"{PROJECT_OWNER}"){{projectV2(number:{PROJECT_NUMBER}){{id}}}}}}',
-                      "--jq", ".data.user.projectV2.id"], dry=dry)
-    user_id = run(["gh", "api", "graphql", "-f", f'query={{user(login:"{github}"){{id}}}}',
-                   "--jq", ".data.user.id"], dry=dry)
-    mutation = ("mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,"
-                "collaborators:[{userId:$u,role:WRITER}]}){clientMutationId}}")
-    run(["gh", "api", "graphql", "-f", f"query={mutation}", "-f", f"p={project_id}", "-f", f"u={user_id}"],
-        dry=dry, check=False)
+    project_id = run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            PROJECT_ID_QUERY,
+            "--jq",
+            PROJECT_ID_JQ,
+        ],
+        dry=dry,
+    )
+    user_id = run(
+        ["gh", "api", "graphql", "-f", f'query={{user(login:"{github}"){{id}}}}', "--jq", ".data.user.id"], dry=dry
+    )
+    mutation = (
+        "mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,"
+        "collaborators:[{userId:$u,role:WRITER}]}){clientMutationId}}"
+    )
+    run(
+        ["gh", "api", "graphql", "-f", f"query={mutation}", "-f", f"p={project_id}", "-f", f"u={user_id}"],
+        dry=dry,
+        check=False,
+    )
 
 
 def write_personal_branch(branch: str, ctx: dict, tmp: Path, dry: bool, refresh: bool) -> None:
@@ -154,8 +182,12 @@ def write_personal_branch(branch: str, ctx: dict, tmp: Path, dry: bool, refresh:
         template_src = ROOT if refresh else wt
         target.write_text(render_start_here(template_src, ctx, old), encoding="utf-8")
     run(["git", "add", "START_HERE.md"], cwd=wt, dry=dry)
-    run(["git", "commit", "-m", f"docs: {'обновить ' if refresh else ''}START_HERE для {ctx['name']} ({ctx['role']})"],
-        cwd=wt, dry=dry, check=not refresh)
+    run(
+        ["git", "commit", "-m", f"docs: {'обновить ' if refresh else ''}START_HERE для {ctx['name']} ({ctx['role']})"],
+        cwd=wt,
+        dry=dry,
+        check=not refresh,
+    )
     run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=wt, dry=dry)
 
 
@@ -188,8 +220,8 @@ def main() -> int:
 
         print(f"\n👤 Подключаю {args.name} (@{github}) как «{ROLES[args.role]}» в {repo}\n")
         if not args.skip_invite:
-            print("1/4 Приглашение в репозиторий")
-            run(["gh", "api", "-X", "PUT", f"repos/{repo}/collaborators/{github}", "-f", "permission=push"], dry=dry)
+            print(f"1/4 Приглашение в организацию {ORG} (право записи в репозиторий даёт организация)")
+            run(["gh", "api", "-X", "PUT", f"orgs/{ORG}/memberships/{github}", "-f", "role=member"], dry=dry)
         print("2/4 Доступ к доске задач")
         grant_board_access(github, dry)
         print(f"3/4 Личная ветка {branch}")
@@ -209,10 +241,23 @@ def main() -> int:
         run(["git", "add", str(CODEOWNERS), str(TEAM_FILE)], cwd=wt2, dry=dry)
         run(["git", "commit", "-m", f"chore: добавить {args.name} (@{github}) в команду"], cwd=wt2, dry=dry)
         run(["git", "push", "-u", "origin", pr_branch], cwd=wt2, dry=dry)
-        pr = run(["gh", "pr", "create", "--base", "dev", "--head", pr_branch,
-                  "--title", f"chore: добавить {args.name} в команду",
-                  "--body", f"Новый участник: @{github}, роль `{args.role}`. Личная ветка: `{branch}`."],
-                 cwd=wt2, dry=dry)
+        pr = run(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                "dev",
+                "--head",
+                pr_branch,
+                "--title",
+                f"chore: добавить {args.name} в команду",
+                "--body",
+                f"Новый участник: @{github}, роль `{args.role}`. Личная ветка: `{branch}`.",
+            ],
+            cwd=wt2,
+            dry=dry,
+        )
     finally:
         for sub in ("personal", "codeowners"):
             if (tmp / sub).exists():
@@ -221,12 +266,17 @@ def main() -> int:
 
     print(f"\n✅ Готово. Слей PR: gh pr merge {pr.rsplit('/', 1)[-1] or '<номер>'} --squash")
     print(f"Сообщение для {args.name} в чат:")
-    print(f"   Прими приглашение: https://github.com/{repo}/invitations")
+    print(f"   Прими приглашение: {INVITATION_URL}")
     print(f"   Твоя инструкция:   https://github.com/{repo}/blob/{branch}/START_HERE.md")
-    print(f"   Путь на 1 час:     https://github.com/{repo}/blob/dev/ONBOARDING.md")
-    print(f"   Доска задач:       https://github.com/users/{PROJECT_OWNER}/projects/{PROJECT_NUMBER}")
+    print(
+        f"   Путь на 1 час:     https://github.com/{repo}/blob/dev/ONBOARDING.md"
+        " — сначала прочитай документацию, потом открывай репозиторий в Claude"
+    )
+    print(f"   Доска задач:       {BOARD_URL} — сохрани ссылку, туда капитан кидает задачи")
     return 0
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())
