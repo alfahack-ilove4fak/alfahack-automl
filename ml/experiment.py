@@ -11,6 +11,8 @@
   n_folds        — число фолдов (по умолчанию 5)
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
   class_weight   — для классификации: "balanced" или None
+  feature_ops    — новые признаки внутри фолда: missing_indicators | frequency_encoding | target_encoding |
+                   pair_diffs | pair_ratios; список имён или {op: имя, параметр: значение}. Подробно — ml/features.py
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
+from ml.features import FeatureOps
 from ml.profiling import make_matrix
 from runtime.budget import used_ram_mb
 from runtime.log import get_logger
@@ -347,6 +350,7 @@ def run_experiment(
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
     n_folds = int(params.get("n_folds", 5))
     try:
+        ops = FeatureOps(spec, params.get("feature_ops"))
         x, _ = make_matrix(profile, train, train.head(0))
         y = _encode_target(spec, train[spec.target])
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
@@ -361,9 +365,12 @@ def run_experiment(
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
                 )
-            model, best_iter = _fit_model(spec, hypothesis, x.iloc[tr], y_fit[tr], eval_set=(x.iloc[va], y_fit[va]))
+            # Признаки из feature_ops учатся только на train-части фолда — валидация их не видит
+            x_tr = ops.fit_transform(x.iloc[tr], y_fit[tr])
+            x_va = ops.transform(x.iloc[va])
+            model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
             best_iters.append(best_iter)
-            scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x.iloc[va], log_target)))
+            scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)))
             peak = max(peak, used_ram_mb())
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
         return ExperimentResult(
@@ -396,6 +403,9 @@ def fit_predict_final(
     x, x_test = make_matrix(profile, train, test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
+    ops = FeatureOps(spec, params.get("feature_ops"))
+    x = ops.fit_transform(x, y_fit)
+    x_test = ops.transform(x_test)
     # На всех данных деревьев нужно чуть больше, чем на 4/5 из CV
     n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
