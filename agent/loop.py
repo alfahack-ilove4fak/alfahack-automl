@@ -12,6 +12,8 @@ import pandas as pd
 
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
+from agent.llm_hypotheses import reflect
+from agent.memory import ResearchMemory
 from interfaces.schemas import DataProfile, ExperimentResult, ExperimentStatus, Hypothesis, RunBudget, TaskSpec
 from ml.experiment import run_experiment
 from runtime.log import get_logger
@@ -36,18 +38,25 @@ def run_autoresearch(
     on_new_best: Callable[[Hypothesis, ExperimentResult], None],
     max_iterations: int = 50,
     llm: LLMClient | None = None,
+    memory: ResearchMemory | None = None,
 ) -> tuple[Hypothesis, ExperimentResult]:
     gib = spec.metric.greater_is_better
     if llm is None:
         llm = LLMClient(rub_limit=budget.llm_rub_limit)  # без ключа или с LLM_MOCK=1 — сразу недоступна
+    memory = memory if memory is not None else ResearchMemory()
     queue: list[Hypothesis] = []
+    batch_start = len(history)  # с какого места истории начинается текущая пачка гипотез
     for iteration in range(1, max_iterations + 1):
         # Новый эксперимент стоит примерно как прошлый: если не успеем — не начинаем
         if not budget.has_time(needed_seconds=best[1].fit_seconds * 1.2):
             log.info("Время на исходе — завершаю цикл после %d итераций", iteration - 1)
             break
         if not queue:
-            queue = propose_hypotheses(spec, profile, history, k=BATCH, llm=llm)
+            batch = history[batch_start:]
+            if batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch):
+                reflect(spec, best, batch, llm, memory)  # вся пачка мимо — спросим LLM, почему
+            queue = propose_hypotheses(spec, profile, history, k=BATCH, llm=llm, memory=memory)
+            batch_start = len(history)
         if not queue:
             log.info("Гипотезы закончились — завершаю цикл")
             break
@@ -57,11 +66,14 @@ def run_autoresearch(
         history.append((hyp, result))
         if result.status != ExperimentStatus.OK:
             log.info("  ✗ %s: %s", result.status.value, result.error)
+            memory.record(hyp.id, False, result.status.value)
             continue
         if result.beats(best[1], gib, min_delta(best[1])):
             log.info("  ✓ лучше: %.5f → %.5f", best[1].mean_score, result.mean_score)
+            memory.record(hyp.id, True)
             best = (hyp, result)
             on_new_best(hyp, result)
         else:
             log.info("  · не лучше: %.5f (лучший %.5f)", result.mean_score, best[1].mean_score)
+            memory.record(hyp.id, False, "не лучше лучшего с учётом шума")
     return best

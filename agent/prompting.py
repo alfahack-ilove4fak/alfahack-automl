@@ -16,6 +16,7 @@ from string import Template
 
 import ml.experiment
 from agent.hypotheses import _applies, load_playbook
+from agent.memory import ResearchMemory
 from interfaces.schemas import DataProfile, ExperimentResult, ExperimentStatus, Hypothesis, TaskSpec
 from runtime.log import get_logger
 
@@ -26,7 +27,8 @@ MAX_DESCRIPTION_CHARS = 1500  # task.md целиком может быть дл�
 MAX_FEATURES_SHOWN = 30
 MAX_CLASSES_SHOWN = 20
 MAX_MISSING_SHOWN = 10
-HISTORY_LAST_N = 10
+HISTORY_LAST_N = 8
+HISTORY_BEST_K = 3
 
 
 def load_prompt(name: str) -> str | None:
@@ -88,22 +90,43 @@ def describe_profile(profile: DataProfile) -> str:
     return "\n".join(lines)
 
 
-def describe_history(history: list[tuple[Hypothesis, ExperimentResult]], last_n: int = HISTORY_LAST_N) -> str:
-    """Последние last_n экспериментов таблицей. Сжатие «последние N + лучшие K» — задача A-L2-2."""
+def _outcome(res: ExperimentResult) -> str:
+    if res.status == ExperimentStatus.OK and res.mean_score is not None:
+        return f"{res.mean_score:.5f} ± {res.std_score or 0:.5f}"
+    return f"{res.status.value}: {(res.error or '')[:80]}"
+
+
+def describe_history(
+    history: list[tuple[Hypothesis, ExperimentResult]],
+    greater_is_better: bool,
+    memory: ResearchMemory | None = None,
+    last_n: int = HISTORY_LAST_N,
+    best_k: int = HISTORY_BEST_K,
+) -> str:
+    """Сжатая история: лучшие best_k по метрике + последние last_n, в порядке проверки, с решением по каждой."""
     if not history:
         return "Пока не было ни одного эксперимента."
-    rows = ["| id | kind | params | результат |", "|---|---|---|---|"]
-    for hyp, res in history[-last_n:]:
-        if res.status == ExperimentStatus.OK and res.mean_score is not None:
-            outcome = f"{res.mean_score:.5f} ± {res.std_score or 0:.5f}"
-        else:
-            outcome = f"{res.status.value}: {(res.error or '')[:80]}"
+    scored = [i for i, (_, r) in enumerate(history) if r.status == ExperimentStatus.OK and r.mean_score is not None]
+    scored.sort(key=lambda i: history[i][1].mean_score, reverse=greater_is_better)
+    keep = sorted(set(scored[:best_k]) | set(range(max(0, len(history) - last_n), len(history))))
+    verdicts = memory.verdicts if memory else {}
+    rows = ["| id | kind | params | результат | решение |", "|---|---|---|---|---|"]
+    for i in keep:
+        hyp, res = history[i]
+        mark = " (лучший)" if scored and i == scored[0] else ""
         params = json.dumps(hyp.params, ensure_ascii=False)
-        rows.append(f"| {hyp.id} | {hyp.kind.value} | {params} | {outcome} |")
-    skipped = len(history) - last_n
-    if skipped > 0:
-        rows.insert(0, f"(показаны последние {last_n}, ранее было ещё {skipped})")
+        verdict = verdicts.get(hyp.id, "—")
+        rows.append(f"| {hyp.id} | {hyp.kind.value} | {params} | {_outcome(res)}{mark} | {verdict} |")
+    hidden = len(history) - len(keep)
+    if hidden > 0:
+        rows.insert(0, f"(всего экспериментов {len(history)}: показаны лучшие {best_k} и последние {last_n})")
     return "\n".join(rows)
+
+
+def describe_lessons(memory: ResearchMemory | None) -> str:
+    if not memory or not memory.lessons:
+        return "Пока нет."
+    return "\n".join(f"- {lesson}" for lesson in memory.lessons)
 
 
 def params_doc() -> str:
@@ -127,23 +150,54 @@ def playbook_examples(spec: TaskSpec, profile: DataProfile, n: int = 2) -> str:
     return "[\n" + ",\n".join("  " + json.dumps(item, ensure_ascii=False) for item in items[:n]) + "\n]"
 
 
-def build_hypothesis_messages(
-    spec: TaskSpec, profile: DataProfile, history: list[tuple[Hypothesis, ExperimentResult]], k: int = 3
-) -> list[dict] | None:
-    """Сообщения для LLMClient.chat_json: system + запрос k гипотез. None — промпт собрать не удалось."""
-    system, template = load_prompt("system"), load_prompt("hypotheses")
-    if system is None or template is None:
+def _render(name: str, **values) -> str | None:
+    template = load_prompt(name)
+    if template is None:
         return None
     try:
-        user = Template(template).substitute(
-            task=describe_task(spec),
-            profile=describe_profile(profile),
-            history=describe_history(history),
-            params_doc=params_doc(),
-            examples=playbook_examples(spec, profile),
-            k=k,
-        )
+        return Template(template).substitute(**values).strip()
     except (KeyError, ValueError) as exc:
-        log.warning("Промпт hypotheses.md не собран: %s", exc)
+        log.warning("Промпт %s.md не собран: %s", name, exc)
         return None
-    return [{"role": "system", "content": system.strip()}, {"role": "user", "content": user.strip()}]
+
+
+def build_hypothesis_messages(
+    spec: TaskSpec,
+    profile: DataProfile,
+    history: list[tuple[Hypothesis, ExperimentResult]],
+    k: int = 3,
+    memory: ResearchMemory | None = None,
+) -> list[dict] | None:
+    """Сообщения для LLMClient.chat_json: system + запрос k гипотез. None — промпт собрать не удалось."""
+    system = load_prompt("system")
+    user = _render(
+        "hypotheses",
+        task=describe_task(spec),
+        profile=describe_profile(profile),
+        history=describe_history(history, spec.metric.greater_is_better, memory),
+        lessons=describe_lessons(memory),
+        params_doc=params_doc(),
+        examples=playbook_examples(spec, profile),
+        k=k,
+    )
+    if system is None or user is None:
+        return None
+    return [{"role": "system", "content": system.strip()}, {"role": "user", "content": user}]
+
+
+def build_reflection_messages(
+    spec: TaskSpec,
+    best: tuple[Hypothesis, ExperimentResult],
+    batch: list[tuple[Hypothesis, ExperimentResult]],
+) -> list[dict] | None:
+    """Запрос короткого вывода «почему пачка гипотез не сработала». None — промпт собрать не удалось."""
+    system = load_prompt("system")
+    user = _render(
+        "reflection",
+        task=describe_task(spec),
+        best=describe_history([best], spec.metric.greater_is_better),
+        batch=describe_history(batch, spec.metric.greater_is_better),
+    )
+    if system is None or user is None:
+        return None
+    return [{"role": "system", "content": system.strip()}, {"role": "user", "content": user}]

@@ -106,7 +106,7 @@ def test_examples_respect_task_type(spec, profile):
 
 def test_history_table(spec, profile):
     text = user_prompt(spec, profile, [make_step(1), make_step(2, ExperimentStatus.TIMEOUT)])
-    assert "| h1 | hyperparams |" in text
+    assert "| h1 | hyperparams |" in text and "(лучший)" in text
     assert "41.00000 ± 0.50000" in text
     assert "timeout: кончилось время на фолде 4" in text
 
@@ -114,8 +114,9 @@ def test_history_table(spec, profile):
 def test_empty_and_long_history(spec, profile):
     assert "ни одного эксперимента" in user_prompt(spec, profile)
     text = user_prompt(spec, profile, [make_step(i) for i in range(25)])
-    assert "| h24 |" in text and "| h14 |" not in text
-    assert "ранее было ещё 15" in text
+    assert "| h24 |" in text and "| h17 |" in text and "| h16 |" not in text  # последние 8
+    assert "| h0 |" in text and "| h2 |" in text and "| h3 |" not in text  # лучшие 3 (RMSE: меньше — лучше)
+    assert "всего экспериментов 25" in text
 
 
 def test_missing_prompt_returns_none(spec, profile, monkeypatch, tmp_path):
