@@ -97,7 +97,7 @@ def tune(
         for step, (tr, va) in enumerate(folds):
             if time.time() > deadline:
                 raise optuna.TrialPruned()
-            score, _ = _fold_score(spec, hyp, x, y, y_fit, tr, va, ops, log_target)
+            score, _, _ = _fold_score(spec, hyp, x, y, y_fit, tr, va, ops, log_target)
             scores.append(score)
             trial.report(float(np.mean(scores)), step)
             if trial.should_prune():
