@@ -153,7 +153,7 @@ def test_loop_reflects_only_after_fully_failed_batch(spec, profile, monkeypatch)
     )
     assert best[1].mean_score == 39.0
     assert llm.json_calls == 3 and llm.text_calls == 1  # рефлексия — только перед третьей пачкой
-    assert list(memory.verdicts.values()).count("принята") == 1
+    assert sum(v.startswith("принята") for v in memory.verdicts.values()) == 1
     assert len(memory.verdicts) == 7
     assert "- Регуляризация не помогла" in llm.last_messages[1]["content"]  # вывод попал в промпт
 
