@@ -5,6 +5,7 @@
 
 import base64
 import io
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -65,7 +66,8 @@ def test_pip_and_missing_playbook_are_caught(tmp_path):
 
 
 def test_hanging_agent_is_killed(tmp_path):
-    code, seconds, _, _ = run_with_limits([sys.executable, "-c", "import time; time.sleep(60)"], tmp_path, {}, 1)
+    cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+    code, seconds, _, _ = run_with_limits(cmd, tmp_path, dict(os.environ), 1)  # Windows: без SYSTEMROOT не стартует
     assert code is None
     assert seconds < 30
 
