@@ -17,6 +17,8 @@
   class_weight   — для классификации: "balanced" или None
   feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops
                    (ml/features.py); обучаются только на train-части фолда, без утечки
+  optuna         — {trials: 30, timeout: 600, folds: 3, rows: 100000}: подбор model_params выбранной модели
+                   (ml/tuning.py) на подвыборке и меньшем числе фолдов, потом обычная CV с найденными параметрами
 
 """
 
@@ -383,6 +385,25 @@ def _cv_rows(spec: TaskSpec, profile: DataProfile, y: np.ndarray, budget: RunBud
     return rows
 
 
+def _fold_score(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    y_fit: np.ndarray,
+    tr: np.ndarray,
+    va: np.ndarray,
+    ops: list[str],
+    log_target: bool,
+) -> tuple[float, int]:
+    """Один фолд: признаки из feature_ops (учатся на train-части) → модель → метрика на валидации."""
+    x_tr, x_va = x.iloc[tr], x.iloc[va]
+    if ops:
+        x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
+    model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
+    return compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)), best_iter
+
+
 def run_experiment(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, budget: RunBudget
 ) -> ExperimentResult:
@@ -399,6 +420,12 @@ def run_experiment(
             train, y = train.iloc[rows], y[rows]
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
+        if params.get("optuna") and "_optuna_best" not in params:
+            from ml.tuning import tune  # здесь: tuning сам импортирует этот модуль
+
+            best = tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget)
+            params["_optuna_best"] = best  # повторный запуск той же гипотезы не подбирает заново
+            params["model_params"] = {**(params.get("model_params") or {}), **best}
         scores, best_iters = [], []
         for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
             fold_started = time.time()
@@ -411,12 +438,9 @@ def run_experiment(
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
                 )
-            x_tr, x_va = x.iloc[tr], x.iloc[va]
-            if ops:
-                x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
-            model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
+            score, best_iter = _fold_score(spec, hypothesis, x, y, y_fit, tr, va, ops, log_target)
             best_iters.append(best_iter)
-            scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)))
+            scores.append(score)
             peak = max(peak, used_ram_mb())
             if fold == 0 and n_folds > 1:
                 # Прогноз по первому фолду: не успеем остальные — стоп сейчас, а не через час на последнем фолде

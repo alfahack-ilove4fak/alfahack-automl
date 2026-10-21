@@ -362,3 +362,78 @@ def test_unknown_feature_op_fails_cleanly():
     train, _, profile = _data(TaskType.REGRESSION)
     result = run_experiment(spec, profile, _hyp(feature_ops=["magic"]), train, RunBudget())
     assert result.status == ExperimentStatus.FAILED and "magic" in result.error
+
+
+@pytest.mark.parametrize("model", ["lightgbm", *MODELS])
+def test_optuna_tunes_each_model(model):
+    package = MODELS.get(model, (None,))[0]
+    if package:
+        pytest.importorskip(package)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    small = {"lightgbm": {"n_estimators": 30}, "catboost": {"iterations": 30}, "xgboost": {"n_estimators": 30}}
+    hyp = _hyp(model=model, model_params=small.get(model, {}), optuna={"trials": 3, "timeout": 60, "folds": 2})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert hyp.params["_optuna_best"]  # что-то подобрано
+    assert hyp.params["_optuna_best"].items() <= hyp.params["model_params"].items()
+    assert len(fit_predict_final(spec, profile, hyp, train, test)) == 20
+
+
+def test_optuna_timeout_is_hard(monkeypatch):
+    import time
+
+    import ml.experiment
+
+    real_fit = ml.experiment._fit_model
+
+    def slow_fit(*args, **kwargs):
+        time.sleep(0.4)
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(ml.experiment, "_fit_model", slow_fit)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(model_params={"n_estimators": 20}, optuna={"trials": 100, "timeout": 1, "folds": 3})
+
+    started = time.time()
+    from ml.tuning import tune
+
+    x, _ = ml.experiment.make_matrix(profile, train, train.head(0))
+    y = train["y"].to_numpy()
+    tune(spec, hyp, x, y, y, [], False, RunBudget())
+
+    assert time.time() - started < 1 + 0.4 * 2 + 1  # таймаут + не больше одного фолда сверху + запас
+
+
+def test_optuna_respects_agent_budget():
+    from ml.tuning import tune
+
+    class AlmostOver(RunBudget):
+        def seconds_left(self) -> float:
+            return 0.0
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    import ml.experiment
+
+    x, _ = ml.experiment.make_matrix(profile, train, train.head(0))
+    y = train["y"].to_numpy()
+    assert tune(spec, _hyp(optuna={"trials": 10, "timeout": 600}), x, y, y, [], False, AlmostOver()) == {}
+
+
+def test_optuna_not_repeated_for_same_hypothesis(monkeypatch):
+    import ml.tuning
+
+    calls = []
+    monkeypatch.setattr(ml.tuning, "tune", lambda *a, **k: calls.append(1) or {"num_leaves": 20})
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(model_params={"n_estimators": 20}, optuna={"trials": 2})
+
+    run_experiment(spec, profile, hyp, train, RunBudget())
+    run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert calls == [1] and hyp.params["model_params"]["num_leaves"] == 20
