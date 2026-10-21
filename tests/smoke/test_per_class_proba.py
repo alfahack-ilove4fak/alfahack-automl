@@ -18,9 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_robustness import base_task, run_agent, write_task  # noqa: E402
 
 CLASSES = ["a", "b", "c"]
-XFAIL_INVALID = pytest.mark.xfail(
-    strict=True, reason="#110/#117: агент падает на шаблоне id,a,b,c (парсер #111, trivial_answer, fit_predict_final)"
-)
 XFAIL_NO_MODEL = pytest.mark.xfail(
     strict=True, reason="#117: fit_predict_final пишет одну колонку target, а не вероятности по классам"
 )
@@ -38,7 +35,6 @@ def run(tmp_path_factory):
     return task, task_md, run_agent(task_md, root)
 
 
-@XFAIL_INVALID
 def test_valid_per_class_answer(run):
     task, task_md, proc = run
     log = proc.stderr[-3000:]
