@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from interfaces.schemas import (
+    CodeResult,
     DataProfile,
     ExperimentResult,
     ExperimentStatus,
@@ -46,7 +47,7 @@ def stub_profile_data(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -
     return DataProfile(n_train=len(train), n_test=len(test), numeric_features=features, categorical_features=[])
 
 
-def stub_propose_hypotheses(spec, profile, history, k: int = 3) -> list[Hypothesis]:
+def stub_propose_hypotheses(spec, profile, history, k: int = 3, budget: RunBudget | None = None) -> list[Hypothesis]:
     start = len(history)
     return [
         Hypothesis(id=f"stub-{start + i}", kind=HypothesisKind.HYPERPARAMS, title=f"Заглушка №{start + i}")
@@ -71,6 +72,11 @@ def stub_run_experiment(spec, profile, hypothesis, train, budget: RunBudget) -> 
 def stub_fit_predict_final(spec, profile, hypothesis, train, test) -> pd.DataFrame:
     value = 0.0 if spec.task_type == TaskType.REGRESSION else (spec.class_labels or ["0"])[0]
     return pd.DataFrame({spec.id_column: test[spec.id_column], spec.target: value})
+
+
+def stub_run_code(code: str, workdir: Path, timeout: float, mem_mb: int) -> CodeResult:
+    """Заглушка песочницы: ничего не исполняет, сообщает об успехе."""
+    return CodeResult(exit_code=0, stdout="")
 
 
 def stub_validate_submission(path: Path, spec: TaskSpec, test: pd.DataFrame) -> ValidationReport:

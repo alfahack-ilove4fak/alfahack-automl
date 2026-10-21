@@ -1,4 +1,4 @@
-# Материалы: Исследователь / Data Scientist (проверено 2026-10-20)
+# Материалы: Исследователь / Data Scientist (проверено 2026-10-20, дополнено 2026-10-21)
 
 Общие материалы — [README.md](README.md). Документация моделей — в [ml.md](ml.md).
 
@@ -15,6 +15,17 @@
 | [MLAgentBench, arXiv:2310.03302](https://arxiv.org/abs/2310.03302) · [код](https://github.com/snap-stanford/MLAgentBench) | как измерять успех ML-агента; типичные ошибки (галлюцинации, «бег по кругу») |
 | [MLE-bench, arXiv:2410.07095](https://arxiv.org/abs/2410.07095) · [код](https://github.com/openai/mle-bench) | бенчмарк ML-агентов на 75 Kaggle-задачах — откуда брать идеи «что работает в среднем» |
 | [R&D-Agent, arXiv:2505.14738](https://arxiv.org/abs/2505.14738) · [код](https://github.com/microsoft/RD-Agent) | цикл «гипотеза → реализация → обратная связь», лидер MLE-bench на момент публикации ⚠️ проверь актуальность |
+
+### Где в источниках конкретные идеи (проверено 21.10, R-L2-2 — issue #87–#92)
+
+Аннотации на arxiv.org/abs почти пустые — детали только в полных текстах:
+
+| Источник | Где смотреть | Что там |
+|---|---|---|
+| [AIDE — полный текст](https://arxiv.org/html/2502.13138) | раздел 3.2: Coding Operator, Search Policy, Summarization Operator | Improving = «exactly one atomic change» к лучшему решению; сводка истории вместо полного лога (#87, #88) |
+| [autoresearch — program.md](https://github.com/karpathy/autoresearch/blob/master/program.md) | весь файл (короткий) | фиксированные 5 мин на эксперимент, kill после 10 мин, «All else being equal, simpler is better» (#89) |
+| [AutoKaggle — полный текст](https://arxiv.org/html/2410.20424) | шесть фаз; Table 6 — юнит-тесты после очистки и признаков | проверки train/test одинаковых признаков, пропусков, дублей; до 5 попыток исправления (#90) |
+| [MLE-bench — полный текст](https://arxiv.org/html/2410.07095) | раздел 3.1 и Discussion; 3.2 (попытки), 3.4 (время) | агенты не учитывают время и ресурсы, не проверяют сабмит (#91) |
 
 ## Валидация и честная оценка (для R-L2-1)
 
