@@ -1,7 +1,8 @@
 """Эксперимент = гипотеза → кросс-валидация → ExperimentResult. Владелец — ML-pipeline инженер.
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
-  model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "linear". Список — MODEL_FITTERS.
+  model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
+                   hist_gb — HistGradientBoosting из scikit-learn: самый быстрый бустинг, категории нативно
                    linear — Ridge (регрессия) / LogisticRegression (классы) с масштабированием и one-hot;
                    её model_params: alpha (Ridge), C (LogisticRegression)
                    Неизвестное имя → ExperimentResult(status=FAILED), а не тихая подмена на LightGBM
@@ -20,11 +21,12 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 
 from evaluation.metrics import METRICS, compute_metric
@@ -56,10 +58,15 @@ BASE_PARAMS = {
     "n_jobs": -1,
 }
 EARLY_STOPPING = 100
+# Скорость подобрана на public/multiclass (10 классов, 87 тыс. строк, 1 фолд): по умолчанию ~30 мин на фолд,
+# с этими настройками 142 с и Macro F1 0.552. max_ctr_complexity=1 — без комбинаций категорий (×2 быстрее),
+# rsm=0.3 — 30% признаков на выбор разбиения (×2.5), learning_rate 0.15 — меньше итераций до ранней остановки
 CATBOOST_PARAMS = {
     "iterations": 3000,
-    "learning_rate": 0.05,
+    "learning_rate": 0.15,
     "depth": 6,
+    "rsm": 0.3,
+    "max_ctr_complexity": 1,
     "random_seed": SEED,
     "thread_count": -1,
     "verbose": False,
@@ -221,11 +228,58 @@ def _fit_linear(
     return model, 0
 
 
+HIST_GB_MAX_BINS = 255  # больше категорий HistGradientBoosting не принимает — такие колонки идут как числа (коды)
+
+
+def _category_codes(x: pd.DataFrame) -> pd.DataFrame:
+    """Категории → их коды (общий словарь train+test из make_matrix), пропуск категории → NaN."""
+    x = x.copy()
+    for col in x.columns:
+        if isinstance(x[col].dtype, pd.CategoricalDtype):
+            x[col] = x[col].cat.codes.astype(np.float32).replace(-1, np.nan)
+    return x
+
+
+def _fit_hist_gb(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: int | None = None,
+) -> tuple[object, int]:
+    """HistGradientBoosting (scikit-learn). Возвращает (модель, число итераций).
+
+    Внешний eval_set scikit-learn 1.5 не принимает: в CV ранняя остановка идёт по своим 10% train-части фолда
+    (валидацию фолда модель не видит). С n_estimators — ровно столько итераций, без остановки.
+    """
+    is_cat = [
+        isinstance(x[c].dtype, pd.CategoricalDtype) and len(x[c].cat.categories) <= HIST_GB_MAX_BINS for c in x.columns
+    ]
+    params = {"max_iter": 3000, "learning_rate": 0.05, "random_state": SEED, "categorical_features": is_cat}
+    if n_estimators is not None:
+        params.update(max_iter=n_estimators, early_stopping=False)
+    else:
+        params.update(early_stopping=True, validation_fraction=0.1, n_iter_no_change=EARLY_STOPPING // 2)
+        # Внутренняя валидация делится со стратификацией: класс из 1 объекта её ломает — тогда без остановки
+        if _is_classification(spec) and np.unique(y, return_counts=True)[1].min() < 2:
+            params.update(early_stopping=False, max_iter=300)
+    params.update(hypothesis.params.get("model_params", {}))
+    if _is_classification(spec):
+        estimator = HistGradientBoostingClassifier(class_weight=hypothesis.params.get("class_weight"), **params)
+    else:
+        estimator = HistGradientBoostingRegressor(**params)
+    model = make_pipeline(FunctionTransformer(_category_codes), estimator)
+    model.fit(x, y)
+    return model, int(estimator.n_iter_)
+
+
 # Модели, которые понимает params.model. Новая модель = функция _fit_<имя> с той же сигнатурой + строка здесь
 MODEL_FITTERS = {
     "lightgbm": _fit_lightgbm,
     "catboost": _fit_catboost,
     "xgboost": _fit_xgboost,
+    "hist_gb": _fit_hist_gb,
     "linear": _fit_linear,
 }
 DEFAULT_MODEL = "lightgbm"

@@ -93,6 +93,7 @@ def test_unknown_model_fails_instead_of_silent_lightgbm():
 MODELS = {
     "catboost": ("catboost", {"iterations": 50, "depth": 4}, True),
     "xgboost": ("xgboost", {"n_estimators": 50, "max_depth": 3}, True),
+    "hist_gb": (None, {"max_iter": 50}, True),
     "linear": (None, {}, False),
 }
 
