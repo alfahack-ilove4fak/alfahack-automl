@@ -89,7 +89,15 @@ def _check_class_probabilities(probs: pd.DataFrame) -> list[str]:
 
 
 def write_submission_atomic(df: pd.DataFrame, path: Path) -> None:
-    """Пишем во временный файл и подменяем: если упадём посередине, старый ответ останется целым."""
+    """Пишем во временный файл рядом и подменяем: если упадём посередине, старый ответ останется целым.
+
+    Временный файл — в том же каталоге, что и task.md (одна файловая система). Если подмена всё же не удалась
+    (организаторы: os.replace между файловыми системами давал 0 баллов) — пишем ответ прямо в path.
+    """
     tmp = path.with_suffix(".tmp.csv")
-    df.to_csv(tmp, index=False, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        df.to_csv(tmp, index=False, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        df.to_csv(path, index=False, encoding="utf-8")
+        tmp.unlink(missing_ok=True)
