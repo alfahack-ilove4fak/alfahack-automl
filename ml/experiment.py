@@ -98,6 +98,10 @@ def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis):
     return lgb.LGBMRegressor(**params)
 
 
+# Старое имя: им пользуется research/bench_playbook.py. Убрать, когда стенд перейдёт на _fit_model
+_make_model = _make_lightgbm
+
+
 def _fit_lightgbm(
     spec: TaskSpec,
     hypothesis: Hypothesis,
