@@ -6,8 +6,13 @@
   * Все ответы кэшируются на диск (LLM_CACHE_DIR): повторный запуск на той же задаче не тратит рубли.
   * Считаем потраченные рубли по usage из ответа. Цены — в .env (⚠️ уточнить у организаторов).
 
+  * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (2–2.5 тыс. токенов
+    на промпт гипотез) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
+    в обоих вариантах и /no_think не действуют), поэтому к каждому запросу добавляем запас REASONING_TOKENS.
+
 Переменные окружения: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL (как в baseline.py организаторов),
-LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT.
+LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
+LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 3000).
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from runtime.log import get_logger
 
 log = get_logger("llm")
 
+DEFAULT_REASONING_TOKENS = 3000
+
 
 class LLMClient:
     def __init__(self, rub_limit: float = 0.0, timeout: float = 120.0):
@@ -31,6 +38,7 @@ class LLMClient:
         self.failures = 0
         self._price_in = float(os.getenv("LLM_PRICE_RUB_PER_1K_INPUT", 0))
         self._price_out = float(os.getenv("LLM_PRICE_RUB_PER_1K_OUTPUT", 0))
+        self.reasoning_tokens = int(os.getenv("LLM_REASONING_TOKENS", DEFAULT_REASONING_TOKENS))
         cache = os.getenv("LLM_CACHE_DIR")
         self.cache_dir = Path(cache) if cache else None
         self._client = None
@@ -47,7 +55,10 @@ class LLMClient:
         return not (self.rub_limit and self.rub_spent >= self.rub_limit)
 
     def chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 2000) -> str | None:
-        """Один запрос к модели. Возвращает текст ответа или None, если LLM недоступна или упала."""
+        """Один запрос к модели. Возвращает текст ответа или None, если LLM недоступна или упала.
+
+        max_tokens — сколько нужно на сам ответ; к нему добавляется запас на рассуждения модели.
+        """
         key = hashlib.sha256(json.dumps([self.model, messages, temperature], ensure_ascii=False).encode()).hexdigest()
         cached = self._cache_get(key)
         if cached is not None:
@@ -56,7 +67,10 @@ class LLMClient:
             return None
         try:
             response = self._client.chat.completions.create(
-                model=self.model, messages=messages, temperature=temperature, max_tokens=max_tokens
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens + self.reasoning_tokens,
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
             self.failures += 1
@@ -64,12 +78,21 @@ class LLMClient:
             return None
         self.failures = 0
         self.calls += 1
-        text = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        text = choice.message.content or ""
+        truncated = getattr(choice, "finish_reason", None) == "length"
+        if truncated:
+            log.warning(
+                "LLM упёрлась в лимит %d токенов (рассуждения + ответ), ответ %s — увеличь LLM_REASONING_TOKENS",
+                max_tokens + self.reasoning_tokens,
+                "пустой" if not text.strip() else "обрезан",
+            )
         if response.usage:
             self.rub_spent += (
                 response.usage.prompt_tokens * self._price_in + response.usage.completion_tokens * self._price_out
             ) / 1000
-        self._cache_put(key, text)
+        if not truncated:  # обрезанный ответ не кэшируем: после увеличения запаса повторный запрос должен уйти в LLM
+            self._cache_put(key, text)
         return text
 
     def chat_json(self, messages: list[dict], **kwargs) -> dict | list | None:
@@ -84,8 +107,13 @@ class LLMClient:
         try:
             return json.loads(text[start : end + 1])
         except json.JSONDecodeError:
-            log.warning("LLM вернула невалидный JSON")
-            return None
+            pass
+        objects = _complete_objects(text[start:])
+        if objects:
+            log.warning("LLM вернула оборванный JSON — взяли %d целых объектов", len(objects))
+            return objects
+        log.warning("LLM вернула невалидный JSON")
+        return None
 
     def _cache_get(self, key: str) -> str | None:
         if self.cache_dir and (self.cache_dir / f"{key}.txt").exists():
@@ -96,3 +124,28 @@ class LLMClient:
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             (self.cache_dir / f"{key}.txt").write_text(text, encoding="utf-8")
+
+
+def _complete_objects(text: str) -> list[dict]:
+    """Целые JSON-объекты из оборванного списка: «[{…}, {…}, {"id": "x", "ti» → два объекта.
+
+    Если оборвана обёртка ({"hypotheses": [{…}, {…}, …), берутся целые объекты внутри неё.
+    """
+    decoder = json.JSONDecoder()
+    body = text.lstrip()
+    pos = 1 if body.startswith("[") else 0
+    out = []
+    while True:
+        start = body.find("{", pos)
+        if start == -1:
+            return out
+        try:
+            obj, end = decoder.raw_decode(body, start)
+        except json.JSONDecodeError:
+            if out:
+                return out  # оборван очередной элемент списка — целые уже собраны
+            pos = start + 1  # оборвана обёртка {"hypotheses": [{…}, …] — ищем целые объекты внутри
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+        pos = end
