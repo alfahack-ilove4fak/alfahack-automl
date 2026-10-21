@@ -69,6 +69,12 @@ def parse_task(task_md: Path) -> TaskSpec:
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
+        if target not in train_cols:
+            # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
+            target = _guess_target(train_cols, test_cols, dictionary)
+            notes.append(
+                f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
+            )
     else:
         target = _guess_target(train_cols, test_cols, dictionary)
         id_column = _guess_id(test_cols, dictionary)
@@ -78,6 +84,7 @@ def parse_task(task_md: Path) -> TaskSpec:
     y = pd.read_csv(files["train"], usecols=[target])[target]
     metric_name = find_metric_in_text(text)
     task_type = _guess_task_type(y, metric_name, dictionary.get(target))
+    metric_name = _check_needs_proba(metric_name, task_type, text, files.get("sample_submission"), target, notes)
     if metric_name is None:
         metric_name = DEFAULT_METRIC.get(task_type, "rmse")
         notes.append(f"Метрика в тексте не найдена — взяли {metric_name} по типу задачи")
@@ -86,6 +93,9 @@ def parse_task(task_md: Path) -> TaskSpec:
     class_labels = None
     if task_type in (TaskType.BINARY, TaskType.MULTICLASS):
         class_labels = sorted(map(str, y.dropna().unique()))
+        answer_columns = submission_columns[1:]
+        if len(answer_columns) > 1 and set(answer_columns) != set(class_labels):
+            notes.append(f"Колонки ответа {answer_columns} не совпадают с классами train {class_labels}")
 
     spec = TaskSpec(
         task_md=task_md,
@@ -112,6 +122,57 @@ def parse_task(task_md: Path) -> TaskSpec:
         len(class_labels) if class_labels else "-",
     )
     return spec
+
+
+def _check_needs_proba(
+    metric_name: str | None, task_type: TaskType, text: str, sample: Path | None, target: str, notes: list[str]
+) -> str | None:
+    """Страховка от неверной метрики: шаблон ответа требует вероятности, а найденная метрика оценивает метки.
+
+    Ловушка (#85): «accuracy не подходит, оцениваем binary cross-entropy» — если поиск метрики ошибётся
+    и возьмёт accuracy, агент запишет 0/1 и получит огромный logloss. Отрицания теперь понимает сам поиск
+    (evaluation/metrics.py), а здесь — независимая проверка по данным: дробные значения в sample_submission.
+    Текст как признак не используем: «для справки считаем log loss по вероятностям» дал бы ложное переключение.
+    """
+    if task_type != TaskType.BINARY or metric_name is None:
+        # multiclass: ответ «колонка на класс» пока не поддержан целиком (#110) — переключение только навредит
+        return metric_name
+    if METRICS[metric_name].prediction != "label" or not _sample_has_probabilities(sample, target):
+        return metric_name
+    chosen = _mentioned_proba_metric(text.lower()) or "logloss"
+    notes.append(
+        f"Метрика {metric_name} оценивает метки, но в sample_submission дробные значения — нужны вероятности, "
+        f"взяли {chosen}"
+    )
+    log.warning("Метрика %s → %s: в sample_submission дробные значения", metric_name, chosen)
+    return chosen
+
+
+def _mentioned_proba_metric(low: str) -> str | None:
+    """Самая ранняя по тексту вероятностная метрика (logloss, roc_auc, …) или None."""
+    best: tuple[int, str] | None = None
+    for name, metric in METRICS.items():
+        if metric.prediction != "proba":
+            continue
+        for alias in metric.aliases:
+            alias = alias.rstrip("*")
+            # слева — граница слова; справа — не латиница/цифра: «кросс-энтропией» подходит, «auction» — нет
+            match = re.search(rf"(?<!\w){re.escape(alias)}(?![a-z0-9])", low)
+            if match and (best is None or match.start() < best[0]):
+                best = (match.start(), name)
+    return best[1] if best else None
+
+
+def _sample_has_probabilities(sample: Path | None, target: str) -> bool:
+    if sample is None:
+        return False
+    try:
+        values = pd.read_csv(sample, usecols=[target], nrows=2000)[target].dropna()
+    except Exception:  # noqa: BLE001 — шаблон необязателен
+        return False
+    if values.empty or not pd.api.types.is_numeric_dtype(values):
+        return False
+    return bool(values.between(0, 1).all() and (values % 1 != 0).any())
 
 
 def _read_dictionary(path: Path | None) -> dict[str, dict]:
