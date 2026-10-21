@@ -58,6 +58,14 @@ def answer_with(client, monkeypatch, text):
         ('{"title": "окно [7 дней]"}', {"title": "окно [7 дней]"}),
         # два объекта подряд — берём оба
         ('{"kind": "model"} и ещё {"kind": "features"}', [{"kind": "model"}, {"kind": "features"}]),
+        # оборвана обёртка-объект — спасаем целые гипотезы внутри
+        (
+            '{"hypotheses": [{"id": "a"}, {"id": "b", "params": {}}, {"id": "c", "ti',
+            [
+                {"id": "a"},
+                {"id": "b", "params": {}},
+            ],
+        ),
         # ответ оборван лимитом токенов — спасаем целые объекты
         (
             '```json\n[{"id": "a", "params": {"n": [1, 2]}}, {"id": "b"}, {"id": "c", "ti',
@@ -161,3 +169,24 @@ def test_truncated_answer_logged(client, caplog):
     client._client = fake
     assert client.chat_json(MESSAGES) is None
     assert "лимит" in caplog.text and "пустой" in caplog.text
+
+
+def test_truncated_answer_not_cached(client, tmp_path):
+    client.cache_dir = tmp_path
+    fake = FakeOpenAI(['[{"id": "a"}, {"id": "b', '[{"id": "a"}, {"id": "b"}]'])
+    original = fake._create
+    calls = []
+
+    def first_truncated(**kwargs):
+        response = original(**kwargs)
+        if not calls:
+            response.choices[0].finish_reason = "length"
+        calls.append(1)
+        return response
+
+    fake.chat.completions.create = first_truncated
+    client._client = fake
+    assert client.chat_json(MESSAGES) == [{"id": "a"}]  # спасли целое из обрезанного
+    assert not list(tmp_path.iterdir())  # обрезанный ответ в кэш не попал
+    assert client.chat_json(MESSAGES) == [{"id": "a"}, {"id": "b"}]  # повтор ушёл в LLM
+    assert fake.requests == 2

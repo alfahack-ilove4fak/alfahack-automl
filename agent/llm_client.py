@@ -80,7 +80,8 @@ class LLMClient:
         self.calls += 1
         choice = response.choices[0]
         text = choice.message.content or ""
-        if getattr(choice, "finish_reason", None) == "length":
+        truncated = getattr(choice, "finish_reason", None) == "length"
+        if truncated:
             log.warning(
                 "LLM упёрлась в лимит %d токенов (рассуждения + ответ), ответ %s — увеличь LLM_REASONING_TOKENS",
                 max_tokens + self.reasoning_tokens,
@@ -90,7 +91,8 @@ class LLMClient:
             self.rub_spent += (
                 response.usage.prompt_tokens * self._price_in + response.usage.completion_tokens * self._price_out
             ) / 1000
-        self._cache_put(key, text)
+        if not truncated:  # обрезанный ответ не кэшируем: после увеличения запаса повторный запрос должен уйти в LLM
+            self._cache_put(key, text)
         return text
 
     def chat_json(self, messages: list[dict], **kwargs) -> dict | list | None:
@@ -125,7 +127,10 @@ class LLMClient:
 
 
 def _complete_objects(text: str) -> list[dict]:
-    """Целые JSON-объекты верхнего уровня из оборванного списка: «[{…}, {…}, {"id": "x", "ti» → два объекта."""
+    """Целые JSON-объекты из оборванного списка: «[{…}, {…}, {"id": "x", "ti» → два объекта.
+
+    Если оборвана обёртка ({"hypotheses": [{…}, {…}, …), берутся целые объекты внутри неё.
+    """
     decoder = json.JSONDecoder()
     body = text.lstrip()
     pos = 1 if body.startswith("[") else 0
@@ -137,7 +142,10 @@ def _complete_objects(text: str) -> list[dict]:
         try:
             obj, end = decoder.raw_decode(body, start)
         except json.JSONDecodeError:
-            return out
+            if out:
+                return out  # оборван очередной элемент списка — целые уже собраны
+            pos = start + 1  # оборвана обёртка {"hypotheses": [{…}, …] — ищем целые объекты внутри
+            continue
         if isinstance(obj, dict):
             out.append(obj)
         pos = end
