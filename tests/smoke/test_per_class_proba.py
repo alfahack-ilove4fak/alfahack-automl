@@ -1,9 +1,8 @@
 """Сквозной тест (#117): задача, где ответ — «колонка на класс» (`id, a, b, c` с вероятностями).
 
 Отдельный файл, а не случай в test_robustness.py: там же сейчас правит #108, так меньше конфликтов.
-Пока агент такой формат не умеет, тесты отмечены xfail(strict=True). Чинят несколько модулей (#110, #117):
-agent/task_parser.py (#111), solution.py::trivial_answer, ml/experiment.py::fit_predict_final.
-Когда всё починят, тесты станут XPASS и покраснеют — тогда снимите отметки ниже.
+Починено в трёх модулях (#110, #117): agent/task_parser.py (#111), solution.py::trivial_answer (#132),
+ml/experiment.py::fit_predict_final — вероятности по колонкам шаблона.
 """
 
 import sys
@@ -18,10 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_robustness import base_task, run_agent, write_task  # noqa: E402
 
 CLASSES = ["a", "b", "c"]
-# XFAIL_INVALID снят: шаг 0 и парсер для шаблона id,a,b,c починены (#111, trivial_answer), тест стал XPASS
-XFAIL_NO_MODEL = pytest.mark.xfail(
-    strict=True, reason="#117: fit_predict_final пишет одну колонку target, а не вероятности по классам"
-)
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +45,6 @@ def test_valid_per_class_answer(run):
     assert proc.returncode == 0, log
 
 
-@XFAIL_NO_MODEL
 def test_per_class_answer_from_model(run):
     _, _, proc = run
     assert "Сохранён ответ «" in proc.stderr, "сдан только тривиальный ответ\n" + proc.stderr[-3000:]
