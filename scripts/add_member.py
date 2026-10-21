@@ -53,7 +53,7 @@ ZONES = {
 REVIEWER_ROLE = {"captain": "qa", "agent": "ml", "ml": "research", "research": "ml", "qa": "captain"}
 PARTNERS = {
     "captain": "- **qa** — проверка перед каждым сабмитом и релизы `dev → main`.\n"
-    "- **agent** — цикл AutoResearch и бюджет времени.\n- **все** — стендап, окна интеграции, контракты.",
+    "- **agent** — цикл AutoResearch и бюджет времени.\n- **все** — стендап, синки, контракты.",
     "agent": "- **ml** — ежедневно в 13:00: формат гипотез (`Hypothesis.params`).\n"
     "- **research** — 22.10 13:00: playbook v1 (примеры гипотез).\n"
     "- **капитан** — ключ LLM (лично), песочница для кода LLM, доли бюджета.",
