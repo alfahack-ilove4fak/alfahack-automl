@@ -42,3 +42,39 @@ def test_model_predicts_on_unseen_test_category():
 
     assert pred.shape == (3,)
     assert np.isfinite(pred).all()
+
+
+def test_special_characters_in_column_names_are_replaced():
+    cols = ["income[usd]", "age<30", 'name"q', "income usd", "Площадь, м2"]
+    train = pd.DataFrame({c: [1.0, 2.0, 3.0] for c in cols})
+    profile = DataProfile(n_train=3, n_test=3, numeric_features=cols, categorical_features=[])
+
+    x_train, x_test = make_matrix(profile, train, train)
+
+    assert list(x_train.columns) == ["income_usd", "age_30", "name_q", "income_usd_1", "Площадь_м2"]
+    assert list(x_test.columns) == list(x_train.columns)
+
+
+def test_load_data_keeps_string_ids_and_drops_missing_target(tmp_path):
+    from interfaces.schemas import MetricSpec, TaskSpec, TaskType
+    from ml.profiling import load_data
+
+    (tmp_path / "train.csv").write_text("id,x,y\n001,1,5\n002,2,\n003,3,7\n")
+    (tmp_path / "test.csv").write_text("id,x\n010,4\n")
+    spec = TaskSpec(
+        task_md=tmp_path / "task.md",
+        task_dir=tmp_path,
+        train_path=tmp_path / "train.csv",
+        test_path=tmp_path / "test.csv",
+        submission_path=tmp_path / "submission.csv",
+        task_type=TaskType.REGRESSION,
+        target="y",
+        id_column="id",
+        metric=MetricSpec(name="rmse", greater_is_better=False),
+        submission_columns=["id", "y"],
+    )
+
+    train, test = load_data(spec)
+
+    assert train["id"].tolist() == ["001", "003"]  # строка с пустым target выкинута
+    assert test["id"].tolist() == ["010"]  # ведущий ноль на месте

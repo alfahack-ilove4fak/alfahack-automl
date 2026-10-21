@@ -248,15 +248,9 @@ CASES: list[tuple[str, Callable[[Task], Task]]] = [
 
 # Известные баги: тест помечен xfail(strict=True) — когда владелец починит, тест покраснеет «XPASS»,
 # и отметку надо снять. Ключ — id случая, значение — что сломано и где.
-KNOWN_INVALID = {
-    "multiclass-string_ids": "ml/profiling.py load_data: id «001300» читается как число, в ответе «1300»",
-}
-KNOWN_NO_MODEL = {
-    "multiclass-unicode_column_names": "ml: LightGBM не принимает JSON-символы в именах признаков",
-    "multiclass-target_with_missing": "ml: строки с пустым target не выкидываются перед обучением",
-    "regression-target_with_missing": "ml: строки с пустым target не выкидываются перед обучением",
-    "multiclass-class_with_one_object": "ml: класса с 1 объектом нет в части фолдов — «unseen labels»",
-}
+# Починены в #98 и #105: string_ids, unicode_column_names, target_with_missing, class_with_one_object
+KNOWN_INVALID: dict[str, str] = {}
+KNOWN_NO_MODEL: dict[str, str] = {}
 IDS = [f"{k}-{f.__name__}" for k, f in CASES]
 
 
