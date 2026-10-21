@@ -20,6 +20,8 @@
                    фолда, без утечки
   optuna         — {trials: 30, timeout: 600, folds: 3, rows: 100000}: подбор model_params выбранной модели
                    (ml/tuning.py) на подвыборке и меньшем числе фолдов, потом обычная CV с найденными параметрами
+  validation     — схема CV: kfold | stratified | group:<колонка> | group:duplicates | time:<колонка> (ml/validation.py);
+                   выбирается один раз до цикла (choose_validation) и одинакова у всех гипотез (ADR 0008, D1)
   proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
                    (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
 
@@ -55,6 +57,7 @@ from interfaces.schemas import (
 from ml.class_weights import cross_fit_scores, fit_weights
 from ml.features import apply_feature_ops, parse_feature_ops
 from ml.profiling import make_matrix
+from ml.validation import make_folds, parse_validation
 from runtime.budget import used_ram_mb
 from runtime.log import get_logger
 
@@ -418,10 +421,30 @@ def _fold_score(
     x_tr, x_va = x.iloc[tr], x.iloc[va]
     if ops:
         x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
-    model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
-    pred = _predict(spec, model, x_va, log_target)
-    proba = model.predict_proba(x_va) if _is_classification(spec) else None
+    known = np.ones(len(va), dtype=bool)
+    if _is_classification(spec):
+        # Схема time: в валидации бывает класс, которого ещё не было в обучении — ранняя остановка на нём падает
+        # («unseen labels»), поэтому для неё берём только известные классы; метрика — по всей валидации
+        known = np.isin(y_fit[va], np.unique(y_fit[tr]))
+        if not known.any():
+            raise ValueError("в валидации фолда нет ни одного класса из обучения")
+    eval_set = (x_va[known], y_fit[va][known])
+    model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=eval_set)
+    if not _is_classification(spec):
+        return compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)), best_iter, None
+    proba = _full_proba(spec, model, model.predict_proba(x_va))
+    pred = proba if METRICS[spec.metric.name].prediction == "proba" else proba.argmax(axis=1)
     return compute_metric(spec.metric.name, y[va], pred), best_iter, proba
+
+
+def _full_proba(spec: TaskSpec, model, proba: np.ndarray) -> np.ndarray:
+    """Вероятности по всем классам задачи. В схеме time ранний период может не знать поздний класс — его колонка 0."""
+    n_classes = len(spec.class_labels or [])
+    if proba.shape[1] == n_classes:
+        return proba
+    full = np.zeros((len(proba), n_classes))
+    full[:, np.asarray(model.classes_, dtype=int)] = proba
+    return full
 
 
 def run_experiment(
@@ -448,8 +471,13 @@ def run_experiment(
             best = tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget)
             params["_optuna_best"] = best  # повторный запуск той же гипотезы не подбирает заново
             params["model_params"] = {**(params.get("model_params") or {}), **best}
+        scheme, column = parse_validation(params.get("validation"), spec)
+        features = profile.numeric_features + profile.categorical_features
+        folds = make_folds(spec, scheme, column, train, features, y, n_folds, _split)
+        n_folds = len(folds)  # group/time могут дать меньше фолдов, чем просили
+        validation = f"{scheme}:{column}-{n_folds}" if column else f"{scheme}-{n_folds}"
         scores, best_iters, oof = [], [], []
-        for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
+        for fold, (tr, va) in enumerate(folds):
             fold_started = time.time()
             if not budget.has_time():
                 return ExperimentResult(
@@ -459,6 +487,7 @@ def run_experiment(
                     fold_scores=scores,
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
+                    validation=validation,
                 )
             score, best_iter, proba = _fold_score(spec, hypothesis, x, y, y_fit, tr, va, ops, log_target)
             best_iters.append(best_iter)
@@ -477,6 +506,7 @@ def run_experiment(
                         fit_seconds=time.time() - started,
                         peak_ram_mb=peak,
                         error=f"не успеет: прогноз ещё {forecast:.0f} с, осталось {budget.seconds_left():.0f} с",
+                        validation=validation,
                     )
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
         if _use_proba_weights(spec, params):
@@ -503,6 +533,7 @@ def run_experiment(
             std_score=float(np.std(scores)),
             fit_seconds=time.time() - started,
             peak_ram_mb=peak,
+            validation=validation,
         )
     except Exception as exc:  # noqa: BLE001 — упавшая гипотеза не должна ронять агента
         log.exception("Гипотеза %s упала", hypothesis.id)
