@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -87,9 +87,8 @@ def test_next_tag_counts_only_today_and_takes_max():
 
 def test_next_tag_uses_moscow_day_not_utc():
     # 23:30 UTC 21 октября = 02:30 МСК 22 октября: лимит платформы уже новый
-    from datetime import timezone
 
-    now = datetime(2026, 10, 21, 23, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 21, 23, 30, tzinfo=UTC)
     assert release.next_tag({"submit-20261021-3"}, now) == ("submit-20261022-1", 1)
 
 
