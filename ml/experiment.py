@@ -4,6 +4,11 @@
 не помещается в свободную память; после первого фолда — прогноз, и если остальные не успеют, эксперимент
 останавливается с TIMEOUT. Подвыборка детерминированная — все гипотезы видят одни и те же строки.
 
+Скрытый ключ optuna — {trials, timeout, folds, rows}: подбор model_params (ml/tuning.py). Его нет в списке ниже,
+поэтому LLM и playbook его не выбирают: на public/regression подбор на KFold честно хуже бейзлайна (год 5: RMSE 53.99
+против 51.25, ревью #115) — он оптимизирует утечку через повторы объектов. Вернуть в список вместе с #29, когда подбор
+пойдёт на честной схеме валидации.
+
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
   model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
                    hist_gb — HistGradientBoosting из scikit-learn: самый быстрый бустинг, категории нативно
@@ -18,6 +23,8 @@
   feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
                    элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
                    фолда, без утечки
+  proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
+                   (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
 
 """
 
@@ -48,6 +55,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
+from ml.class_weights import cross_fit_scores, fit_weights
 from ml.features import apply_feature_ops, parse_feature_ops
 from ml.profiling import make_matrix
 from runtime.budget import used_ram_mb
@@ -386,6 +394,41 @@ def _cv_rows(spec: TaskSpec, profile: DataProfile, y: np.ndarray, budget: RunBud
     return rows
 
 
+def _use_proba_weights(spec: TaskSpec, params: dict) -> bool:
+    """proba_weights действует только для классификации с метрикой по меткам — иначе молча не применяется."""
+    return (
+        bool(params.get("proba_weights"))
+        and _is_classification(spec)
+        and METRICS[spec.metric.name].prediction == "label"
+    )
+
+
+def _fold_score(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    y_fit: np.ndarray,
+    tr: np.ndarray,
+    va: np.ndarray,
+    ops,  # params.feature_ops в любом формате parse_feature_ops
+    log_target: bool,
+) -> tuple[float, int, np.ndarray | None]:
+    """Один фолд: признаки из feature_ops (учатся на train-части) → модель → метрика на валидации.
+
+    Третий элемент — вероятности классов на валидации (для proba_weights), у регрессии None.
+    """
+    x_tr, x_va = x.iloc[tr], x.iloc[va]
+    if ops:
+        x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
+    model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
+    if not _is_classification(spec):
+        return compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)), best_iter, None
+    proba = model.predict_proba(x_va)  # один раз: и для метрики, и для proba_weights
+    pred = proba if METRICS[spec.metric.name].prediction == "proba" else proba.argmax(axis=1)
+    return compute_metric(spec.metric.name, y[va], pred), best_iter, proba
+
+
 def run_experiment(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, budget: RunBudget
 ) -> ExperimentResult:
@@ -404,7 +447,14 @@ def run_experiment(
             train, y = train.iloc[rows], y[rows]
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
-        scores, best_iters = [], []
+        if params.get("optuna") and "_optuna_best" not in params:
+            from ml.tuning import tune  # здесь: tuning сам импортирует этот модуль
+
+            best = tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget)
+            params["_optuna_best"] = best  # повторный запуск той же гипотезы не подбирает заново
+            params["model_params"] = {**(params.get("model_params") or {}), **best}
+        scores, best_iters, oof = [], [], []
+        keep_oof = _use_proba_weights(spec, params)  # OOF-вероятности копим только когда они нужны (память)
         for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
             fold_started = time.time()
             if not budget.has_time():
@@ -416,12 +466,11 @@ def run_experiment(
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
                 )
-            x_tr, x_va = x.iloc[tr], x.iloc[va]
-            if ops:
-                x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
-            model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
+            score, best_iter, proba = _fold_score(spec, hypothesis, x, y, y_fit, tr, va, ops, log_target)
             best_iters.append(best_iter)
-            scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)))
+            scores.append(score)
+            if keep_oof:
+                oof.append((y[va], proba))
             peak = max(peak, used_ram_mb())
             if fold == 0 and n_folds > 1:
                 # Прогноз по первому фолду: не успеем остальные — стоп сейчас, а не через час на последнем фолде
@@ -437,6 +486,21 @@ def run_experiment(
                         error=f"не успеет: прогноз ещё {forecast:.0f} с, осталось {budget.seconds_left():.0f} с",
                     )
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
+        if _use_proba_weights(spec, params):
+            gib = spec.metric.greater_is_better
+            plain = float(np.mean(scores))
+            scores = cross_fit_scores(spec.metric.name, gib, oof)
+            weights = fit_weights(
+                spec.metric.name, gib, np.concatenate([f[0] for f in oof]), np.vstack([f[1] for f in oof])
+            )
+            params["_proba_weights"] = weights.round(4).tolist()
+            log.info(
+                "proba_weights: %s %.5f → %.5f, множители %s",
+                spec.metric.name,
+                plain,
+                np.mean(scores),
+                weights.round(2),
+            )
         return ExperimentResult(
             hypothesis_id=hypothesis.id,
             status=ExperimentStatus.OK,
@@ -458,6 +522,25 @@ def run_experiment(
         )
 
 
+PROBA_EPS = 1e-6  # вероятности 0 и 1 logloss штрафует бесконечно — слегка отодвигаем от краёв
+
+
+def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.ndarray) -> dict[str, np.ndarray]:
+    """Колонки ответа → вероятности классов. Имена совпадают с классами — по имени, иначе — по порядку (с записью в лог).
+
+    Столбцы proba идут в порядке class_labels (так кодируется target). Строки нормируются к сумме 1.
+    """
+    if proba.shape[1] != len(columns):
+        raise ValueError(f"колонок ответа {len(columns)}, а классов {proba.shape[1]}: {columns} / {class_labels}")
+    proba = np.clip(proba, PROBA_EPS, 1 - PROBA_EPS)
+    proba = proba / proba.sum(axis=1, keepdims=True)
+    if set(columns) == set(class_labels):
+        index = {label: i for i, label in enumerate(class_labels)}
+        return {col: proba[:, index[col]] for col in columns}
+    log.warning("Колонки ответа %s не совпадают с классами %s — сопоставляю по порядку", columns, class_labels)
+    return {col: proba[:, i] for i, col in enumerate(columns)}
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
@@ -474,7 +557,14 @@ def fit_predict_final(
     n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
     pred = _predict(spec, model, x_test, log_target)
+    if _use_proba_weights(spec, params) and params.get("_proba_weights"):
+        pred = (model.predict_proba(x_test) * np.asarray(params["_proba_weights"])).argmax(axis=1)
 
+    answer_columns = [c for c in spec.submission_columns if c != spec.id_column]
+    if _is_classification(spec) and len(answer_columns) > 1:
+        # Шаблон «колонка на класс» (#117): вероятности по классам в колонках шаблона
+        proba = _per_class_columns(answer_columns, spec.class_labels or [], model.predict_proba(x_test))
+        return pd.DataFrame({spec.id_column: test[spec.id_column].to_numpy(), **proba})
     if _is_classification(spec):
         labels = np.asarray(spec.class_labels)
         if METRICS[spec.metric.name].prediction == "proba":

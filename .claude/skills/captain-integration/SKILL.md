@@ -7,13 +7,13 @@ description: Работа капитана/интегратора — solution.p
 
 Пакет роли: `docs/roles/captain.md` · материалы: `docs/resources/captain.md` · модуль: `runtime/CLAUDE.md`.
 
-## Рецепт: окно интеграции (13:00 и 18:30)
-1. `gh pr list --base dev` → готовые PR (approve + зелёный CI). Сначала PR с `interfaces/`, потом остальные.
+## Рецепт: синк (13:00 и 18:30)
+1. `gh pr list --base dev` → что ждёт слияния; смотри комментарий бота слияний в PR: там причина задержки. Сливает бот, а не ты.
 2. После слияний: `git switch dev && git pull && uv run pytest && uv run python scripts/run_local.py --all --minutes 5 --mock-llm`.
 3. Красное → откат через `git revert` в PR или быстрый фикс владельцем.
 
 ## Рецепт: релиз и сабмит
-1. PR `dev → main` («релиз: …»), ревью QA, слияние только тобой.
+1. PR `dev → main` («релиз: …»), ревью QA, сливает дежурный дня.
 2. `/submit-check` → тег `sub-ГГГГ-ММ-ДД-N` → загрузка → строка в `docs/submissions.md`.
 
 ## Рецепт: новый участник

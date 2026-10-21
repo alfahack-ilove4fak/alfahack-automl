@@ -364,6 +364,81 @@ def test_unknown_feature_op_fails_cleanly():
     assert result.status == ExperimentStatus.FAILED and "magic" in result.error
 
 
+@pytest.mark.parametrize("model", ["lightgbm", *MODELS])
+def test_optuna_tunes_each_model(model):
+    package = MODELS.get(model, (None,))[0]
+    if package:
+        pytest.importorskip(package)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    small = {"lightgbm": {"n_estimators": 30}, "catboost": {"iterations": 30}, "xgboost": {"n_estimators": 30}}
+    hyp = _hyp(model=model, model_params=small.get(model, {}), optuna={"trials": 3, "timeout": 60, "folds": 2})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert hyp.params["_optuna_best"]  # что-то подобрано
+    assert hyp.params["_optuna_best"].items() <= hyp.params["model_params"].items()
+    assert len(fit_predict_final(spec, profile, hyp, train, test)) == 20
+
+
+def test_optuna_timeout_is_hard(monkeypatch):
+    import time
+
+    import ml.experiment
+
+    real_fit = ml.experiment._fit_model
+
+    def slow_fit(*args, **kwargs):
+        time.sleep(0.4)
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(ml.experiment, "_fit_model", slow_fit)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(model_params={"n_estimators": 20}, optuna={"trials": 100, "timeout": 1, "folds": 3})
+
+    started = time.time()
+    from ml.tuning import tune
+
+    x, _ = ml.experiment.make_matrix(profile, train, train.head(0))
+    y = train["y"].to_numpy()
+    tune(spec, hyp, x, y, y, [], False, RunBudget())
+
+    assert time.time() - started < 1 + 0.4 * 2 + 1  # таймаут + не больше одного фолда сверху + запас
+
+
+def test_optuna_respects_agent_budget():
+    from ml.tuning import tune
+
+    class AlmostOver(RunBudget):
+        def seconds_left(self) -> float:
+            return 0.0
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    import ml.experiment
+
+    x, _ = ml.experiment.make_matrix(profile, train, train.head(0))
+    y = train["y"].to_numpy()
+    assert tune(spec, _hyp(optuna={"trials": 10, "timeout": 600}), x, y, y, [], False, AlmostOver()) == {}
+
+
+def test_optuna_not_repeated_for_same_hypothesis(monkeypatch):
+    import ml.tuning
+
+    calls = []
+    monkeypatch.setattr(ml.tuning, "tune", lambda *a, **k: calls.append(1) or {"num_leaves": 20})
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(model_params={"n_estimators": 20}, optuna={"trials": 2})
+
+    run_experiment(spec, profile, hyp, train, RunBudget())
+    run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert calls == [1] and hyp.params["model_params"]["num_leaves"] == 20
+
+
 @pytest.mark.parametrize(
     "bad", [{"feature_ops": 5}, {"feature_ops": [{"op": "pair_ops", "depth": 3}]}, {"n_folds": None}]
 )
@@ -383,3 +458,88 @@ def test_feature_ops_with_params_in_experiment():
     result = run_experiment(spec, profile, hyp, train, RunBudget())
     assert result.status == ExperimentStatus.OK, result.error
     assert len(fit_predict_final(spec, profile, hyp, train, test)) == 20
+
+
+def test_proba_weights_in_experiment_and_final():
+    rng = np.random.default_rng(5)
+    n = 600
+    train = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "b": rng.normal(size=n)})
+    train["y"] = np.where(train["a"] > 1.4, "rare", np.where(train["b"] > 0, "up", "down"))
+    test = train.drop(columns="y").head(30)
+    profile = DataProfile(n_train=n, n_test=30, numeric_features=["a", "b"], categorical_features=[])
+    spec = _spec(TaskType.MULTICLASS, "f1_macro", greater=True, labels=["down", "rare", "up"])
+    hyp = _hyp(proba_weights=True, model_params={"n_estimators": 50})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert len(hyp.params["_proba_weights"]) == 3
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert set(answer["y"]) <= {"down", "rare", "up"}
+
+
+def test_proba_weights_ignored_where_not_applicable():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(proba_weights=True, model_params={"n_estimators": 20})
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    assert "_proba_weights" not in hyp.params
+
+    spec = _spec(TaskType.BINARY, "roc_auc", greater=True, labels=["neg", "pos"])
+    train, _, profile = _data(TaskType.BINARY)
+    hyp = _hyp(proba_weights=True, model_params={"n_estimators": 20})
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    assert "_proba_weights" not in hyp.params
+
+
+def _three_classes() -> tuple[pd.DataFrame, pd.DataFrame, DataProfile]:
+    rng = np.random.default_rng(7)
+    n = 300
+    train = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "b": rng.normal(size=n)})
+    train["y"] = np.where(train["a"] > 0.5, "x", np.where(train["b"] > 0, "y", "z"))
+    profile = DataProfile(n_train=n, n_test=20, numeric_features=["a", "b"], categorical_features=[])
+    return train, train.drop(columns="y").head(20), profile
+
+
+@pytest.mark.parametrize("columns", [["x", "y", "z"], ["z", "x", "y"], ["class_1", "class_2", "class_3"]])
+def test_per_class_probability_answer(columns):
+    """#117: шаблон «колонка на класс» — вероятности по колонкам шаблона (по имени, иначе по порядку)."""
+    train, test, profile = _three_classes()
+    spec = _spec(TaskType.MULTICLASS, "logloss", greater=False, labels=["x", "y", "z"])
+    spec = spec.model_copy(update={"submission_columns": ["id", *columns]})
+    hyp = _hyp(model_params={"n_estimators": 30})
+
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+
+    assert list(answer.columns) == ["id", *columns]
+    proba = answer[columns].to_numpy()
+    assert ((proba > 0) & (proba < 1)).all()
+    assert np.allclose(proba.sum(axis=1), 1.0)
+    if columns[0] == "z":  # по имени, а не по порядку: колонка «z» — вероятность класса z
+        plain = fit_predict_final(
+            spec.model_copy(update={"submission_columns": ["id", "x", "y", "z"]}), profile, hyp, train, test
+        )
+        assert np.allclose(answer["z"], plain["z"])
+
+
+def test_per_class_column_count_mismatch_is_error():
+    train, test, profile = _three_classes()
+    spec = _spec(TaskType.MULTICLASS, "logloss", greater=False, labels=["x", "y", "z"])
+    spec = spec.model_copy(update={"submission_columns": ["id", "x", "y"]})
+    hyp = _hyp(model_params={"n_estimators": 30})
+    run_experiment(spec, profile, hyp, train, RunBudget())
+    with pytest.raises(ValueError, match="колонок ответа 2"):
+        fit_predict_final(spec, profile, hyp, train, test)
+
+
+def test_optuna_hidden_from_agent_until_honest_validation():
+    """Ревью #115: подбор на KFold честно хуже бейзлайна — LLM и playbook не должны видеть ключ optuna (до #29)."""
+    import re
+    import textwrap
+
+    import ml.experiment
+
+    section = ml.experiment.__doc__.split("Поддерживаемые params", 1)[1].split("\n", 1)[-1]
+    keys = set(re.findall(r"^(\w+)\s+—", textwrap.dedent(section), re.MULTILINE))
+    assert "optuna" not in keys
