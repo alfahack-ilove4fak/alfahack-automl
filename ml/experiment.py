@@ -1,7 +1,8 @@
 """Эксперимент = гипотеза → кросс-валидация → ExperimentResult. Владелец — ML-pipeline инженер.
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
-  model          — "lightgbm" (пока единственная; добавить catboost/xgboost — задачи L1/L2 ML-инженера)
+  model          — "lightgbm" (по умолчанию; пока единственная). Список — MODEL_FITTERS.
+                   Неизвестное имя → ExperimentResult(status=FAILED), а не тихая подмена на LightGBM
   model_params   — словарь гиперпараметров модели
   n_folds        — число фолдов (по умолчанию 5)
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
@@ -59,11 +60,54 @@ def _encode_target(spec: TaskSpec, y: pd.Series) -> np.ndarray:
     return y.to_numpy(dtype=float)
 
 
-def _make_model(spec: TaskSpec, hypothesis: Hypothesis):
+def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis):
     params = {**BASE_PARAMS, **hypothesis.params.get("model_params", {})}
     if _is_classification(spec):
         return lgb.LGBMClassifier(class_weight=hypothesis.params.get("class_weight"), **params)
     return lgb.LGBMRegressor(**params)
+
+
+def _fit_lightgbm(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: int | None = None,
+) -> tuple[object, int]:
+    """Обучить LightGBM. Возвращает (модель, лучшее число деревьев).
+
+    С eval_set — ранняя остановка на валидации фолда (CV).
+    Без eval_set — ровно n_estimators деревьев (финальное обучение на всём train).
+    """
+    model = _make_lightgbm(spec, hypothesis)
+    if n_estimators is not None:
+        model.set_params(n_estimators=n_estimators)
+    if eval_set is None:
+        model.fit(x, y)
+        return model, model.n_estimators
+    model.fit(x, y, eval_set=[eval_set], callbacks=[lgb.early_stopping(EARLY_STOPPING, verbose=False)])
+    return model, model.best_iteration_ or model.n_estimators
+
+
+# Модели, которые понимает params.model. Новая модель = функция _fit_<имя> с той же сигнатурой + строка здесь
+MODEL_FITTERS = {"lightgbm": _fit_lightgbm}
+DEFAULT_MODEL = "lightgbm"
+
+
+def _fit_model(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: int | None = None,
+) -> tuple[object, int]:
+    """Выбрать модель по params.model и обучить её."""
+    name = str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower()
+    if name not in MODEL_FITTERS:
+        raise ValueError(f"неизвестная модель {name!r}, доступны: {sorted(MODEL_FITTERS)}")
+    return MODEL_FITTERS[name](spec, hypothesis, x, y, eval_set, n_estimators)
 
 
 def _predict(spec: TaskSpec, model, x: pd.DataFrame, log_target: bool):
@@ -101,14 +145,8 @@ def run_experiment(
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
                 )
-            model = _make_model(spec, hypothesis)
-            model.fit(
-                x.iloc[tr],
-                y_fit[tr],
-                eval_set=[(x.iloc[va], y_fit[va])],
-                callbacks=[lgb.early_stopping(EARLY_STOPPING, verbose=False)],
-            )
-            best_iters.append(model.best_iteration_ or BASE_PARAMS["n_estimators"])
+            model, best_iter = _fit_model(spec, hypothesis, x.iloc[tr], y_fit[tr], eval_set=(x.iloc[va], y_fit[va]))
+            best_iters.append(best_iter)
             scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x.iloc[va], log_target)))
             peak = max(peak, used_ram_mb())
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
@@ -142,10 +180,9 @@ def fit_predict_final(
     x, x_test = make_matrix(profile, train, test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
-    model = _make_model(spec, hypothesis)
     # На всех данных деревьев нужно чуть больше, чем на 4/5 из CV
-    model.set_params(n_estimators=max(50, int(params.get("_best_iteration", 500) * 1.1)))
-    model.fit(x, y_fit)
+    n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
+    model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
     pred = _predict(spec, model, x_test, log_target)
 
     if _is_classification(spec):
