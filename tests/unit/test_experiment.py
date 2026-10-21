@@ -87,3 +87,38 @@ def test_unknown_model_fails_instead_of_silent_lightgbm():
     assert "random_forest" in result.error
     with pytest.raises(ValueError, match="неизвестная модель"):
         fit_predict_final(spec, profile, _hyp(model="random_forest"), train, test)
+
+
+@pytest.mark.parametrize("task_type", [TaskType.REGRESSION, TaskType.BINARY])
+def test_catboost_ok_and_writes_no_files(task_type, tmp_path, monkeypatch):
+    pytest.importorskip("catboost")  # catboost — из группы full; без неё тест пропускается
+    monkeypatch.chdir(tmp_path)  # на платформе рабочая папка — каталог задачи, мусор туда писать нельзя
+    if task_type == TaskType.REGRESSION:
+        spec = _spec(task_type, "rmse", greater=False)
+    else:
+        spec = _spec(task_type, "f1_macro", greater=True, labels=["neg", "pos"])
+    train, test, profile = _data(task_type)
+    hyp = _hyp(model="catboost", class_weight="balanced", model_params={"iterations": 50, "depth": 4})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert 1 <= hyp.params["_best_iteration"] <= 50
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert len(answer) == 20
+    if task_type == TaskType.BINARY:
+        assert set(answer["y"]) <= {"neg", "pos"}
+    assert list(tmp_path.iterdir()) == []  # нет папки catboost_info
+
+
+def test_catboost_rejects_lightgbm_params():
+    pytest.importorskip("catboost")
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+
+    result = run_experiment(
+        spec, profile, _hyp(model="catboost", model_params={"colsample_bytree": 0.8}), train, RunBudget()
+    )
+
+    assert result.status == ExperimentStatus.FAILED
+    assert "colsample_bytree" in result.error

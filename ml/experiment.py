@@ -1,9 +1,10 @@
 """Эксперимент = гипотеза → кросс-валидация → ExperimentResult. Владелец — ML-pipeline инженер.
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
-  model          — "lightgbm" (по умолчанию; пока единственная). Список — MODEL_FITTERS.
+  model          — "lightgbm" (по умолчанию) | "catboost". Список — MODEL_FITTERS.
                    Неизвестное имя → ExperimentResult(status=FAILED), а не тихая подмена на LightGBM
-  model_params   — словарь гиперпараметров модели
+  model_params   — словарь гиперпараметров именно выбранной модели (у LightGBM num_leaves, у CatBoost depth);
+                   чужой параметр → FAILED с ошибкой библиотеки
   n_folds        — число фолдов (по умолчанию 5)
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
   class_weight   — для классификации: "balanced" или None
@@ -47,6 +48,15 @@ BASE_PARAMS = {
     "n_jobs": -1,
 }
 EARLY_STOPPING = 100
+CATBOOST_PARAMS = {
+    "iterations": 3000,
+    "learning_rate": 0.05,
+    "depth": 6,
+    "random_seed": SEED,
+    "thread_count": -1,
+    "verbose": False,
+    "allow_writing_files": False,  # иначе CatBoost создаёт папку catboost_info в каталоге задачи
+}
 
 
 def _is_classification(spec: TaskSpec) -> bool:
@@ -90,8 +100,42 @@ def _fit_lightgbm(
     return model, model.best_iteration_ or model.n_estimators
 
 
+def _fit_catboost(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: int | None = None,
+) -> tuple[object, int]:
+    """Обучить CatBoost. Возвращает (модель, лучшее число деревьев). Режимы — как у _fit_lightgbm.
+
+    Категории (pandas category из make_matrix) CatBoost кодирует сам — упорядоченными target-статистиками
+    внутри обучения, без утечки на валидацию.
+    """
+    # Импорт здесь, а не в начале файла: catboost — из группы full, без него падает только эта гипотеза
+    from catboost import CatBoostClassifier, CatBoostRegressor
+
+    params = {**CATBOOST_PARAMS, **hypothesis.params.get("model_params", {})}
+    if n_estimators is not None:
+        params["iterations"] = n_estimators
+    params["cat_features"] = [c for c in x.columns if isinstance(x[c].dtype, pd.CategoricalDtype)]
+    if _is_classification(spec):
+        if hypothesis.params.get("class_weight") == "balanced":
+            params["auto_class_weights"] = "Balanced"
+        model = CatBoostClassifier(**params)
+    else:
+        model = CatBoostRegressor(**params)
+    if eval_set is None:
+        model.fit(x, y)
+    else:
+        # use_best_model: после ранней остановки в модели остаются деревья до лучшей итерации
+        model.fit(x, y, eval_set=eval_set, early_stopping_rounds=EARLY_STOPPING, use_best_model=True)
+    return model, model.tree_count_
+
+
 # Модели, которые понимает params.model. Новая модель = функция _fit_<имя> с той же сигнатурой + строка здесь
-MODEL_FITTERS = {"lightgbm": _fit_lightgbm}
+MODEL_FITTERS = {"lightgbm": _fit_lightgbm, "catboost": _fit_catboost}
 DEFAULT_MODEL = "lightgbm"
 
 
