@@ -5,12 +5,12 @@
 | Роль | Пакет | Материалы | Кто сейчас |
 |---|---|---|---|
 | Капитан / интегратор | [captain.md](captain.md) | [resources/captain.md](../resources/captain.md) | @thenlaooo |
-| LLM/agent-инженер | [agent.md](agent.md) | [resources/agent.md](../resources/agent.md) | @n0h4ndy ⏳ |
+| LLM/agent-инженер | [agent.md](agent.md) | [resources/agent.md](../resources/agent.md) | @n0h4ndy |
 | ML-pipeline инженер | [ml.md](ml.md) | [resources/ml.md](../resources/ml.md) | @marenkov17 |
-| Исследователь / Data Scientist | [research.md](research.md) | [resources/research.md](../resources/research.md) | — (свободно) |
+| Исследователь / Data Scientist | [research.md](research.md) | [resources/research.md](../resources/research.md) | @Richi-Marqez ⏳ |
 | QA / MLOps | [qa.md](qa.md) | [resources/qa.md](../resources/qa.md) | @dzigoku-ku |
 
-⏳ — приглашение в организацию ещё не принято. Свободные роли: Исследователь / Data Scientist — их задачи L0–L1 раздаём на стендапе.
+⏳ — приглашение в организацию ещё не принято.
 
 <!-- team:end -->
 
