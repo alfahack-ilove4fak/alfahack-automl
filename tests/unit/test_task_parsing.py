@@ -43,27 +43,36 @@ def test_public_tasks_parsed(folder, task_type, target, metric, n_classes):
         ("Метрика оценки: MSE (не путать с RMSE)", "mse"),
         # «weighted f1» не должна проиграть простому «f1-score»
         ("Submissions are scored using Weighted F1-score.", "f1_weighted"),
-        # Пока не находятся — чинить в задаче Q-L1-3 (реестр метрик), затем убрать xfail
-        pytest.param(
-            "Решения оцениваются по средней абсолютной ошибке",
-            "mae",
-            marks=pytest.mark.xfail(strict=True, reason="нет падежных форм в aliases"),
-        ),
-        pytest.param(
-            "Evaluation metric: Root Mean Squared Logarithmic Error",
-            "rmsle",
-            marks=pytest.mark.xfail(strict=True, reason="нет полного названия в aliases"),
-        ),
-        pytest.param(
-            "Submissions are evaluated on area under the ROC curve",
-            "roc_auc",
-            marks=pytest.mark.xfail(strict=True, reason="нет «area under the roc curve» в aliases"),
-        ),
-        pytest.param(
-            "Метрика — macro-averaged F1",
-            "f1_macro",
-            marks=pytest.mark.xfail(strict=True, reason="нет «macro-averaged f1» в aliases"),
-        ),
+        # Падежи, полные названия и синонимы (Q-L1-3)
+        ("Решения оцениваются по средней абсолютной ошибке", "mae"),
+        ("Метрика — средняя абсолютная процентная ошибка (MAPE)", "mape"),
+        ("Evaluation metric: Root Mean Squared Logarithmic Error", "rmsle"),
+        ("Evaluation metric: Mean Squared Logarithmic Error", "msle"),
+        ("Submissions are evaluated on area under the ROC curve", "roc_auc"),
+        ("Метрика — macro-averaged F1", "f1_macro"),
+        ("F1-score (macro)", "f1_macro"),
+        ("Метрика — F1", "f1"),
+        ("Основная метрика — F1 (гармоническое среднее precision и recall)", "f1"),
+        ("Метрика — взвешенная F1", "f1_weighted"),
+        ("Метрика: PR-AUC", "pr_auc"),
+        ("Metric: AUC-PR", "pr_auc"),
+        ("Submissions are scored by Average Precision", "pr_auc"),
+        ("Метрика — коэффициент Джини (Gini = 2·AUC − 1)", "gini"),
+        ("Evaluation: Normalized Gini coefficient", "gini"),
+        ("Metric: Weighted AUC", "roc_auc_weighted"),
+        ("Метрика — SMAPE", "smape"),
+        ("Метрика: WAPE", "wape"),
+        ("Качество оценивается коэффициентом детерминации", "r2"),
+        ("Metric: R-squared", "r2"),
+        ("Метрика: Precision", "precision"),
+        ("Main metric is Recall of the positive class", "recall"),
+        ("Оцениваем кросс-энтропией", "logloss"),
+        ("Метрика: медианная абсолютная ошибка", "medae"),
+        ("Метрика: квадратично взвешенная каппа", "qwk"),
+        ("Метрика: сбалансированная точность", "balanced_accuracy"),
+        ("Метрика: RMSE (корень из среднеквадратичной ошибки)", "rmse"),
+        # Обычные слова в описании данных — не метрика (иначе агент решит, что это классификация)
+        ("Полнота данных высокая, точность измерений 0.1 мм", None),
     ],
 )
 def test_find_metric_in_text(text, expected):
