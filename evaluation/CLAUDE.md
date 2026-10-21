@@ -8,7 +8,7 @@
 | `metrics.py` | реестр метрик: функция, направление, что нужно на вход (value/label/proba), как называется в тексте |
 | `submission.py` | `validate_submission` (все правила платформы) и `write_submission_atomic` |
 | `local_score.py` | балл по формуле организаторов: 100·max(0, улучшение над бейзлайном); бейзлайн — тривиальный ответ |
-| `harness.py` | «локальный лидерборд»: отложенная часть train как тест, прогон агента, баллы → `runs/harness/leaderboard.csv`. Запуск: `uv run python -m evaluation.harness --all --minutes 5` |
+| `harness.py` | «локальный лидерборд»: отложенная часть train как тест, прогон агента, баллы → `runs/harness/leaderboard.csv`. Запуск: `uv run python -m evaluation.harness --all --minutes 5`. В PR — метка `harness` → таблица «было/стало» (`.github/workflows/harness-pr.yml`, `scripts/harness_compare.py`) |
 
 ## Контракты
 - Создаёшь: `ValidationReport`, реестр `METRICS`. Твой реестр используют agent (поиск метрики в тексте) и ml (CV).

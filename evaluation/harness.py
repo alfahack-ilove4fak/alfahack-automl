@@ -170,7 +170,15 @@ def run_with_limits(cmd: list[str], cwd: Path, env: dict[str, str], timeout: flo
     return (None if killed else proc.returncode), time.time() - started, peak
 
 
-def run_task(task_md: Path, workdir: Path, minutes: float, frac: float, rows: int | None, use_llm: bool) -> dict:
+def run_task(
+    task_md: Path,
+    workdir: Path,
+    minutes: float,
+    frac: float,
+    rows: int | None,
+    use_llm: bool,
+    agent_root: Path = ROOT,
+) -> dict:
     """Одна строка лидерборда. Любая ошибка — строка со status=FAILED и score=0, а не исключение."""
     row = {"task": task_md.parent.relative_to(ROOT).as_posix() if task_md.is_relative_to(ROOT) else str(task_md)}
     row.update(minutes=minutes, score=0.0, status="FAILED", error="")
@@ -187,7 +195,7 @@ def run_task(task_md: Path, workdir: Path, minutes: float, frac: float, rows: in
         if not use_llm:
             env["LLM_MOCK"] = "1"
         code, row["seconds"], row["peak_ram_mb"] = run_with_limits(
-            [sys.executable, str(ROOT / "solution.py"), str(prepared["task_md"])],
+            [sys.executable, str(agent_root / "solution.py"), str(prepared["task_md"])],
             prepared["task_md"].parent,
             env,
             minutes * 60 + GRACE_SEC,
@@ -214,9 +222,9 @@ def run_task(task_md: Path, workdir: Path, minutes: float, frac: float, rows: in
 # --- 3. Лидерборд
 
 
-def commit_id() -> str:
-    proc = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True)
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+def commit_id(root: Path = ROOT) -> str:
+    proc = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True)
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout.strip()
     return (proc.stdout.strip() or "unknown") + ("-dirty" if dirty else "")
 
 
@@ -259,17 +267,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rows", type=int, help="урезать train до N строк до разбиения (быстрый прогон)")
     parser.add_argument("--llm", action="store_true", help="не выключать LLM (тратит общий бюджет ₽)")
     parser.add_argument("--out", type=Path, default=LEADERBOARD, help="CSV лидерборда (дописываем строки)")
+    parser.add_argument(
+        "--agent-root",
+        type=Path,
+        default=ROOT,
+        help="папка с solution.py другой версии агента (сравнение «было/стало»: задачи и разбиение — те же)",
+    )
     args = parser.parse_args(argv)
 
     tasks = find_tasks() if args.all else [t.resolve() for t in args.task or []]
     if not tasks:
         parser.error("укажи --all или --task")
-    commit, date = commit_id(), time.strftime("%Y-%m-%d %H:%M")
+    commit, date = commit_id(args.agent_root.resolve()), time.strftime("%Y-%m-%d %H:%M")
     rows = []
     with tempfile.TemporaryDirectory(prefix="harness_") as tmp:
         for task_md in tasks:
             print(f"… {task_md.parent.name}: бюджет {args.minutes} мин", flush=True)
-            row = run_task(task_md, Path(tmp), args.minutes, args.frac, args.rows, args.llm)
+            row = run_task(task_md, Path(tmp), args.minutes, args.frac, args.rows, args.llm, args.agent_root.resolve())
             rows.append({"date": date, "commit": commit, **row})
             print(f"  {row['status']}: балл {row['score']:.1f}", flush=True)
     append_rows(rows, args.out)

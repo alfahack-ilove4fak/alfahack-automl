@@ -7,9 +7,11 @@
 |---|---|
 | `task_parser.py` | `task.md` + файлы → `TaskSpec`. Детерминированный, работает без LLM — не ломать! |
 | `llm_client.py` | Qwen через OpenAI-совместимый API: кэш на диск, учёт ₽, `available()` = False без ключа |
-| `hypotheses.py` | откуда берутся гипотезы: сейчас только `research/playbook.yaml`, дальше — LLM |
+| `hypotheses.py` | `propose_hypotheses`: сначала LLM (если доступна), недостающие — из `research/playbook.yaml`; повторы id/params отсекаются |
+| `llm_hypotheses.py` | ответ LLM → проверенные `Hypothesis`: схема, допустимые kind и ключи params, без повторов |
 | `prompting.py` | сборка промптов из `agent/prompts/*.md` (string.Template, `$плейсхолдеры`); нет файла → `None` → playbook |
-| `loop.py` | цикл AutoResearch: гипотеза → `ml.run_experiment` → принять, если лучше на `min_delta` |
+| `memory.py` | память цикла: решение по каждой гипотезе и последние выводы LLM после неудачных пачек |
+| `loop.py` | цикл AutoResearch: очередь гипотез (по 3 за запрос к LLM) → `ml.run_experiment` → принять, если лучше на `min_delta` |
 
 ## Контракты
 - Создаёшь: `TaskSpec`, `Hypothesis`. Читаешь: `DataProfile`, `ExperimentResult`, `RunBudget`.
