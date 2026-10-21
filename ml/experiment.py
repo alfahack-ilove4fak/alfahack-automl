@@ -15,6 +15,9 @@
   n_folds        — число фолдов (по умолчанию 5)
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
   class_weight   — для классификации: "balanced" или None
+  feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
+                   элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
+                   фолда, без утечки
 
 """
 
@@ -44,6 +47,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
+from ml.features import apply_feature_ops, parse_feature_ops
 from ml.profiling import make_matrix
 from runtime.budget import used_ram_mb
 from runtime.log import get_logger
@@ -387,8 +391,11 @@ def run_experiment(
     peak = used_ram_mb()
     params = hypothesis.params
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
-    n_folds = int(params.get("n_folds", 5))
     try:
+        # Разбор params — внутри try: кривой n_folds или feature_ops от LLM → FAILED, а не падение цикла агента
+        n_folds = int(params.get("n_folds", 5))
+        ops = params.get("feature_ops")
+        parse_feature_ops(ops)
         y = _encode_target(spec, train[spec.target])
         rows = _cv_rows(spec, profile, y, budget)
         if rows is not None:
@@ -407,9 +414,12 @@ def run_experiment(
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
                 )
-            model, best_iter = _fit_model(spec, hypothesis, x.iloc[tr], y_fit[tr], eval_set=(x.iloc[va], y_fit[va]))
+            x_tr, x_va = x.iloc[tr], x.iloc[va]
+            if ops:
+                x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
+            model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
             best_iters.append(best_iter)
-            scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x.iloc[va], log_target)))
+            scores.append(compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)))
             peak = max(peak, used_ram_mb())
             if fold == 0 and n_folds > 1:
                 # Прогноз по первому фолду: не успеем остальные — стоп сейчас, а не через час на последнем фолде
@@ -455,6 +465,9 @@ def fit_predict_final(
     x, x_test = make_matrix(profile, train, test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
+    ops = params.get("feature_ops")
+    if ops:
+        x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
     # На всех данных деревьев нужно чуть больше, чем на 4/5 из CV
     n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
