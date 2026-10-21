@@ -44,3 +44,67 @@ hypotheses:
     title: LightGBM с большим числом листьев
     rationale: На больших данных с сложными взаимодействиями признаков более ёмкая модель может выиграть
     params: {model: lightgbm, model_params: {num_leaves: 255, min_child_samples: 10}}
+
+  # --- кандидаты v1 (проверяются стендом research/bench_playbook.py) ---
+  - id: lgbm_feature_subsample
+    kind: hyperparams
+    title: LightGBM с половиной признаков на дерево
+    rationale: При многих похожих признаках деревья меньше цепляются за один и тот же сильный признак, ансамбль разнообразнее
+    params: {model: lightgbm, model_params: {colsample_bytree: 0.5}}
+
+  - id: lgbm_extra_trees
+    kind: hyperparams
+    title: LightGBM со случайными порогами (extra_trees)
+    rationale: Случайный выбор порога — сильная регуляризация для шумных признаков, модель хуже запоминает train
+    params: {model: lightgbm, model_params: {extra_trees: true}}
+
+  - id: lgbm_strong_reg
+    kind: hyperparams
+    title: LightGBM с сильной L1/L2-регуляризацией листьев
+    rationale: Штраф на значения листьев сглаживает предсказания и снижает переобучение без смены структуры деревьев
+    params: {model: lightgbm, model_params: {reg_alpha: 1.0, reg_lambda: 10.0}}
+
+  - id: lgbm_smooth_leaves
+    kind: hyperparams
+    title: LightGBM с крупными сглаженными листьями
+    rationale: Минимум 100 объектов в листе и path_smooth стягивают значения малых листьев к родителю — устойчивее на шумных данных
+    params: {model: lightgbm, model_params: {min_child_samples: 100, path_smooth: 10.0}}
+
+  - id: lgbm_shallow
+    kind: hyperparams
+    title: LightGBM с ограниченной глубиной деревьев
+    rationale: Неглубокие деревья ловят простые взаимодействия и меньше переобучаются на небольших данных
+    params: {model: lightgbm, model_params: {max_depth: 6, num_leaves: 40}}
+
+  - id: lgbm_cat_regularized
+    kind: hyperparams
+    title: LightGBM с регуляризацией категориальных разбиений
+    rationale: Категории с большим числом значений легко переобучаются; сглаживание и минимум объектов на группу это сдерживают
+    requires: categorical
+    params: {model: lightgbm, model_params: {cat_smooth: 50, cat_l2: 20, min_data_per_group: 200, max_cat_threshold: 16}}
+
+  - id: lgbm_fine_bins
+    kind: hyperparams
+    title: LightGBM с более точной сеткой порогов
+    rationale: Для непрерывных признаков 1023 бина вместо 255 позволяют найти более точные пороги разбиения
+    params: {model: lightgbm, model_params: {max_bin: 1023}}
+
+  - id: lgbm_linear_tree
+    kind: model
+    title: LightGBM с линейными моделями в листьях
+    rationale: Кусочно-линейные листья лучше экстраполируют гладкие зависимости (например, когда test сдвинут относительно train)
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {linear_tree: true, linear_lambda: 1.0}}
+
+  - id: lgbm_slow_regularized
+    kind: hyperparams
+    title: Медленный шаг + регуляризация (комбинация)
+    rationale: Цикл проверяет гипотезы по отдельности и не складывает выигрыши; эта комбинация объединяет две самые надёжные идеи
+    params: {model: lightgbm, model_params: {learning_rate: 0.02, num_leaves: 31, min_child_samples: 50, reg_lambda: 1.0, colsample_bytree: 0.5}}
+
+  - id: log_target_slow
+    kind: preprocessing
+    title: log1p(target) + медленный шаг (комбинация)
+    rationale: Если скошенный таргет помог, меньший шаг обычно добавляет ещё немного — комбинация для цикла без сложения выигрышей
+    task_types: [regression]
+    params: {model: lightgbm, log_target: true, model_params: {learning_rate: 0.02}}
