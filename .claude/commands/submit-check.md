@@ -9,7 +9,7 @@ allowed-tools: Bash(git *), Bash(gh run list *), Bash(gh run view *), Bash(uv ru
 2. Сколько сабмитов сегодня уже было — по `docs/submissions.md` (лимит 3, сброс в 00:00 МСК).
 3. Что нового по сравнению с прошлым сабмитом и почему ждём улучшения (локальный скор/харнесс: было → стало).
 4. Нет ли в коде «подгонки» под публичные задачи (имена колонок `site_eui`, `attack_cat`, пути `tasks/public` в коде агента).
-5. Сборка: `uv run python scripts/package_submission.py` → zip, в корне `solution.py`.
+5. Сборка: `uv run python scripts/package_submission.py` → zip, в корне **только** `solution.py` и `requirements.txt` (скрипт сам это проверяет). Тест «как на платформе»: `uv run pytest tests/smoke/test_package.py`.
 6. Прогон из архива на обеих публичных задачах в чистой папке с бюджетом (если есть `scripts/pre_submit.py` — через него), сабмит валиден.
 7. Команды тега: `git tag sub-ГГГГ-ММ-ДД-N origin/main && git push origin sub-ГГГГ-ММ-ДД-N` (push — после подтверждения).
 8. Напомни: после загрузки — строка в `docs/submissions.md` (локально vs public).
