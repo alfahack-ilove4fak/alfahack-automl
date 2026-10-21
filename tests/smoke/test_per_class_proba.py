@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_robustness import base_task, run_agent, write_task  # noqa: E402
 
 CLASSES = ["a", "b", "c"]
+# XFAIL_INVALID снят: шаг 0 и парсер для шаблона id,a,b,c починены (#111, trivial_answer), тест стал XPASS
 XFAIL_NO_MODEL = pytest.mark.xfail(
     strict=True, reason="#117: fit_predict_final пишет одну колонку target, а не вероятности по классам"
 )
