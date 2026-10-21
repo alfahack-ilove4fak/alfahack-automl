@@ -69,6 +69,12 @@ def parse_task(task_md: Path) -> TaskSpec:
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
+        if target not in train_cols:
+            # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
+            target = _guess_target(train_cols, test_cols, dictionary)
+            notes.append(
+                f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
+            )
     else:
         target = _guess_target(train_cols, test_cols, dictionary)
         id_column = _guess_id(test_cols, dictionary)
@@ -87,6 +93,9 @@ def parse_task(task_md: Path) -> TaskSpec:
     class_labels = None
     if task_type in (TaskType.BINARY, TaskType.MULTICLASS):
         class_labels = sorted(map(str, y.dropna().unique()))
+        answer_columns = submission_columns[1:]
+        if len(answer_columns) > 1 and set(answer_columns) != set(class_labels):
+            notes.append(f"Колонки ответа {answer_columns} не совпадают с классами train {class_labels}")
 
     spec = TaskSpec(
         task_md=task_md,
