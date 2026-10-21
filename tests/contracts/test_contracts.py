@@ -93,3 +93,31 @@ def test_only_allowed_imports():
                 if IMPORT_TO_PACKAGE.get(name, name).lower() not in allowed:
                     bad.append(f"{py.relative_to(ROOT)}: import {name}")
     assert not bad, "Импорты вне requirements.txt:\n" + "\n".join(bad)
+
+
+def test_beats_refuses_to_compare_different_validation_schemes():
+    base = ExperimentResult(hypothesis_id="a", status=ExperimentStatus.OK, metric_name="rmse", mean_score=2.0)
+    honest = ExperimentResult(
+        hypothesis_id="b", status=ExperimentStatus.OK, metric_name="rmse", mean_score=1.0, validation="group-5"
+    )
+    assert not honest.beats(base, greater_is_better=False)  # другая схема CV: несравнимо
+    same = honest.model_copy(update={"validation": "kfold-5"})
+    assert same.beats(base, greater_is_better=False)
+
+
+def test_refit_params_and_code_result_roundtrip():
+    from interfaces.schemas import CodeResult
+
+    result = ExperimentResult(
+        hypothesis_id="a", status="ok", metric_name="rmse", refit_params={"n_estimators": 321}, validation="kfold-5"
+    )
+    assert ExperimentResult.model_validate_json(result.model_dump_json()) == result
+    code = CodeResult(exit_code=1, stderr="Traceback", timed_out=False, seconds=0.5)
+    assert CodeResult.model_validate_json(code.model_dump_json()) == code
+
+
+def test_stubs_accept_budget_and_run_code():
+    spec = stubs.stub_task_spec()
+    hyps = stubs.stub_propose_hypotheses(spec, None, [], k=1, budget=RunBudget())
+    assert len(hyps) == 1
+    assert stubs.stub_run_code("print(1)", Path("."), timeout=1.0, mem_mb=64).exit_code == 0

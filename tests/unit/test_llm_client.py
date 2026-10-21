@@ -56,6 +56,24 @@ def answer_with(client, monkeypatch, text):
         ),
         ('[{"kind": "model"}]', [{"kind": "model"}]),
         ('{"title": "окно [7 дней]"}', {"title": "окно [7 дней]"}),
+        # два объекта подряд — берём оба
+        ('{"kind": "model"} и ещё {"kind": "features"}', [{"kind": "model"}, {"kind": "features"}]),
+        # оборвана обёртка-объект — спасаем целые гипотезы внутри
+        (
+            '{"hypotheses": [{"id": "a"}, {"id": "b", "params": {}}, {"id": "c", "ti',
+            [
+                {"id": "a"},
+                {"id": "b", "params": {}},
+            ],
+        ),
+        # ответ оборван лимитом токенов — спасаем целые объекты
+        (
+            '```json\n[{"id": "a", "params": {"n": [1, 2]}}, {"id": "b"}, {"id": "c", "ti',
+            [
+                {"id": "a", "params": {"n": [1, 2]}},
+                {"id": "b"},
+            ],
+        ),
     ],
 )
 def test_chat_json_extracts_json(client, monkeypatch, text, expected):
@@ -71,7 +89,6 @@ def test_chat_json_extracts_json(client, monkeypatch, text, expected):
         "Не могу предложить гипотезы.",  # текст без JSON
         '```json\n{"kind": "model",\n```',  # оборванный JSON
         "{'kind': 'model'}",  # одинарные кавычки — не JSON
-        '{"kind": "model"} и ещё {"kind": "features"}',  # два объекта подряд
     ],
 )
 def test_chat_json_garbage_returns_none(client, monkeypatch, text):
@@ -115,3 +132,61 @@ def test_cache_answers_without_request(client, tmp_path):
     assert client.chat_json(MESSAGES) == {"ok": True}
     assert client.chat_json(MESSAGES) == {"ok": True}
     assert fake.requests == 1
+
+
+def test_reasoning_reserve_added_to_max_tokens(client, monkeypatch):
+    sent = {}
+    fake = FakeOpenAI(["{}"])
+    original = fake._create
+
+    def spy(**kwargs):
+        sent.update(kwargs)
+        return original(**kwargs)
+
+    fake.chat.completions.create = spy
+    client._client = fake
+    client.chat(MESSAGES, max_tokens=800)
+    assert sent["max_tokens"] == 800 + client.reasoning_tokens
+    assert client.reasoning_tokens == 3000
+
+
+def test_reasoning_reserve_from_env(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK", "1")
+    monkeypatch.setenv("LLM_REASONING_TOKENS", "5000")
+    assert LLMClient().reasoning_tokens == 5000
+
+
+def test_truncated_answer_logged(client, caplog):
+    fake = FakeOpenAI([""])
+    original = fake._create
+
+    def truncated(**kwargs):
+        response = original(**kwargs)
+        response.choices[0].finish_reason = "length"
+        return response
+
+    fake.chat.completions.create = truncated
+    client._client = fake
+    assert client.chat_json(MESSAGES) is None
+    assert "лимит" in caplog.text and "пустой" in caplog.text
+
+
+def test_truncated_answer_not_cached(client, tmp_path):
+    client.cache_dir = tmp_path
+    fake = FakeOpenAI(['[{"id": "a"}, {"id": "b', '[{"id": "a"}, {"id": "b"}]'])
+    original = fake._create
+    calls = []
+
+    def first_truncated(**kwargs):
+        response = original(**kwargs)
+        if not calls:
+            response.choices[0].finish_reason = "length"
+        calls.append(1)
+        return response
+
+    fake.chat.completions.create = first_truncated
+    client._client = fake
+    assert client.chat_json(MESSAGES) == [{"id": "a"}]  # спасли целое из обрезанного
+    assert not list(tmp_path.iterdir())  # обрезанный ответ в кэш не попал
+    assert client.chat_json(MESSAGES) == [{"id": "a"}, {"id": "b"}]  # повтор ушёл в LLM
+    assert fake.requests == 2

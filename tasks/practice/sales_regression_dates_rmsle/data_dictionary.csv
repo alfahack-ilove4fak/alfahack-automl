@@ -1,0 +1,12 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор строки
+date,feature,date,"Дата продаж, ГГГГ-ММ-ДД"
+store_id,feature,category,Магазин (150 значений)
+city,feature,category,Город магазина
+store_type,feature,category,Формат магазина
+product_category,feature,category,Категория товара
+promo,feature,binary,1 — товар участвует в акции
+price,feature,numeric,"Цена, ₽; бывают пропуски"
+temperature,feature,numeric,"Температура воздуха в день продаж, °C; бывают пропуски"
+is_holiday,feature,binary,1 — праздничный день
+units_sold,target,numeric,Продано штук за день
