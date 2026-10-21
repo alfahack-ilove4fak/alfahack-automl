@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -314,17 +315,19 @@ def check_llm_call() -> Check:
     try:
         from dotenv import load_dotenv
 
+        os.environ["LLM_CACHE_DIR"] = ""  # проверяем связь, а не кэш: load_dotenv ниже пустое значение не перезапишет
         load_dotenv(ROOT / ".env")
         sys.path.insert(0, str(ROOT))
         from agent.llm_client import LLMClient
 
-        answer = LLMClient(timeout=60).chat([{"role": "user", "content": "Ответь одним словом: готов"}], max_tokens=10)
+        # Qwen рассуждает: скрытые размышления тратят max_tokens, при 10–40 ответ приходит пустым
+        answer = LLMClient(timeout=60).chat([{"role": "user", "content": "Ответь одним словом: готов"}], max_tokens=300)
     except Exception as exc:  # noqa: BLE001
         return Check("запрос к LLM", FAIL, f"{type(exc).__name__}: {exc}", "проверь .env и OPENAI_BASE_URL")
     return Check(
         "запрос к LLM",
-        OK if answer else FAIL,
-        (answer or "нет ответа")[:60],
+        OK if answer.strip() else FAIL,
+        (answer.strip() or "нет ответа")[:60],
         "проверь значения в .env; если ключ верный — напиши капитану",
     )
 
