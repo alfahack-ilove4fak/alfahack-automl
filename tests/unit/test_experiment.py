@@ -320,3 +320,66 @@ def test_split_when_all_classes_are_rare():
     assert len(folds) == 3
     for tr, va in folds:
         assert set(y[tr]) == {0, 1, 2} and len(va) == 3
+
+
+@pytest.mark.parametrize("task_type", [TaskType.REGRESSION, TaskType.BINARY])
+def test_feature_ops_in_experiment_and_final(task_type):
+    if task_type == TaskType.REGRESSION:
+        spec = _spec(task_type, "rmse", greater=False)
+    else:
+        spec = _spec(task_type, "f1_macro", greater=True, labels=["neg", "pos"])
+    train, test, profile = _data(task_type)
+    train.loc[::9, "a"] = np.nan
+    ops = ["missing_flags", "freq_encoding", "target_encoding", "pair_ops"]
+    hyp = _hyp(feature_ops=ops, model_params={"n_estimators": 50})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert len(answer) == 20
+
+
+def test_target_encoding_no_leak_on_id_like_category():
+    """Категория уникальна для каждой строки, target — шум. С утечкой CV было бы «отличным»; без неё — не лучше шума."""
+    rng = np.random.default_rng(3)
+    n = 400
+    train = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "c": [f"u{i}" for i in range(n)]})
+    train["y"] = rng.normal(size=n)
+    profile = DataProfile(n_train=n, n_test=0, numeric_features=["a"], categorical_features=["c"])
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+
+    result = run_experiment(
+        spec, profile, _hyp(feature_ops=["target_encoding"], model_params={"n_estimators": 50}), train, RunBudget()
+    )
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert result.mean_score > 0.9 * train["y"].std()
+
+
+def test_unknown_feature_op_fails_cleanly():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    result = run_experiment(spec, profile, _hyp(feature_ops=["magic"]), train, RunBudget())
+    assert result.status == ExperimentStatus.FAILED and "magic" in result.error
+
+
+@pytest.mark.parametrize(
+    "bad", [{"feature_ops": 5}, {"feature_ops": [{"op": "pair_ops", "depth": 3}]}, {"n_folds": None}]
+)
+def test_malformed_params_fail_hypothesis_not_agent(bad):
+    """Кривые params от LLM — FAILED, а не исключение наверх: цикл агента его не ловит (раньше падали до try)."""
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    result = run_experiment(spec, profile, _hyp(**bad), train, RunBudget())
+    assert result.status == ExperimentStatus.FAILED
+
+
+def test_feature_ops_with_params_in_experiment():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    ops = [{"op": "target_encoding", "smoothing": 5}, {"op": "pair_ops", "top_k": 2}]
+    hyp = _hyp(feature_ops=ops, model_params={"n_estimators": 50})
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+    assert len(fit_predict_final(spec, profile, hyp, train, test)) == 20
