@@ -69,6 +69,8 @@ def _start(tmp_path: Path, mode: str, budget_sec: int, safety_sec: int) -> tuple
         "AGENT_SAFETY_SEC": str(safety_sec),
         "LLM_MOCK": "1",
         "AGENT_RUN_DIR": str(tmp_path / "run"),
+        "PYTHONUTF8": "1",  # Windows: иначе дочерний процесс пишет логи в кодировке консоли, а тест читает UTF-8
+        "PYTHONIOENCODING": "utf-8",
     }
     proc = subprocess.Popen(
         [sys.executable, str(driver), str(task_md), mode],
