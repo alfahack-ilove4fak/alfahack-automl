@@ -1,0 +1,13 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор пациента
+age,feature,numeric,"Возраст, лет"
+sex,feature,category,Пол
+bmi,feature,numeric,Индекс массы тела
+bp,feature,numeric,Среднее артериальное давление
+tc,feature,numeric,Показатель анализа крови
+ldl,feature,numeric,Показатель анализа крови
+hdl,feature,numeric,Показатель анализа крови
+tch,feature,numeric,Показатель анализа крови
+ltg,feature,numeric,Показатель анализа крови
+glu,feature,numeric,Показатель анализа крови
+progression,target,numeric,Прогрессирование болезни через год (условная шкала)

@@ -8,30 +8,56 @@
   0. сразу пишем тривиальный ответ (среднее / самый частый класс) — файл есть всегда;
   1. обучаем надёжный бейзлайн и перезаписываем ответ;
   2. цикл AutoResearch улучшает модель, пока есть время; каждый новый лучший сразу сохраняется.
+
+Защита от нулевого балла: ответ пишется атомарно и проверяется после каждой записи; сторож
+(runtime/watchdog.py) по жёсткому дедлайну или сигналу остановки проверяет submission.csv и завершает процесс;
+любая ошибка агента заканчивается кодом 0 и последним валидным ответом. Доли времени по этапам — runtime/budget.py.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
+import pandas as pd
+
 from agent.hypotheses import baseline_hypothesis
 from agent.loop import run_autoresearch
-from agent.task_parser import parse_task
+from agent.task_parser import find_task_files, parse_task
 from evaluation.metrics import METRICS
-from evaluation.submission import validate_submission, write_submission_atomic
-from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, TaskSpec, TaskType
+from evaluation.submission import per_class_columns, validate_submission, write_submission_atomic
+from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
-from runtime.budget import make_budget
+from runtime.budget import StagePlan, ensure_final_reserve, make_budget, plan_stages
 from runtime.log import setup_logging
+from runtime.watchdog import Watchdog
+
+
+def _class_share_answer(spec: TaskSpec, y, test, class_columns: list[str]):
+    """Шаблон «колонка на класс» (#117): доли классов train. Колонка ↔ класс — по имени, иначе по порядку class_labels."""
+    shares = y.astype(str).value_counts(normalize=True)
+    labels = spec.class_labels or []
+    by_name = set(class_columns) == set(labels)
+    values = []
+    for i, col in enumerate(class_columns):
+        label = col if by_name else (labels[i] if i < len(labels) else None)
+        values.append(float(shares.get(label, 0.0)) if label is not None else 0.0)
+    probs = pd.Series(values).clip(lower=1e-6)  # нулевая вероятность ломает logloss
+    probs = probs / probs.sum()
+    return test[[spec.id_column]].assign(**dict(zip(class_columns, probs, strict=True)))[spec.submission_columns]
 
 
 def trivial_answer(spec: TaskSpec, train, test):
     """Ответ без модели: страховка на случай, если всё остальное упадёт."""
     y = train[spec.target]
+    class_columns = per_class_columns(spec)
+    if class_columns and spec.task_type != TaskType.REGRESSION:
+        return _class_share_answer(spec, y, test, class_columns)
     if spec.task_type == TaskType.REGRESSION:
         value = float(y.mean())
     elif METRICS[spec.metric.name].prediction == "proba" and spec.class_labels:
@@ -41,43 +67,105 @@ def trivial_answer(spec: TaskSpec, train, test):
     return test[[spec.id_column]].assign(**{spec.target: value})[spec.submission_columns]
 
 
-def main(argv: list[str]) -> int:
-    started = time.time()
-    run_dir = Path(os.environ["AGENT_RUN_DIR"]) if os.getenv("AGENT_RUN_DIR") else None
-    log = setup_logging(run_dir)
-    budget = make_budget(started)
-    task_md = Path(argv[1] if len(argv) > 1 else "task.md")
-    log.info("Старт: %s, бюджет %.0f с, RAM %.0f МБ", task_md, budget.total_seconds, budget.ram_limit_mb)
+class AnswerKeeper:
+    """Хранит последний валидный ответ и в любой момент (в том числе из сторожа) восстанавливает submission.csv."""
 
+    def __init__(self, task_md: Path) -> None:
+        self.task_md = task_md
+        self.path = task_md.parent / "submission.csv"
+        self.spec: TaskSpec | None = None
+        self.test: pd.DataFrame | None = None
+        self.last_good: pd.DataFrame | None = None  # последний ответ, прошедший проверку
+        self.lock = threading.Lock()  # держим на время записи: сторож не оборвёт её посередине
+
+    def write(self, answer: pd.DataFrame) -> list[str]:
+        """Записать ответ и проверить его. Невалидный ответ откатывается к последнему валидному. → список проблем."""
+        assert self.spec is not None and self.test is not None
+        with self.lock:
+            write_submission_atomic(answer, self.path)
+            report = validate_submission(self.path, self.spec, self.test)
+            if report.ok:
+                self.last_good = answer
+            elif self.last_good is not None:
+                write_submission_atomic(self.last_good, self.path)
+            return report.problems
+
+    def finalize(self, reason: str) -> None:
+        """Последняя проверка: submission.csv есть и валиден, иначе — последний валидный или страховочный ответ.
+
+        Не берёт `self.lock` — его уже держит сторож; из главного потока вызывается под `with keeper.lock`.
+        """
+        log = setup_logging()
+        self.path.with_suffix(".tmp.csv").unlink(missing_ok=True)  # огрызок записи, оборванной убийством процесса
+        try:
+            if self.spec is not None and self.test is not None:
+                report = validate_submission(self.path, self.spec, self.test)
+                if report.ok:
+                    log.info("Финал (%s): submission.csv валиден, %d строк", reason, report.n_rows)
+                    return
+                log.error("Финал (%s): submission.csv невалиден: %s — восстанавливаем", reason, report.problems)
+                if self.last_good is not None:
+                    write_submission_atomic(self.last_good, self.path)
+                    return
+            if not self.path.exists():
+                # Не успели даже разобрать задачу: пустой файл хуже, чем образец формата от организаторов
+                sample = find_task_files(self.task_md).get("sample_submission")
+                if sample is not None:
+                    shutil.copyfile(sample, self.path)
+                    log.error("Финал (%s): ответа не было — скопирован %s", reason, sample.name)
+                else:
+                    log.error("Финал (%s): ответа нет, и образца sample_submission тоже", reason)
+        except Exception:  # noqa: BLE001 — финализация не должна ронять процесс
+            log.exception("Финал (%s): не удалось проверить или восстановить submission.csv", reason)
+
+
+def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: AnswerKeeper, started: float) -> None:
+    log = setup_logging()
     spec = parse_task(task_md)
+    keeper.spec = spec
     train, test = load_data(spec)
-    write_submission_atomic(trivial_answer(spec, train, test), spec.submission_path)
-    log.info("Шаг 0: тривиальный ответ записан")
+    keeper.test = test
+    trivial = trivial_answer(spec, train, test)
+    problems = keeper.write(trivial)
+    log.info("Шаг 0: тривиальный ответ записан%s", f", но проверка: {problems}" if problems else "")
 
-    def save(hyp: Hypothesis, res: ExperimentResult, profile: DataProfile) -> None:
+    def save(hyp: Hypothesis, res: ExperimentResult, profile: DataProfile) -> float:
+        """Финальное обучение на всём train + запись ответа. Возвращает, сколько секунд это заняло."""
+        began = time.time()
         try:
             answer = fit_predict_final(spec, profile, hyp, train, test)
-            write_submission_atomic(answer[spec.submission_columns], spec.submission_path)
-            report = validate_submission(spec.submission_path, spec, test)
+            problems = keeper.write(answer[spec.submission_columns])
             log.info(
                 "Сохранён ответ «%s» (CV %s=%.5f), проверка: %s",
                 hyp.id,
                 res.metric_name,
                 res.mean_score,
-                "OK" if report.ok else report.problems,
+                "OK" if not problems else problems,
             )
         except Exception:  # noqa: BLE001 — старый валидный ответ остаётся на месте
             log.exception("Не удалось сохранить ответ гипотезы %s", hyp.id)
+        return time.time() - began
 
     profile = profile_data(spec, train, test)
+    parsed_at = time.time()
     base = baseline_hypothesis()
     base_result = run_experiment(spec, profile, base, train, budget)
     log.info("Шаг 1: бейзлайн %s=%s ± %s", base_result.metric_name, base_result.mean_score, base_result.std_score)
     history = [(base, base_result)]
     if base_result.mean_score is None:
         log.error("Бейзлайн не обучился — остаёмся с тривиальным ответом")
-        return 0
-    save(base, base_result, profile)
+        return
+    final_seconds = save(base, base_result, profile)
+    if time.time() > plan.baseline_end:
+        log.warning("Разбор + бейзлайн вышли за свою долю бюджета (%.0f с)", plan.baseline_end - started)
+    reserve = ensure_final_reserve(budget, final_seconds)
+    log.info(
+        "Замер: загрузка+профиль %.1f с, CV бейзлайна %.0f с, финал %.0f с; AutoResearch до +%.0f с",
+        parsed_at - started,
+        base_result.fit_seconds,
+        final_seconds,
+        budget.total_seconds - reserve,
+    )
 
     best = run_autoresearch(
         spec, profile, train, budget, history, (base, base_result), on_new_best=lambda h, r: save(h, r, profile)
@@ -90,6 +178,29 @@ def main(argv: list[str]) -> int:
         best[1].mean_score,
         len(history),
     )
+
+
+def main(argv: list[str]) -> int:
+    started = time.time()
+    run_dir = Path(os.environ["AGENT_RUN_DIR"]) if os.getenv("AGENT_RUN_DIR") else None
+    log = setup_logging(run_dir)
+    budget = make_budget(started)
+    plan = plan_stages(budget)
+    task_md = Path(argv[1] if len(argv) > 1 else "task.md")
+    log.info("Старт: %s, бюджет %.0f с, RAM %.0f МБ", task_md, budget.total_seconds, budget.ram_limit_mb)
+    log.info("План этапов: %s", plan.describe())
+
+    keeper = AnswerKeeper(task_md)
+    watchdog = Watchdog(plan.hard_deadline, keeper.finalize, lock=keeper.lock)
+    watchdog.start()
+    try:
+        run_pipeline(task_md, budget, plan, keeper, started)
+    except Exception:  # noqa: BLE001 — любая ошибка агента не должна стоить ответа
+        log.exception("Агент упал — остаётся последний валидный ответ")
+    finally:
+        with keeper.lock:
+            keeper.finalize("конец работы")
+        watchdog.stop()
     return 0
 
 
