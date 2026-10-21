@@ -19,9 +19,7 @@ from test_robustness import base_task, run_agent, write_task  # noqa: E402
 
 CLASSES = ["a", "b", "c"]
 # XFAIL_INVALID снят: шаг 0 и парсер для шаблона id,a,b,c починены (#111, trivial_answer), тест стал XPASS
-XFAIL_NO_MODEL = pytest.mark.xfail(
-    strict=True, reason="#117: fit_predict_final пишет одну колонку target, а не вероятности по классам"
-)
+# XFAIL_NO_MODEL снят: fit_predict_final пишет вероятности по колонкам шаблона (#117, ml), тест стал XPASS
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +48,6 @@ def test_valid_per_class_answer(run):
     assert proc.returncode == 0, log
 
 
-@XFAIL_NO_MODEL
 def test_per_class_answer_from_model(run):
     _, _, proc = run
     assert "Сохранён ответ «" in proc.stderr, "сдан только тривиальный ответ\n" + proc.stderr[-3000:]
