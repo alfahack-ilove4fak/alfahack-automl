@@ -1,0 +1,33 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор строки
+mean_radius,feature,numeric,Характеристика ядер клеток по снимку
+mean_texture,feature,numeric,Характеристика ядер клеток по снимку
+mean_perimeter,feature,numeric,Характеристика ядер клеток по снимку
+mean_area,feature,numeric,Характеристика ядер клеток по снимку
+mean_smoothness,feature,numeric,Характеристика ядер клеток по снимку
+mean_compactness,feature,numeric,Характеристика ядер клеток по снимку
+mean_concavity,feature,numeric,Характеристика ядер клеток по снимку
+mean_concave_points,feature,numeric,Характеристика ядер клеток по снимку
+mean_symmetry,feature,numeric,Характеристика ядер клеток по снимку
+mean_fractal_dimension,feature,numeric,Характеристика ядер клеток по снимку
+radius_error,feature,numeric,Характеристика ядер клеток по снимку
+texture_error,feature,numeric,Характеристика ядер клеток по снимку
+perimeter_error,feature,numeric,Характеристика ядер клеток по снимку
+area_error,feature,numeric,Характеристика ядер клеток по снимку
+smoothness_error,feature,numeric,Характеристика ядер клеток по снимку
+compactness_error,feature,numeric,Характеристика ядер клеток по снимку
+concavity_error,feature,numeric,Характеристика ядер клеток по снимку
+concave_points_error,feature,numeric,Характеристика ядер клеток по снимку
+symmetry_error,feature,numeric,Характеристика ядер клеток по снимку
+fractal_dimension_error,feature,numeric,Характеристика ядер клеток по снимку
+worst_radius,feature,numeric,Характеристика ядер клеток по снимку
+worst_texture,feature,numeric,Характеристика ядер клеток по снимку
+worst_perimeter,feature,numeric,Характеристика ядер клеток по снимку
+worst_area,feature,numeric,Характеристика ядер клеток по снимку
+worst_smoothness,feature,numeric,Характеристика ядер клеток по снимку
+worst_compactness,feature,numeric,Характеристика ядер клеток по снимку
+worst_concavity,feature,numeric,Характеристика ядер клеток по снимку
+worst_concave_points,feature,numeric,Характеристика ядер клеток по снимку
+worst_symmetry,feature,numeric,Характеристика ядер клеток по снимку
+worst_fractal_dimension,feature,numeric,Характеристика ядер клеток по снимку
+is_malignant,target,binary,"1 — злокачественная опухоль, 0 — доброкачественная"
