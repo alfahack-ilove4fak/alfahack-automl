@@ -29,18 +29,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-try:  # контракт из interfaces/ (PR «контракты 1.1.0»); запасной вариант — пока он не слит в dev
-    from interfaces.schemas import CodeResult
-except ImportError:  # pragma: no cover — убрать после слияния контрактов 1.1.0
-    from pydantic import BaseModel
-
-    class CodeResult(BaseModel):  # type: ignore[no-redef]
-        exit_code: int
-        stdout: str = ""
-        stderr: str = ""
-        timed_out: bool = False
-        seconds: float = 0.0
-
+from interfaces.schemas import CodeResult
 
 try:
     import resource
