@@ -4,7 +4,7 @@
     uv run python scripts/run_local.py --all --minutes 5        # все задачи из tasks/public и tasks/practice
 
 Печатает время, итог проверки submission.csv и путь к логу.
-Харнесс с подсчётом баллов на отложенной части train — задача QA (evaluation/harness.py).
+Баллы на отложенной части train — харнесс: uv run python -m evaluation.harness --all --minutes 5
 """
 
 from __future__ import annotations

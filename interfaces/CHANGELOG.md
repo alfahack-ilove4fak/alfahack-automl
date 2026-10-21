@@ -8,3 +8,4 @@
 | Версия | Дата | Кто | Что изменилось | Кого затрагивает |
 |---|---|---|---|---|
 | 1.0.0 | 2026-10-20 | @thenlaooo | Первая версия: TaskSpec, DataProfile, Hypothesis, ExperimentResult, RunBudget, ValidationReport | все |
+| 1.1.0 | 2026-10-21 | @thenlaooo | ADR 0008: `ExperimentResult.validation` (схема CV, `beats()` не сравнивает разные схемы) и `refit_params` (вместо скрытой правки `hypothesis.params`); `budget` в `ProposeHypotheses`; новый `CodeResult` и протокол `RunCode`; задокументированы `Hypothesis.code`, ключи `DataProfile.target_summary`, формат `oof_path`/`test_pred_path` | ml, agent, captain |

@@ -317,7 +317,19 @@ METRICS: dict[str, Metric] = {
             _logloss,
             False,
             "proba",
-            ("logloss", "log loss", "log_loss", "log-loss", "cross-entropy", "cross entropy", "кросс-энтропи*"),
+            (
+                "logloss",
+                "log loss",
+                "log_loss",
+                "log-loss",
+                "binary cross-entropy",
+                "binary crossentropy",
+                "cross-entropy",
+                "cross entropy",
+                "crossentropy",
+                "bce",
+                "кросс-энтропи*",
+            ),
         ),
     ]
 }
@@ -360,52 +372,81 @@ def compute_metric(name: str, y_true, y_pred) -> float:
     return METRICS[name].fn(y_true, y_pred)
 
 
+# Фразы, после которых обычно называют основную метрику: ищем сначала рядом с ними (по порядку списка)
+MARKERS = (
+    "основная метрика",
+    "основной метрикой",
+    "метрика оценки",
+    "evaluation metric",
+    "scored with",
+    "scored by",
+    "scored using",
+    "evaluated on",
+    "evaluated using",
+    "evaluated by",
+    "evaluated with",
+    "оценивается по",
+    "оцениваются по",
+    "метрика —",
+    "метрика:",
+    "metric",
+)
+# Отрицание ПЕРЕД метрикой относится к ней: «а не accuracy», «instead of accuracy», «в отличие от accuracy».
+# Между отрицанием и метрикой — не больше 12 символов без знаков препинания (чтобы не задеть соседнюю фразу).
+_NEGATION_BEFORE = re.compile(
+    r"\b(?:not|unlike|instead of|rather than|except|не|вместо|в отличие от|кроме)\b[^.!?(),;:]{0,12}$"
+)
+# Отрицание ПОСЛЕ метрики: «accuracy is misleading», «accuracy здесь не подходит», «accuracy не используется».
+_NEGATION_AFTER = re.compile(
+    r"^[^.!?(),;:]{0,12}\b(?:is misleading|misleading|is not used|not used|do not use|don't use|for reference"
+    r"|не используется|не используем|не подходит|не учитывается|для справки)\b"
+)
+
+
 def find_metric_in_text(text: str) -> str | None:
-    """Найти основную метрику в тексте task.md. Возвращает ключ реестра или None."""
+    """Найти основную метрику в тексте task.md. Возвращает ключ реестра или None.
+
+    Сначала ищем рядом с фразами вроде «основная метрика» и «scored with», потом во всём тексте.
+    Упоминания с отрицанием («we do NOT use accuracy», «Macro F1, а не Accuracy») пропускаем.
+    """
     low = text.lower()
-    # Если есть явная фраза «основная метрика … X» — ищем сначала рядом с ней
-    for marker in ("основная метрика", "метрика оценки", "метрика —", "метрика:", "metric"):
+    for marker in MARKERS:
         pos = low.find(marker)
         if pos != -1:
-            found = _first_metric(low[pos : pos + 200])
+            found = _first_metric(low, pos, pos + 200)
             if found:
                 return found
-    return _first_metric(low)
+    return _first_metric(low, 0, len(low))
 
 
-def _first_metric(text: str) -> str | None:
+def _first_metric(text: str, start: int, end: int) -> str | None:
+    """Первая (по позиции) метрика без отрицания в text[start:end]; контекст отрицаний — весь text."""
     best: tuple[int, str] | None = None
     for name in SEARCH_ORDER:
         for alias in METRICS[name].aliases:
-            pos = _find_word(text, alias)
-            if pos != -1 and (best is None or pos < best[0]):
-                best = (pos, name)
+            for pos, stop in _find_words(text, alias, start, end):
+                if best is not None and pos >= best[0]:
+                    break
+                if not _is_negated(text, pos, stop):
+                    best = (pos, name)
+                    break
     return best[1] if best else None
 
 
-def _find_word(text: str, alias: str) -> int:
-    """Поиск alias как отдельного слова (чтобы «mse» не находилось внутри «rmse»).
+def _is_negated(text: str, pos: int, stop: int) -> bool:
+    return bool(_NEGATION_BEFORE.search(text[max(0, pos - 40) : pos]) or _NEGATION_AFTER.search(text[stop : stop + 60]))
 
+
+def _find_words(text: str, alias: str, start: int, end: int):
+    """Все вхождения alias как отдельного слова в text[start:end] → (начало, конец) по порядку.
+
+    Отдельное слово — чтобы «mse» не находилось внутри «rmse».
     «*» в alias — любое окончание слова: «взвешенн* f1» найдёт «взвешенная f1» и «взвешенной f1».
     """
-    parts = alias.split("*")
-    if len(parts) > 1:
-        # Основа + буквы окончания + следующий кусок alias
-        pattern = r"\w*".join(re.escape(part) for part in parts)
-        for match in re.finditer(pattern, text):
-            pos = match.start()
-            if pos == 0 or not text[pos - 1].isalnum():
-                end = match.end()
-                if parts[-1] == "" or end >= len(text) or not text[end].isalnum():
-                    return pos
-        return -1
-    start = 0
-    while True:
-        pos = text.find(alias, start)
-        if pos == -1:
-            return -1
+    pattern = r"\w*".join(re.escape(part) for part in alias.split("*"))
+    for match in re.compile(pattern).finditer(text, start, end):
+        pos, stop = match.start(), match.end()
         before = text[pos - 1] if pos > 0 else " "
-        after = text[pos + len(alias)] if pos + len(alias) < len(text) else " "
-        if not before.isalnum() and not after.isalnum():
-            return pos
-        start = pos + 1
+        after = text[stop] if stop < len(text) else " "
+        if not before.isalnum() and (alias.endswith("*") or not after.isalnum()):
+            yield pos, stop
