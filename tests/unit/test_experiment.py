@@ -458,3 +458,35 @@ def test_feature_ops_with_params_in_experiment():
     result = run_experiment(spec, profile, hyp, train, RunBudget())
     assert result.status == ExperimentStatus.OK, result.error
     assert len(fit_predict_final(spec, profile, hyp, train, test)) == 20
+
+
+def test_proba_weights_in_experiment_and_final():
+    rng = np.random.default_rng(5)
+    n = 600
+    train = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "b": rng.normal(size=n)})
+    train["y"] = np.where(train["a"] > 1.4, "rare", np.where(train["b"] > 0, "up", "down"))
+    test = train.drop(columns="y").head(30)
+    profile = DataProfile(n_train=n, n_test=30, numeric_features=["a", "b"], categorical_features=[])
+    spec = _spec(TaskType.MULTICLASS, "f1_macro", greater=True, labels=["down", "rare", "up"])
+    hyp = _hyp(proba_weights=True, model_params={"n_estimators": 50})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert len(hyp.params["_proba_weights"]) == 3
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert set(answer["y"]) <= {"down", "rare", "up"}
+
+
+def test_proba_weights_ignored_where_not_applicable():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(proba_weights=True, model_params={"n_estimators": 20})
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    assert "_proba_weights" not in hyp.params
+
+    spec = _spec(TaskType.BINARY, "roc_auc", greater=True, labels=["neg", "pos"])
+    train, _, profile = _data(TaskType.BINARY)
+    hyp = _hyp(proba_weights=True, model_params={"n_estimators": 20})
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    assert "_proba_weights" not in hyp.params

@@ -20,6 +20,8 @@
                    фолда, без утечки
   optuna         — {trials: 30, timeout: 600, folds: 3, rows: 100000}: подбор model_params выбранной модели
                    (ml/tuning.py) на подвыборке и меньшем числе фолдов, потом обычная CV с найденными параметрами
+  proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
+                   (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
 
 """
 
@@ -49,6 +51,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
+from ml.class_weights import cross_fit_scores, fit_weights
 from ml.features import apply_feature_ops, parse_feature_ops
 from ml.profiling import make_matrix
 from runtime.budget import used_ram_mb
@@ -386,6 +389,15 @@ def _cv_rows(spec: TaskSpec, profile: DataProfile, y: np.ndarray, budget: RunBud
     return rows
 
 
+def _use_proba_weights(spec: TaskSpec, params: dict) -> bool:
+    """proba_weights действует только для классификации с метрикой по меткам — иначе молча не применяется."""
+    return (
+        bool(params.get("proba_weights"))
+        and _is_classification(spec)
+        and METRICS[spec.metric.name].prediction == "label"
+    )
+
+
 def _fold_score(
     spec: TaskSpec,
     hypothesis: Hypothesis,
@@ -396,13 +408,18 @@ def _fold_score(
     va: np.ndarray,
     ops,  # params.feature_ops в любом формате parse_feature_ops
     log_target: bool,
-) -> tuple[float, int]:
-    """Один фолд: признаки из feature_ops (учатся на train-части) → модель → метрика на валидации."""
+) -> tuple[float, int, np.ndarray | None]:
+    """Один фолд: признаки из feature_ops (учатся на train-части) → модель → метрика на валидации.
+
+    Третий элемент — вероятности классов на валидации (для proba_weights), у регрессии None.
+    """
     x_tr, x_va = x.iloc[tr], x.iloc[va]
     if ops:
         x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
     model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
-    return compute_metric(spec.metric.name, y[va], _predict(spec, model, x_va, log_target)), best_iter
+    pred = _predict(spec, model, x_va, log_target)
+    proba = model.predict_proba(x_va) if _is_classification(spec) else None
+    return compute_metric(spec.metric.name, y[va], pred), best_iter, proba
 
 
 def run_experiment(
@@ -429,7 +446,7 @@ def run_experiment(
             best = tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget)
             params["_optuna_best"] = best  # повторный запуск той же гипотезы не подбирает заново
             params["model_params"] = {**(params.get("model_params") or {}), **best}
-        scores, best_iters = [], []
+        scores, best_iters, oof = [], [], []
         for fold, (tr, va) in enumerate(_split(spec, y, n_folds)):
             fold_started = time.time()
             if not budget.has_time():
@@ -441,9 +458,10 @@ def run_experiment(
                     fit_seconds=time.time() - started,
                     error=f"кончилось время на фолде {fold}",
                 )
-            score, best_iter = _fold_score(spec, hypothesis, x, y, y_fit, tr, va, ops, log_target)
+            score, best_iter, proba = _fold_score(spec, hypothesis, x, y, y_fit, tr, va, ops, log_target)
             best_iters.append(best_iter)
             scores.append(score)
+            oof.append((y[va], proba))
             peak = max(peak, used_ram_mb())
             if fold == 0 and n_folds > 1:
                 # Прогноз по первому фолду: не успеем остальные — стоп сейчас, а не через час на последнем фолде
@@ -459,6 +477,21 @@ def run_experiment(
                         error=f"не успеет: прогноз ещё {forecast:.0f} с, осталось {budget.seconds_left():.0f} с",
                     )
         hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
+        if _use_proba_weights(spec, params):
+            gib = spec.metric.greater_is_better
+            plain = float(np.mean(scores))
+            scores = cross_fit_scores(spec.metric.name, gib, oof)
+            weights = fit_weights(
+                spec.metric.name, gib, np.concatenate([f[0] for f in oof]), np.vstack([f[1] for f in oof])
+            )
+            params["_proba_weights"] = weights.round(4).tolist()
+            log.info(
+                "proba_weights: %s %.5f → %.5f, множители %s",
+                spec.metric.name,
+                plain,
+                np.mean(scores),
+                weights.round(2),
+            )
         return ExperimentResult(
             hypothesis_id=hypothesis.id,
             status=ExperimentStatus.OK,
@@ -496,6 +529,8 @@ def fit_predict_final(
     n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
     pred = _predict(spec, model, x_test, log_target)
+    if _use_proba_weights(spec, params) and params.get("_proba_weights"):
+        pred = (model.predict_proba(x_test) * np.asarray(params["_proba_weights"])).argmax(axis=1)
 
     if _is_classification(spec):
         labels = np.asarray(spec.class_labels)
