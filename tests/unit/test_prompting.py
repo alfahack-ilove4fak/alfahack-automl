@@ -63,6 +63,12 @@ def test_all_placeholders_filled(spec, profile):
     assert "JSON-список из 4 новых гипотез" in text
 
 
+def test_no_emoji_in_prompt(spec, profile):
+    messages = prompting.build_hypothesis_messages(spec, profile, [make_step(1)])
+    for message in messages:
+        assert not re.search(r"[☀-➿\U0001F300-\U0001FAFF]", message["content"])
+
+
 def test_task_and_profile_in_prompt(spec, profile):
     text = user_prompt(spec, profile)
     assert "rmse (меньше — лучше)" in text

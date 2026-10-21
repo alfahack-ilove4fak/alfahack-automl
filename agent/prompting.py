@@ -83,7 +83,7 @@ def describe_profile(profile: DataProfile) -> str:
     if counts:
         top = sorted(counts.items(), key=lambda kv: -kv[1])[:MAX_CLASSES_SHOWN]
         lines.append("- Размеры классов: " + ", ".join(f"{k}: {v}" for k, v in top))
-    lines += [f"- ⚠ {w}" for w in profile.warnings]
+    lines += [f"- Предупреждение: {w}" for w in profile.warnings]  # без эмодзи: модель копирует стиль промпта
     return "\n".join(lines)
 
 
