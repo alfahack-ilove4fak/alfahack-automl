@@ -97,3 +97,13 @@ def test_choose_validation_duplicates_then_default():
     uniq = pd.DataFrame({"a": rng.normal(size=200), "b": rng.normal(size=200)})
     test = pd.DataFrame({"a": rng.normal(size=50), "b": rng.normal(size=50)})
     assert choose_validation(_spec(TaskType.BINARY, ["0", "1"]), _profile(["a", "b"]), uniq, test) == "stratified"
+
+
+def test_choose_validation_ignores_almost_constant_flag():
+    """Флаг, почти всегда равный 0 и в train, и в test, — не время (на public/multiclass так выбирался is_ftp_login)."""
+    rng = np.random.default_rng(2)
+    flag_train = np.where(rng.random(500) < 0.02, rng.integers(1, 4, 500), 0)
+    flag_test = np.zeros(200, dtype=int)
+    train = pd.DataFrame({"flag": flag_train, "x": rng.normal(size=500)})
+    test = pd.DataFrame({"flag": flag_test, "x": rng.normal(size=200)})
+    assert not choose_validation(_spec(), _profile(["flag", "x"]), train, test).startswith("time")

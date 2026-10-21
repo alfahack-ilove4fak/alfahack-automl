@@ -175,8 +175,10 @@ def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame,
         t_train, t_test = t_train[~np.isnan(t_train)], t_test[~np.isnan(t_test)]
         if len(np.unique(t_train)) < TIME_MIN_PERIODS:
             continue
-        # test «после» train: почти весь test не раньше почти всего train
-        if np.quantile(t_test, 0.05) >= np.quantile(t_train, 0.95) and t_test.min() >= t_train.min():
+        # test «после» train: почти весь test не раньше почти всего train, а середина test — строго позже.
+        # Строгость отсекает почти постоянные колонки (флаг, который почти всегда 0): у них «0 ≥ 0» выполняется
+        q95_train = np.quantile(t_train, 0.95)
+        if np.quantile(t_test, 0.05) >= q95_train and np.median(t_test) > q95_train:
             candidates.append(col)
     if candidates:
         candidates.sort(key=lambda c: (not TIME_NAME_HINT.search(c), len(np.unique(train[c].dropna()))))
