@@ -1,7 +1,9 @@
 """Эксперимент = гипотеза → кросс-валидация → ExperimentResult. Владелец — ML-pipeline инженер.
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
-  model          — "lightgbm" (по умолчанию) | "catboost". Список — MODEL_FITTERS.
+  model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "linear". Список — MODEL_FITTERS.
+                   linear — Ridge (регрессия) / LogisticRegression (классы) с масштабированием и one-hot;
+                   её model_params: alpha (Ridge), C (LogisticRegression)
                    Неизвестное имя → ExperimentResult(status=FAILED), а не тихая подмена на LightGBM
   model_params   — словарь гиперпараметров именно выбранной модели (у LightGBM num_leaves, у CatBoost depth);
                    чужой параметр → FAILED с ошибкой библиотеки
@@ -17,7 +19,13 @@ import time
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.utils.class_weight import compute_sample_weight
 
 from evaluation.metrics import METRICS, compute_metric
 from interfaces.schemas import (
@@ -56,6 +64,19 @@ CATBOOST_PARAMS = {
     "thread_count": -1,
     "verbose": False,
     "allow_writing_files": False,  # иначе CatBoost создаёт папку catboost_info в каталоге задачи
+}
+XGBOOST_PARAMS = {
+    "n_estimators": 3000,
+    "learning_rate": 0.05,
+    "max_depth": 6,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "tree_method": "hist",
+    "enable_categorical": True,  # категории pandas из make_matrix — без ручного кодирования
+    "max_cat_to_onehot": 1,
+    "random_state": SEED,
+    "n_jobs": -1,
+    "verbosity": 0,
 }
 
 
@@ -134,8 +155,75 @@ def _fit_catboost(
     return model, model.tree_count_
 
 
+def _fit_xgboost(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: int | None = None,
+) -> tuple[object, int]:
+    """Обучить XGBoost. Возвращает (модель, лучшее число деревьев). Режимы — как у _fit_lightgbm."""
+    # Импорт здесь: xgboost — из группы full, без него падает только эта гипотеза
+    from xgboost import XGBClassifier, XGBRegressor
+
+    params = {**XGBOOST_PARAMS, **hypothesis.params.get("model_params", {})}
+    if n_estimators is not None:
+        params["n_estimators"] = n_estimators
+    if eval_set is not None:
+        params["early_stopping_rounds"] = EARLY_STOPPING  # без eval_set XGBoost с этим параметром падает
+    model = (XGBClassifier if _is_classification(spec) else XGBRegressor)(**params)
+    # У XGBoost нет class_weight — «balanced» передаём весами строк
+    balanced = _is_classification(spec) and hypothesis.params.get("class_weight") == "balanced"
+    weights = compute_sample_weight("balanced", y) if balanced else None
+    if eval_set is None:
+        model.fit(x, y, sample_weight=weights)
+        return model, params["n_estimators"]
+    model.fit(x, y, sample_weight=weights, eval_set=[eval_set], verbose=False)
+    return model, model.best_iteration + 1
+
+
+def _fit_linear(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: int | None = None,
+) -> tuple[object, int]:
+    """Линейная модель: пропуски → медиана, масштабирование, one-hot категорий. Деревьев нет — возвращает 0.
+
+    Импьютер, скейлер и one-hot — шаги одного Pipeline: учатся только на train-части фолда, без утечки.
+    eval_set и n_estimators не нужны (ранней остановки нет), принимаются ради общей сигнатуры.
+    """
+    categorical = [c for c in x.columns if isinstance(x[c].dtype, pd.CategoricalDtype)]
+    numeric = [c for c in x.columns if c not in categorical]
+    prep = ColumnTransformer(
+        [
+            ("num", make_pipeline(SimpleImputer(strategy="median"), StandardScaler()), numeric),
+            # min_frequency: редкие категории — в одну колонку «прочее», чтобы one-hot не раздувал память
+            ("cat", OneHotEncoder(handle_unknown="infrequent_if_exist", min_frequency=10), categorical),
+        ]
+    )
+    model_params = hypothesis.params.get("model_params", {})
+    if _is_classification(spec):
+        estimator = LogisticRegression(
+            max_iter=1000, class_weight=hypothesis.params.get("class_weight"), random_state=SEED, **model_params
+        )
+    else:
+        estimator = Ridge(random_state=SEED, **model_params)
+    model = make_pipeline(prep, estimator)
+    model.fit(x, y)
+    return model, 0
+
+
 # Модели, которые понимает params.model. Новая модель = функция _fit_<имя> с той же сигнатурой + строка здесь
-MODEL_FITTERS = {"lightgbm": _fit_lightgbm, "catboost": _fit_catboost}
+MODEL_FITTERS = {
+    "lightgbm": _fit_lightgbm,
+    "catboost": _fit_catboost,
+    "xgboost": _fit_xgboost,
+    "linear": _fit_linear,
+}
 DEFAULT_MODEL = "lightgbm"
 
 

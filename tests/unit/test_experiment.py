@@ -89,26 +89,51 @@ def test_unknown_model_fails_instead_of_silent_lightgbm():
         fit_predict_final(spec, profile, _hyp(model="random_forest"), train, test)
 
 
+# Модель → (пакет, который нужен; гиперпараметры для быстрого теста; ждём ли ≥ 1 дерева)
+MODELS = {
+    "catboost": ("catboost", {"iterations": 50, "depth": 4}, True),
+    "xgboost": ("xgboost", {"n_estimators": 50, "max_depth": 3}, True),
+    "linear": (None, {}, False),
+}
+
+
 @pytest.mark.parametrize("task_type", [TaskType.REGRESSION, TaskType.BINARY])
-def test_catboost_ok_and_writes_no_files(task_type, tmp_path, monkeypatch):
-    pytest.importorskip("catboost")  # catboost — из группы full; без неё тест пропускается
+@pytest.mark.parametrize("model", list(MODELS))
+def test_extra_models_ok_and_write_no_files(model, task_type, tmp_path, monkeypatch):
+    package, model_params, has_trees = MODELS[model]
+    if package:
+        pytest.importorskip(package)  # catboost/xgboost — из группы full; без неё тест пропускается
     monkeypatch.chdir(tmp_path)  # на платформе рабочая папка — каталог задачи, мусор туда писать нельзя
     if task_type == TaskType.REGRESSION:
         spec = _spec(task_type, "rmse", greater=False)
     else:
         spec = _spec(task_type, "f1_macro", greater=True, labels=["neg", "pos"])
     train, test, profile = _data(task_type)
-    hyp = _hyp(model="catboost", class_weight="balanced", model_params={"iterations": 50, "depth": 4})
+    hyp = _hyp(model=model, class_weight="balanced", model_params=model_params)
 
     result = run_experiment(spec, profile, hyp, train, RunBudget())
 
     assert result.status == ExperimentStatus.OK, result.error
-    assert 1 <= hyp.params["_best_iteration"] <= 50
+    if has_trees:
+        assert 1 <= hyp.params["_best_iteration"] <= 50
     answer = fit_predict_final(spec, profile, hyp, train, test)
     assert len(answer) == 20
     if task_type == TaskType.BINARY:
         assert set(answer["y"]) <= {"neg", "pos"}
-    assert list(tmp_path.iterdir()) == []  # нет папки catboost_info
+    else:
+        assert np.isfinite(answer["y"]).all()
+    assert list(tmp_path.iterdir()) == []  # нет папки catboost_info и прочего мусора
+
+
+def test_linear_handles_missing_values_and_new_categories():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    train.loc[::7, "a"] = np.nan
+    test = test.assign(c=["new"] * len(test))  # категории, которой не было в train
+
+    hyp = _hyp(model="linear", model_params={"alpha": 10.0})
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    assert np.isfinite(fit_predict_final(spec, profile, hyp, train, test)["y"]).all()
 
 
 def test_catboost_rejects_lightgbm_params():
