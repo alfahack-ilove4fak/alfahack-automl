@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import lightgbm as lgb
@@ -43,7 +44,8 @@ BASE_PARAMS = {
     "colsample_bytree": 0.8,
     "random_state": SEED,
     "verbose": -1,
-    "n_jobs": -1,
+    # n_jobs=-1 на многоядерных машинах и малых данных в разы медленнее из-за накладных расходов потоков
+    "n_jobs": min(os.cpu_count() or 1, 4),
 }
 EARLY_STOPPING = 100
 
