@@ -20,6 +20,16 @@ uv run python scripts/run_local.py --all --minutes 5 --mock-llm
 Источники: `sklearn.datasets` (breast_cancer, diabetes, digits), синтетика (продажи) и переделка публичной
 `multiclass` в бинарную «атака / норма».
 
+## Первый прогон агента (21.10, `dev` @ c845eb0, 3 мин, без LLM, playbook из 5 гипотез)
+
+| Задача | CV агента | Агент на test | Тривиальный ответ | Вывод |
+|---|---|---|---|---|
+| `cancer_binary_auc` | 0.9957 | 0.9829 | 0.5000 | ✅ |
+| `diabetes_regression_mae` | 45.21 | 46.11 | 66.37 | ✅ |
+| `digits_multiclass_accuracy` | 0.9738 | 0.9778 | 0.1019 | ✅ числовые классы поняты как классификация |
+| `sales_regression_dates_rmsle` | 0.4398 | 0.5023 | 0.9447 | ⚠️ CV оптимистичнее test на 14% — test позже train (как в public regression) |
+| `network_binary_logloss_crooked` | accuracy 0.95 | **logloss 1.75** | 0.63 | ❌ хуже тривиального: метрика из ловушки, ответ — метки вместо вероятностей (issue #85, PR #83) |
+
 ## Ответы
 
 Ответы лежат **отдельно от задач**: `_answers/<задача>.csv` (столбцы — id и таргет, как в сабмите), метрики —
