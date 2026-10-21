@@ -54,8 +54,8 @@ def run_autoresearch(
         if not queue:
             batch = history[batch_start:]
             if batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch):
-                reflect(spec, best, batch, llm, memory)  # вся пачка мимо — спросим LLM, почему
-            queue = propose_hypotheses(spec, profile, history, k=BATCH, llm=llm, memory=memory)
+                reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
+            queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
             batch_start = len(history)
         if not queue:
             log.info("Гипотезы закончились — завершаю цикл")
