@@ -78,3 +78,38 @@ def test_load_data_keeps_string_ids_and_drops_missing_target(tmp_path):
 
     assert train["id"].tolist() == ["001", "003"]  # строка с пустым target выкинута
     assert test["id"].tolist() == ["010"]  # ведущий ноль на месте
+
+
+def _skewed_spec(metric: str):
+    from pathlib import Path
+
+    from interfaces.schemas import MetricSpec, TaskSpec, TaskType
+
+    root = Path("/nonexistent")
+    return TaskSpec(
+        task_md=root / "task.md",
+        task_dir=root,
+        train_path=root / "train.csv",
+        test_path=root / "test.csv",
+        submission_path=root / "submission.csv",
+        task_type=TaskType.REGRESSION,
+        target="y",
+        id_column="id",
+        metric=MetricSpec(name=metric, greater_is_better=False),
+        submission_columns=["id", "y"],
+    )
+
+
+def test_skew_warning_depends_on_metric():
+    """Совет «log1p» — только для метрик в логарифмах; на RMSE — предупреждение, а не рекомендация (LLM его читает)."""
+    from ml.profiling import profile_data
+
+    rng = np.random.default_rng(0)
+    train = pd.DataFrame({"id": range(500), "x": rng.normal(size=500), "y": rng.lognormal(sigma=1.5, size=500)})
+    test = train.drop(columns="y")
+
+    rmse_warn = " ".join(profile_data(_skewed_spec("rmse"), train, test).warnings)
+    rmsle_warn = " ".join(profile_data(_skewed_spec("rmsle"), train, test).warnings)
+
+    assert "skew=" in rmse_warn and "исходной шкале" in rmse_warn and "стоит попробовать" not in rmse_warn
+    assert "совпадает" in rmsle_warn
