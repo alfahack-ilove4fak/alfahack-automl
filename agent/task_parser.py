@@ -28,12 +28,6 @@ FILE_PATTERNS = {
 }
 DEFAULT_METRIC = {TaskType.REGRESSION: "rmse", TaskType.BINARY: "roc_auc", TaskType.MULTICLASS: "f1_macro"}
 MAX_CLASSES_FOR_NUMERIC_TARGET = 20
-PROBA_HINTS = ("вероятност", "probabilit")
-# Названия вероятностных метрик, которых пока нет в реестре evaluation/metrics.py (зона qa) —
-# убрать, когда реестр начнёт их узнавать
-EXTRA_PROBA_ALIASES = {
-    "logloss": ("binary cross-entropy", "binary crossentropy", "crossentropy", "cross entropy", "bce", "log-loss")
-}
 
 
 def find_task_files(task_md: Path) -> dict[str, Path]:
@@ -124,30 +118,24 @@ def parse_task(task_md: Path) -> TaskSpec:
 def _check_needs_proba(
     metric_name: str | None, task_type: TaskType, text: str, sample: Path | None, target: str, notes: list[str]
 ) -> str | None:
-    """Страховка от неверной метрики: задача ждёт вероятности, а найденная метрика оценивает метки.
+    """Страховка от неверной метрики: шаблон ответа требует вероятности, а найденная метрика оценивает метки.
 
-    Ловушка: «accuracy не подходит, оцениваем binary cross-entropy» — поиск метрики берёт accuracy,
-    агент пишет 0/1 и получает огромный logloss. Признаки, что нужны вероятности:
-    дробные значения в sample_submission или вероятностная метрика + слово «вероятность» в тексте.
+    Ловушка (#85): «accuracy не подходит, оцениваем binary cross-entropy» — если поиск метрики ошибётся
+    и возьмёт accuracy, агент запишет 0/1 и получит огромный logloss. Отрицания теперь понимает сам поиск
+    (evaluation/metrics.py), а здесь — независимая проверка по данным: дробные значения в sample_submission.
+    Текст как признак не используем: «для справки считаем log loss по вероятностям» дал бы ложное переключение.
     """
-    if task_type != TaskType.BINARY:
-        # multiclass: fit_predict_final пишет метки, а ответ «колонка на класс» парсер пока не разбирает —
-        # переключение на logloss там только ухудшит балл (ревью #83, задача ml + agent)
+    if task_type != TaskType.BINARY or metric_name is None:
+        # multiclass: ответ «колонка на класс» пока не поддержан целиком (#110) — переключение только навредит
         return metric_name
-    low = text.lower()
-    proba_metric = _mentioned_proba_metric(low)
-    if metric_name is None:
-        return proba_metric  # «BCE» и т.п. реестр не знает — но это точно вероятности
-    if METRICS[metric_name].prediction != "label":
+    if METRICS[metric_name].prediction != "label" or not _sample_has_probabilities(sample, target):
         return metric_name
-    from_sample = _sample_has_probabilities(sample, target)
-    from_text = proba_metric is not None and any(hint in low for hint in PROBA_HINTS)
-    if not (from_sample or from_text):
-        return metric_name
-    chosen = proba_metric or "logloss"
-    reason = "в sample_submission дробные значения" if from_sample else f"в тексте есть {chosen} и «вероятность»"
-    notes.append(f"Метрика {metric_name} оценивает метки, но задача ждёт вероятности ({reason}) — взяли {chosen}")
-    log.warning("Метрика %s → %s: %s", metric_name, chosen, reason)
+    chosen = _mentioned_proba_metric(text.lower()) or "logloss"
+    notes.append(
+        f"Метрика {metric_name} оценивает метки, но в sample_submission дробные значения — нужны вероятности, "
+        f"взяли {chosen}"
+    )
+    log.warning("Метрика %s → %s: в sample_submission дробные значения", metric_name, chosen)
     return chosen
 
 
@@ -157,7 +145,7 @@ def _mentioned_proba_metric(low: str) -> str | None:
     for name, metric in METRICS.items():
         if metric.prediction != "proba":
             continue
-        for alias in metric.aliases + EXTRA_PROBA_ALIASES.get(name, ()):
+        for alias in metric.aliases:
             alias = alias.rstrip("*")
             # слева — граница слова; справа — не латиница/цифра: «кросс-энтропией» подходит, «auction» — нет
             match = re.search(rf"(?<!\w){re.escape(alias)}(?![a-z0-9])", low)
