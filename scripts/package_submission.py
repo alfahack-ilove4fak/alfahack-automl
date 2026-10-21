@@ -9,7 +9,8 @@
   * промежуточные файлы можно создавать в каталоге задачи и в /tmp; ZIP до 100 МБ.
 
 Поэтому собираем «самораспаковывающийся» solution.py: внутри — base64 ZIP с кодом агента
-(interfaces/, runtime/, agent/, ml/, evaluation/, research/playbook.yaml, настоящий solution.py).
+(interfaces/, runtime/, agent/ вместе с промптами, ml/, evaluation/, research/playbook.yaml,
+настоящий solution.py).
 При запуске он распаковывает код во временную папку и запускает его — команда разработки
 работает в удобной структуре по папкам, а платформа получает ровно два корневых файла.
 """
@@ -26,8 +27,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD_ITEMS = ["solution.py", "interfaces", "runtime", "agent", "ml", "evaluation", "research/playbook.yaml"]
-PAYLOAD_SUFFIXES = (".py", ".yaml", ".yml", ".json")
+PAYLOAD_SUFFIXES = (".py", ".yaml", ".yml", ".json", ".md")  # .md — промпты агента (agent/prompts/)
 SKIP_PARTS = {"__pycache__", ".pytest_cache"}
+SKIP_NAMES = {"CLAUDE.md"}  # инструкции для Claude Code, агенту на платформе не нужны
 MAX_ZIP_MB = 100
 
 BOOTSTRAP = '''"""Точка входа для платформы Альфа Хак (AutoML). СОБРАНО АВТОМАТИЧЕСКИ — не править.
@@ -73,7 +75,12 @@ def collect_payload() -> list[Path]:
             files.append(path)
             continue
         files += [
-            p for p in path.rglob("*") if p.is_file() and not SKIP_PARTS & set(p.parts) and p.suffix in PAYLOAD_SUFFIXES
+            p
+            for p in path.rglob("*")
+            if p.is_file()
+            and not SKIP_PARTS & set(p.parts)
+            and p.name not in SKIP_NAMES
+            and p.suffix in PAYLOAD_SUFFIXES
         ]
     return sorted(files)
 
