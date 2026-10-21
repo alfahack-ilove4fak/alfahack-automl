@@ -33,6 +33,7 @@ LABELS = {
     "type:hypothesis": ("c2e0c6", "Гипотеза для агента"),
     "contract": ("e99695", "Меняет interfaces/ — нужен /sync-check и ревью владельцев"),
     "handoff": ("f9d0c4", "Точка стыковки с другой ролью"),
+    "harness": ("006b75", "Прогнать харнесс и показать в PR таблицу «было/стало» (workflow harness-pr)"),
 }
 
 MILESTONES = [

@@ -73,6 +73,25 @@ def test_public_tasks_parsed(folder, task_type, target, metric, n_classes):
         ("Метрика: RMSE (корень из среднеквадратичной ошибки)", "rmse"),
         # Обычные слова в описании данных — не метрика (иначе агент решит, что это классификация)
         ("Полнота данных высокая, точность измерений 0.1 мм", None),
+        # Отрицания (#85): упомянутая «не та» метрика пропускается
+        (
+            "**Evaluation.** Accuracy is misleading here, so we do NOT use it. Submissions are scored with\n"
+            "binary cross-entropy on the predicted probability that the flow is an attack (target = 1).",
+            "logloss",
+        ),
+        ("Метрика: accuracy здесь не подходит из-за дисбаланса, поэтому качество оценивается по BCE.", "logloss"),
+        ("## Метрика\nВ отличие от accuracy, мы оцениваем вероятности: binary cross-entropy (log loss).", "logloss"),
+        ("Метрика: Accuracy не используется. Используется logloss.", "logloss"),
+        ("Submissions are evaluated using binary crossentropy between predicted probabilities and labels.", "logloss"),
+        ("We use macro F1 instead of accuracy because classes are imbalanced.", "f1_macro"),
+        ("Rather than RMSE, submissions are scored with MAE.", "mae"),
+        ("Accuracy is reported for reference only; the evaluation metric is ROC-AUC.", "roc_auc"),
+        ("Accuracy is not used. Use F1-score.", "f1"),
+        # Отрицание относится к соседней метрике, а не ко всем подряд
+        ("Основной метрикой выбран Macro F1, а не Accuracy", "f1_macro"),
+        ("Метрика — F1 (accuracy не используется)", "f1"),
+        ("Do not forget: the metric is RMSE.", "rmse"),
+        ("Не забудьте: метрика — MAE.", "mae"),
     ],
 )
 def test_find_metric_in_text(text, expected):
