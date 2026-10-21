@@ -490,3 +490,44 @@ def test_proba_weights_ignored_where_not_applicable():
     hyp = _hyp(proba_weights=True, model_params={"n_estimators": 20})
     assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
     assert "_proba_weights" not in hyp.params
+
+
+def _three_classes() -> tuple[pd.DataFrame, pd.DataFrame, DataProfile]:
+    rng = np.random.default_rng(7)
+    n = 300
+    train = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "b": rng.normal(size=n)})
+    train["y"] = np.where(train["a"] > 0.5, "x", np.where(train["b"] > 0, "y", "z"))
+    profile = DataProfile(n_train=n, n_test=20, numeric_features=["a", "b"], categorical_features=[])
+    return train, train.drop(columns="y").head(20), profile
+
+
+@pytest.mark.parametrize("columns", [["x", "y", "z"], ["z", "x", "y"], ["class_1", "class_2", "class_3"]])
+def test_per_class_probability_answer(columns):
+    """#117: шаблон «колонка на класс» — вероятности по колонкам шаблона (по имени, иначе по порядку)."""
+    train, test, profile = _three_classes()
+    spec = _spec(TaskType.MULTICLASS, "logloss", greater=False, labels=["x", "y", "z"])
+    spec = spec.model_copy(update={"submission_columns": ["id", *columns]})
+    hyp = _hyp(model_params={"n_estimators": 30})
+
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+
+    assert list(answer.columns) == ["id", *columns]
+    proba = answer[columns].to_numpy()
+    assert ((proba > 0) & (proba < 1)).all()
+    assert np.allclose(proba.sum(axis=1), 1.0)
+    if columns[0] == "z":  # по имени, а не по порядку: колонка «z» — вероятность класса z
+        plain = fit_predict_final(
+            spec.model_copy(update={"submission_columns": ["id", "x", "y", "z"]}), profile, hyp, train, test
+        )
+        assert np.allclose(answer["z"], plain["z"])
+
+
+def test_per_class_column_count_mismatch_is_error():
+    train, test, profile = _three_classes()
+    spec = _spec(TaskType.MULTICLASS, "logloss", greater=False, labels=["x", "y", "z"])
+    spec = spec.model_copy(update={"submission_columns": ["id", "x", "y"]})
+    hyp = _hyp(model_params={"n_estimators": 30})
+    run_experiment(spec, profile, hyp, train, RunBudget())
+    with pytest.raises(ValueError, match="колонок ответа 2"):
+        fit_predict_final(spec, profile, hyp, train, test)

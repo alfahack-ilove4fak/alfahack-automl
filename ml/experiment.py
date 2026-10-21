@@ -513,6 +513,25 @@ def run_experiment(
         )
 
 
+PROBA_EPS = 1e-6  # вероятности 0 и 1 logloss штрафует бесконечно — слегка отодвигаем от краёв
+
+
+def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.ndarray) -> dict[str, np.ndarray]:
+    """Колонки ответа → вероятности классов. Имена совпадают с классами — по имени, иначе — по порядку (с записью в лог).
+
+    Столбцы proba идут в порядке class_labels (так кодируется target). Строки нормируются к сумме 1.
+    """
+    if proba.shape[1] != len(columns):
+        raise ValueError(f"колонок ответа {len(columns)}, а классов {proba.shape[1]}: {columns} / {class_labels}")
+    proba = np.clip(proba, PROBA_EPS, 1 - PROBA_EPS)
+    proba = proba / proba.sum(axis=1, keepdims=True)
+    if set(columns) == set(class_labels):
+        index = {label: i for i, label in enumerate(class_labels)}
+        return {col: proba[:, index[col]] for col in columns}
+    log.warning("Колонки ответа %s не совпадают с классами %s — сопоставляю по порядку", columns, class_labels)
+    return {col: proba[:, i] for i, col in enumerate(columns)}
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
@@ -532,6 +551,11 @@ def fit_predict_final(
     if _use_proba_weights(spec, params) and params.get("_proba_weights"):
         pred = (model.predict_proba(x_test) * np.asarray(params["_proba_weights"])).argmax(axis=1)
 
+    answer_columns = [c for c in spec.submission_columns if c != spec.id_column]
+    if _is_classification(spec) and len(answer_columns) > 1:
+        # Шаблон «колонка на класс» (#117): вероятности по классам в колонках шаблона
+        proba = _per_class_columns(answer_columns, spec.class_labels or [], model.predict_proba(x_test))
+        return pd.DataFrame({spec.id_column: test[spec.id_column].to_numpy(), **proba})
     if _is_classification(spec):
         labels = np.asarray(spec.class_labels)
         if METRICS[spec.metric.name].prediction == "proba":
