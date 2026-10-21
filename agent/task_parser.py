@@ -28,6 +28,12 @@ FILE_PATTERNS = {
 }
 DEFAULT_METRIC = {TaskType.REGRESSION: "rmse", TaskType.BINARY: "roc_auc", TaskType.MULTICLASS: "f1_macro"}
 MAX_CLASSES_FOR_NUMERIC_TARGET = 20
+PROBA_HINTS = ("вероятност", "probabilit")
+# Названия вероятностных метрик, которых пока нет в реестре evaluation/metrics.py (зона qa) —
+# убрать, когда реестр начнёт их узнавать
+EXTRA_PROBA_ALIASES = {
+    "logloss": ("binary cross-entropy", "binary crossentropy", "crossentropy", "cross entropy", "bce", "log-loss")
+}
 
 
 def find_task_files(task_md: Path) -> dict[str, Path]:
@@ -78,6 +84,7 @@ def parse_task(task_md: Path) -> TaskSpec:
     y = pd.read_csv(files["train"], usecols=[target])[target]
     metric_name = find_metric_in_text(text)
     task_type = _guess_task_type(y, metric_name, dictionary.get(target))
+    metric_name = _check_needs_proba(metric_name, task_type, text, files.get("sample_submission"), target, notes)
     if metric_name is None:
         metric_name = DEFAULT_METRIC.get(task_type, "rmse")
         notes.append(f"Метрика в тексте не найдена — взяли {metric_name} по типу задачи")
@@ -112,6 +119,61 @@ def parse_task(task_md: Path) -> TaskSpec:
         len(class_labels) if class_labels else "-",
     )
     return spec
+
+
+def _check_needs_proba(
+    metric_name: str | None, task_type: TaskType, text: str, sample: Path | None, target: str, notes: list[str]
+) -> str | None:
+    """Страховка от неверной метрики: задача ждёт вероятности, а найденная метрика оценивает метки.
+
+    Ловушка: «accuracy не подходит, оцениваем binary cross-entropy» — поиск метрики берёт accuracy,
+    агент пишет 0/1 и получает огромный logloss. Признаки, что нужны вероятности:
+    дробные значения в sample_submission или вероятностная метрика + слово «вероятность» в тексте.
+    """
+    if task_type == TaskType.REGRESSION:
+        return metric_name
+    low = text.lower()
+    proba_metric = _mentioned_proba_metric(low)
+    if metric_name is None:
+        return proba_metric  # «BCE» и т.п. реестр не знает — но это точно вероятности
+    if METRICS[metric_name].prediction != "label":
+        return metric_name
+    from_sample = _sample_has_probabilities(sample, target)
+    from_text = proba_metric is not None and any(hint in low for hint in PROBA_HINTS)
+    if not (from_sample or from_text):
+        return metric_name
+    chosen = proba_metric or "logloss"
+    reason = "в sample_submission дробные значения" if from_sample else f"в тексте есть {chosen} и «вероятность»"
+    notes.append(f"Метрика {metric_name} оценивает метки, но задача ждёт вероятности ({reason}) — взяли {chosen}")
+    log.warning("Метрика %s → %s: %s", metric_name, chosen, reason)
+    return chosen
+
+
+def _mentioned_proba_metric(low: str) -> str | None:
+    """Самая ранняя по тексту вероятностная метрика (logloss, roc_auc, …) или None."""
+    best: tuple[int, str] | None = None
+    for name, metric in METRICS.items():
+        if metric.prediction != "proba":
+            continue
+        for alias in metric.aliases + EXTRA_PROBA_ALIASES.get(name, ()):
+            alias = alias.rstrip("*")
+            # слева — граница слова; справа — не латиница/цифра: «кросс-энтропией» подходит, «auction» — нет
+            match = re.search(rf"(?<!\w){re.escape(alias)}(?![a-z0-9])", low)
+            if match and (best is None or match.start() < best[0]):
+                best = (match.start(), name)
+    return best[1] if best else None
+
+
+def _sample_has_probabilities(sample: Path | None, target: str) -> bool:
+    if sample is None:
+        return False
+    try:
+        values = pd.read_csv(sample, usecols=[target], nrows=2000)[target].dropna()
+    except Exception:  # noqa: BLE001 — шаблон необязателен
+        return False
+    if values.empty or not pd.api.types.is_numeric_dtype(values):
+        return False
+    return bool(values.between(0, 1).all() and (values % 1 != 0).any())
 
 
 def _read_dictionary(path: Path | None) -> dict[str, dict]:
