@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from agent.llm_client import LLMClient
+from agent.memory import ResearchMemory
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, TaskSpec, TaskType
 
 PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "research" / "playbook.yaml"
@@ -56,13 +57,14 @@ def propose_hypotheses(
     history: list[tuple[Hypothesis, ExperimentResult]],
     k: int = 3,
     llm: LLMClient | None = None,
+    memory: ResearchMemory | None = None,
 ) -> list[Hypothesis]:
     """Сначала гипотезы от LLM (если она доступна), недостающие — из playbook. Повторы истории отсекаются."""
     out: list[Hypothesis] = []
     if llm is not None:
         from agent.llm_hypotheses import llm_hypotheses  # здесь: llm_hypotheses сам импортирует этот модуль
 
-        out = llm_hypotheses(spec, profile, history, k, llm)
+        out = llm_hypotheses(spec, profile, history, k, llm, memory)
     tried = {h.id for h, _ in history} | {h.id for h in out}
     seen_params = {params_key(h.params) for h, _ in history} | {params_key(h.params) for h in out}
     for item in load_playbook():

@@ -13,7 +13,8 @@ from pydantic import ValidationError
 
 from agent.hypotheses import params_key
 from agent.llm_client import LLMClient
-from agent.prompting import allowed_param_keys, build_hypothesis_messages
+from agent.memory import ResearchMemory
+from agent.prompting import allowed_param_keys, build_hypothesis_messages, build_reflection_messages
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, TaskSpec
 from runtime.log import get_logger
 
@@ -76,10 +77,11 @@ def llm_hypotheses(
     history: list[tuple[Hypothesis, ExperimentResult]],
     k: int,
     llm: LLMClient,
+    memory: ResearchMemory | None = None,
 ) -> list[Hypothesis]:
     if not llm.available():
         return []
-    messages = build_hypothesis_messages(spec, profile, history, k=k)
+    messages = build_hypothesis_messages(spec, profile, history, k=k, memory=memory)
     if messages is None:
         return []
     try:
@@ -90,3 +92,25 @@ def llm_hypotheses(
         return []
     log.info("LLM предложила %d гипотез (потрачено %.2f ₽ за %d запросов)", len(out), llm.rub_spent, llm.calls)
     return out
+
+
+REFLECTION_MAX_TOKENS = 150
+
+
+def reflect(
+    spec: TaskSpec,
+    best: tuple[Hypothesis, ExperimentResult],
+    batch: list[tuple[Hypothesis, ExperimentResult]],
+    llm: LLMClient,
+    memory: ResearchMemory,
+) -> None:
+    """Короткий вывод LLM «почему пачка не сработала» → memory.lessons. Без LLM — ничего не делаем."""
+    if not batch or not llm.available():
+        return
+    messages = build_reflection_messages(spec, best, batch)
+    if messages is None:
+        return
+    try:
+        memory.add_lesson(llm.chat(messages, temperature=0.2, max_tokens=REFLECTION_MAX_TOKENS))
+    except Exception:  # noqa: BLE001 — рефлексия необязательна
+        log.exception("Рефлексия LLM не получена")

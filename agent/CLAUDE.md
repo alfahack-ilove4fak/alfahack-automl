@@ -10,6 +10,7 @@
 | `hypotheses.py` | `propose_hypotheses`: сначала LLM (если доступна), недостающие — из `research/playbook.yaml`; повторы id/params отсекаются |
 | `llm_hypotheses.py` | ответ LLM → проверенные `Hypothesis`: схема, допустимые kind и ключи params, без повторов |
 | `prompting.py` | сборка промптов из `agent/prompts/*.md` (string.Template, `$плейсхолдеры`); нет файла → `None` → playbook |
+| `memory.py` | память цикла: решение по каждой гипотезе и последние выводы LLM после неудачных пачек |
 | `loop.py` | цикл AutoResearch: очередь гипотез (по 3 за запрос к LLM) → `ml.run_experiment` → принять, если лучше на `min_delta` |
 
 ## Контракты
