@@ -80,3 +80,14 @@ def test_regression_untouched(tmp_path):
         target_values=(1.5, 2.7, 3.1, 8.9),
     )
     assert spec.metric.name == "rmse"
+
+
+def test_multiclass_not_switched_yet(tmp_path):
+    # ответ на multiclass пока — метки; переключение на logloss без колонки на класс только навредит
+    spec = make_task(
+        tmp_path,
+        "Метрика: accuracy не подходит, оцениваем вероятности по log loss.",
+        target_values=(0, 1, 2, 1),
+    )
+    assert spec.task_type.value == "multiclass"
+    assert spec.metric.name == "accuracy"

@@ -130,7 +130,9 @@ def _check_needs_proba(
     агент пишет 0/1 и получает огромный logloss. Признаки, что нужны вероятности:
     дробные значения в sample_submission или вероятностная метрика + слово «вероятность» в тексте.
     """
-    if task_type == TaskType.REGRESSION:
+    if task_type != TaskType.BINARY:
+        # multiclass: fit_predict_final пишет метки, а ответ «колонка на класс» парсер пока не разбирает —
+        # переключение на logloss там только ухудшит балл (ревью #83, задача ml + agent)
         return metric_name
     low = text.lower()
     proba_metric = _mentioned_proba_metric(low)
