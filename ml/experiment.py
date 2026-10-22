@@ -19,7 +19,8 @@
   model_params   — словарь гиперпараметров именно выбранной модели (у LightGBM num_leaves, у CatBoost depth);
                    чужой параметр → FAILED с ошибкой библиотеки
   n_folds        — число фолдов (по умолчанию 5)
-  log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
+  log_target     — для регрессии: учиться на log1p(y), предсказывать expm1. Не задан — включён для метрик на
+                   лог-шкале (RMSLE, MSLE: это RMSE/MSE на log1p — обучение сразу под метрику, #206), иначе выключен
   class_weight   — для классификации: "balanced" или None
   feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
                    элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
@@ -117,6 +118,18 @@ XGBOOST_PARAMS = {
 
 def _is_classification(spec: TaskSpec) -> bool:
     return spec.task_type in (TaskType.BINARY, TaskType.MULTICLASS)
+
+
+LOG_SCALE_METRICS = ("rmsle", "msle")  # метрики на log1p(y): для них log_target по умолчанию включён
+
+
+def _use_log_target(spec: TaskSpec, params: dict) -> bool:
+    """Учиться ли на log1p(y): явный params.log_target, а без него — да для метрик на лог-шкале (только регрессия)."""
+    if spec.task_type != TaskType.REGRESSION:
+        return False
+    if params.get("log_target") is not None:
+        return bool(params["log_target"])
+    return spec.metric.name in LOG_SCALE_METRICS
 
 
 def _encode_target(spec: TaskSpec, y: pd.Series) -> np.ndarray:
@@ -354,7 +367,8 @@ def _predict(spec: TaskSpec, model, x: pd.DataFrame, log_target: bool):
     """Предсказание в том виде, который нужен метрике задачи."""
     if not _is_classification(spec):
         pred = model.predict(x)
-        return np.expm1(pred) if log_target else pred
+        # expm1 от отрицательного прогноза < 0, а y ≥ 0 (иначе log1p не брали бы) — отсекаем снизу
+        return np.clip(np.expm1(pred), 0, None) if log_target else pred
     proba = model.predict_proba(x)
     if METRICS[spec.metric.name].prediction == "proba":
         return proba
@@ -482,7 +496,7 @@ def run_experiment(
     started = time.time()
     peak = used_ram_mb()
     params = hypothesis.params
-    log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
+    log_target = _use_log_target(spec, params)
     try:
         # Разбор params — внутри try: кривой n_folds или feature_ops от LLM → FAILED, а не падение цикла агента
         n_folds = int(params.get("n_folds", 5))
@@ -643,7 +657,7 @@ def fit_predict_final(
 ) -> pd.DataFrame:
     """Обучение на всём train с числом деревьев из CV и предсказание test в формате сабмита."""
     params = hypothesis.params
-    log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
+    log_target = _use_log_target(spec, params)
     profile, train, test = with_feature_code(spec, profile, hypothesis, train, test)
     x, x_test = make_matrix(profile, train, test)
     x_test = _hide_unseen(hypothesis, x, x_test)
