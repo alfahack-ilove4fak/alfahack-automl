@@ -139,6 +139,7 @@ class FreshLLM(FakeLLM):
 
 
 def test_loop_reflects_only_after_fully_failed_batch(spec, profile, monkeypatch):
+    monkeypatch.setenv("AGENT_FEATURE_CODE", "0")  # считаем только запросы гипотез и рефлексии
     scores = iter([39.0, 41.0, 41.0, 41.0, 41.0, 41.0, 41.0])  # пачка 1: первая принята; пачка 2: все мимо
 
     def fake_experiment(spec, profile, hyp, train, budget):
