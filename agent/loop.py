@@ -106,7 +106,28 @@ def run_autoresearch(
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
     llm.log_summary()  # токены и время LLM — тай-брейк при равном балле; журнал вызовов — llm_calls.jsonl
+    log.info(llm_decisions(history, memory))
     return best
+
+
+def llm_decisions(history: list[tuple[Hypothesis, ExperimentResult]], memory: ResearchMemory) -> str:
+    """Итог решений LLM за прогон: что предложила и что из этого вышло.
+
+    Вебинар: детерминированный агент «не имеет смысла», топ проверят вручную — по этой строке в agent.log видно,
+    какие гипотезы придумала LLM (включая код признаков) и какие из них агент принял.
+    """
+    ran = [(h, r) for h, r in history if h.source == "llm"]
+    if not ran:
+        return "Решения LLM: гипотез от LLM не было — работали playbook и правила"
+    accepted = [h.id for h, _ in ran if memory.verdicts.get(h.id, "").startswith("принята")]
+    skipped = sum(r.status == ExperimentStatus.SKIPPED for _, r in ran)
+    failed = sum(r.status in (ExperimentStatus.FAILED, ExperimentStatus.TIMEOUT) for _, r in ran)
+    worse = len(ran) - len(accepted) - skipped - failed
+    taken = f"принято {len(accepted)} ({', '.join(accepted)})" if accepted else "принято 0"
+    return (
+        f"Решения LLM: предложено {len(ran)} → {taken}, не лучше {worse}, "
+        f"пропущено критиком {skipped}, упало {failed}"
+    )
 
 
 def _skipped(hyp: Hypothesis, spec: TaskSpec, reason: str) -> ExperimentResult:
