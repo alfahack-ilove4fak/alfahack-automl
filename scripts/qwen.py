@@ -260,7 +260,7 @@ def check_chat(key: str, prompt: str = CHECK_PROMPT, max_tokens: int = CHECK_MAX
     os.environ.update(LLM_MOCK="0", LLM_CACHE_DIR="")  # проверяем связь, а не playbook и не кэш
     started = time.time()
     try:
-        from agent.llm_client import LLMClient
+        from agent.llm_client import LLMClient, _collect_stream
 
         client = LLMClient(timeout=LONG_TIMEOUT)
         if client._client is None:  # noqa: SLF001
@@ -268,12 +268,18 @@ def check_chat(key: str, prompt: str = CHECK_PROMPT, max_tokens: int = CHECK_MAX
         started = time.time()
         # сырой ответ нужен ради usage (cost, reasoning_tokens) — chat() отдаёт только текст;
         # без повторов: обрыв должен быть виден сразу, а не через 3 попытки
-        response = client._client.with_options(max_retries=0).chat.completions.create(  # noqa: SLF001
-            model=client.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=max_tokens,
-        )
+        request = {
+            "model": client.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+        }
+        if client.stream:  # тот же путь, что у агента (#209): иначе прокси рвёт «молчащий» запрос через ~10 с
+            request["stream"] = True
+            request["stream_options"] = {"include_usage": True}
+        response = client._client.with_options(max_retries=0).chat.completions.create(**request)  # noqa: SLF001
+        if client.stream:
+            response = _collect_stream(response)
         seconds = time.time() - started
     except Exception as exc:  # noqa: BLE001
         return ChatResult(False, error_chain(exc, key), time.time() - started)
@@ -301,6 +307,13 @@ def check_chat(key: str, prompt: str = CHECK_PROMPT, max_tokens: int = CHECK_MAX
     return ChatResult(bool(text), ", ".join(parts), seconds, float(cost) if cost is not None else None)
 
 
+def _stream_enabled() -> bool:
+    """Как у агента (agent/llm_client.py): LLM_STREAM по умолчанию включён."""
+    from agent.llm_client import DEFAULT_STREAM
+
+    return os.getenv("LLM_STREAM", DEFAULT_STREAM).strip() not in ("0", "false", "")
+
+
 def check_long(key: str) -> tuple[Line, float]:
     """Длинный ответ (≈ 20–40 с), как запрос гипотез. Ловит сеть, которая рвёт ответы дольше N секунд:
     короткий запрос при этом проходит, а агент не получает ни одной гипотезы (#193)."""
@@ -311,7 +324,17 @@ def check_long(key: str) -> tuple[Line, float]:
         return Line(
             WARN, "длинный ответ", f"{result.detail} — пришёл быстрее {LONG_MIN_SECONDS:g} с, обрыв не проверен"
         ), result.seconds
-    return Line(FAIL, "длинный ответ", f"обрыв через {result.seconds:.1f} с: {result.detail}"), result.seconds
+    mode = "потоком" if _stream_enabled() else "без потока"
+    hint = (
+        ""
+        if _stream_enabled()
+        else " — поток выключен (LLM_STREAM=0): включи его, агент так обходит обрыв прокси (#209)"
+    )
+    return Line(
+        FAIL,
+        "длинный ответ",
+        f"в режиме агента ({mode}) не дошёл, обрыв через {result.seconds:.1f} с: {result.detail}{hint}",
+    ), result.seconds
 
 
 def cmd_check(args: argparse.Namespace, from_shell: set[str]) -> int:

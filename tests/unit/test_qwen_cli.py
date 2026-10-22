@@ -337,3 +337,60 @@ def test_summary_counts_failed_requests_and_hints_disconnect():
     text = qwen.render_summary(qwen.parse_agent_log(log, known_ids=set()), spent_rub=None)
     assert "запросов к LLM: 11 (успешных 5, с ошибкой 6)" in text
     assert "рвёт долгие ответы" in text
+
+
+def _fake_client(monkeypatch, stream: bool):
+    """Подменяем LLMClient: запоминаем, с какими аргументами check_chat пошёл в API."""
+    seen = {}
+    usage = SimpleNamespace(prompt_tokens=5, completion_tokens=3, completion_tokens_details=None, model_extra={})
+    reply = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Готов"), finish_reason="stop")], usage=usage
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            seen.update(kwargs)
+            if kwargs.get("stream"):
+                chunk = SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="Готов"), finish_reason="stop")], usage=usage
+                )
+                return iter([chunk])
+            return reply
+
+    class Api:
+        chat = SimpleNamespace(completions=Completions())
+
+        def with_options(self, **kwargs):
+            return self
+
+    class FakeClient:
+        model = "qwen"
+        _client = Api()
+
+        def __init__(self, *a, **kw):
+            self.stream = stream
+
+    import agent.llm_client as llm_client
+
+    monkeypatch.setattr(llm_client, "LLMClient", FakeClient)
+    return seen
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_check_chat_goes_the_agent_way(llm_env, monkeypatch, stream):
+    # check должен ходить тем же путём, что агент: при LLM_STREAM=1 — потоком (#209), иначе прокси рвёт «молчащий» запрос
+    seen = _fake_client(monkeypatch, stream)
+    result = qwen.check_chat("key")
+    assert result.ok and "Готов" in result.detail
+    assert bool(seen.get("stream")) is stream
+    assert ("stream_options" in seen) is stream
+
+
+def test_check_long_failure_names_agent_mode(monkeypatch):
+    monkeypatch.setenv("LLM_STREAM", "0")
+    monkeypatch.setattr(qwen, "check_chat", lambda *a, **kw: qwen.ChatResult(False, "Server disconnected", 10.4))
+    line, _ = qwen.check_long("key")
+    assert "в режиме агента (без потока)" in line.detail and "LLM_STREAM=0" in line.detail
+    monkeypatch.setenv("LLM_STREAM", "1")
+    line, _ = qwen.check_long("key")
+    assert "в режиме агента (потоком)" in line.detail and "LLM_STREAM=0" not in line.detail
