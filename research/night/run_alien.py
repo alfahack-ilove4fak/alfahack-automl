@@ -196,9 +196,6 @@ def references(meta: dict, train: pd.DataFrame, test: pd.DataFrame, answers: pd.
     }.get(m)
     if aligned:
         out["lgbm_aligned"] = true_metric(meta, answers, lgbm(aligned), classes)
-    if m == "rmsle":
-        sub = lgbm()
-        out["lgbm_aligned"] = None  # log1p-цель — то, что агент делает сам по умолчанию (#206)
     return out
 
 
