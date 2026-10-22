@@ -236,3 +236,66 @@ def test_cache_served_even_without_time(client, tmp_path):
     assert client.chat_json(MESSAGES) == {"ok": True}
     assert client.chat_json(MESSAGES, seconds_left=10) == {"ok": True}  # ответ из кэша бесплатный и мгновенный
     assert fake.requests == 1
+
+
+def test_success_after_failure_resets_counter(client):
+    client._client = FakeOpenAI([TimeoutError("нет сети"), "{}"])
+    assert client.chat(MESSAGES) is None
+    assert client.chat(MESSAGES) == "{}"  # следующий запрос прошёл — счётчик сбоев обнулился
+    assert client.failures == 0 and client.available()
+
+
+@pytest.fixture
+def live_env(monkeypatch):
+    """Окружение для настоящего openai-клиента; сеть наружу не нужна — только 127.0.0.1."""
+    monkeypatch.delenv("LLM_MOCK", raising=False)
+    monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENAI_MODEL", "qwen-test")
+    return monkeypatch
+
+
+@pytest.mark.parametrize(
+    "key, base_url, cause",
+    [
+        ("sk-test-123", "http://127.0.0.1:9/v1", "ConnectError"),  # сервер недоступен
+        ("sk-test-123", "127.0.0.1:9/v1", "UnsupportedProtocol"),  # URL без схемы
+    ],
+)
+def test_connection_error_logs_real_cause(live_env, caplog, key, base_url, cause):
+    live_env.setenv("OPENAI_API_KEY", key)
+    live_env.setenv("OPENAI_BASE_URL", base_url)
+    llm = LLMClient()
+    assert llm.chat(MESSAGES, seconds_left=400) is None  # одна попытка без повторов — тест быстрый
+    assert llm.failures == 1
+    assert "Connection error" in caplog.text and cause in caplog.text  # видно настоящую причину
+
+
+@pytest.mark.parametrize(
+    "raw_key, raw_url",
+    [
+        ("sk-test-123\r", "http://127.0.0.1:9/v1\r"),  # .env, сохранённый в Windows (CRLF)
+        (" sk-test-123\n", " http://127.0.0.1:9/v1 "),
+        ('"sk-test-123"', "'http://127.0.0.1:9/v1'"),  # кавычки, попавшие в значение
+    ],
+)
+def test_env_values_cleaned(live_env, caplog, raw_key, raw_url):
+    live_env.setenv("OPENAI_API_KEY", raw_key)
+    live_env.setenv("OPENAI_BASE_URL", raw_url)
+    llm = LLMClient()
+    assert llm._client.api_key == "sk-test-123"
+    assert str(llm._client.base_url) == "http://127.0.0.1:9/v1/"
+    llm.chat(MESSAGES, seconds_left=400)
+    assert "ConnectError" in caplog.text  # дошли до сети, а не упали на заголовке или URL
+
+
+def test_key_hidden_in_error_log(client, caplog):
+    client._api_key = "sk-secret-777"
+    header_error = ValueError("Illegal header value b'Bearer sk-secret-777\\r'")
+    wrapped = RuntimeError("Connection error.")
+    wrapped.__cause__ = header_error
+    client._client = FakeOpenAI([wrapped])
+    assert client.chat(MESSAGES) is None
+    assert "Illegal header value" in caplog.text
+    assert "sk-secret-777" not in caplog.text
