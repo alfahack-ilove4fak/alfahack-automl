@@ -92,6 +92,22 @@ def test_public_tasks_parsed(folder, task_type, target, metric, n_classes):
         ("Метрика — F1 (accuracy не используется)", "f1"),
         ("Do not forget: the metric is RMSE.", "rmse"),
         ("Не забудьте: метрика — MAE.", "mae"),
+        # Метрики вне прежнего реестра (#186): раньше молча становились f1_macro / rmse
+        ("Метрика — NDCG@10 по каждому query_id", "ndcg"),
+        ("Submissions are evaluated on Normalized Discounted Cumulative Gain", "ndcg"),
+        ("Метрика — MAP@5", "map"),
+        ("Evaluation metric: Mean Average Precision", "map"),
+        ("Метрика — Huber loss (delta = 1)", "huber"),
+        ("Метрика: функция потерь Хьюбера", "huber"),
+        ("Metric: mean Poisson deviance", "poisson_deviance"),
+        ("Метрика — Tweedie deviance", "tweedie_deviance"),
+        ("Metric: Gamma deviance", "gamma_deviance"),
+        # Квантильная потеря: уровень квантиля — из текста
+        ("Метрика: pinball loss", "pinball"),
+        ("Метрика: pinball loss для квантиля 0.9", "pinball@0.9"),
+        ("Evaluation metric: quantile loss with alpha = 0,1", "pinball@0.1"),
+        ("Метрика — квантильная потеря, прогнозируем 95-й квантиль спроса", "pinball@0.95"),
+        ("Метрика — квантильная потеря для медианы (квантиль 0.5)", "pinball"),
     ],
 )
 def test_find_metric_in_text(text, expected):
@@ -101,3 +117,34 @@ def test_find_metric_in_text(text, expected):
 def test_metric_directions():
     assert compute_metric("rmse", [1, 2], [1, 2]) == 0.0
     assert compute_metric("f1_macro", [0, 1], [0, 1]) == 1.0
+
+
+def _write_task(folder: Path, text: str, target_values: list) -> Path:
+    folder.mkdir()
+    n = len(target_values)
+    (folder / "train.csv").write_text(
+        "id,query_id,x,y\n" + "".join(f"{i},{i % 5},{i * 0.5},{v}\n" for i, v in enumerate(target_values)),
+        encoding="utf-8",
+    )
+    (folder / "test.csv").write_text("id,query_id,x\n" + "".join(f"{n + i},{i % 5},{i}\n" for i in range(5)))
+    (folder / "sample_submission.csv").write_text("id,y\n" + "".join(f"{n + i},0\n" for i in range(5)))
+    (folder / "task.md").write_text(text, encoding="utf-8")
+    return folder / "task.md"
+
+
+@pytest.mark.parametrize(
+    "text, values, metric",
+    [
+        # Ранжирование: релевантность 0–3 внутри query_id — раньше multiclass + f1_macro
+        ("Отсортировать документы внутри query_id. Метрика — NDCG@10.", [0, 1, 2, 3] * 10, "ndcg"),
+        # Huber — раньше rmse без следа в разборе
+        ("Предсказать y. Метрика — Huber loss.", [0.5 * i for i in range(40)], "huber"),
+        ("Предсказать y. Метрика — pinball loss, квантиль 0.9.", [0.5 * i for i in range(40)], "pinball@0.9"),
+    ],
+)
+def test_unusual_metric_tasks_parsed(tmp_path, text, values, metric):
+    """Синтетические задачи из #186: метрика осмысленная, задача — регрессия (прогноз — число)."""
+    spec = parse_task(_write_task(tmp_path / "task", text, values))
+    assert spec.metric.name == metric
+    assert spec.task_type == TaskType.REGRESSION
+    assert not any("Метрика в тексте не найдена" in note for note in spec.notes)
