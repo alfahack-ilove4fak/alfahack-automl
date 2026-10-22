@@ -1,0 +1,13 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор операции
+date,feature,date,"Дата операции, ГГГГ-ММ-ДД"
+hour,feature,int,"Час операции, 0–23"
+merchant_id,feature,category,Продавец (тысячи значений; в test бывают новые)
+merchant_category,feature,category,Категория продавца (MCC)
+amount,feature,numeric,"Сумма операции, ₽; бывают пропуски"
+device,feature,category,"Канал: mobile, web, pos"
+country,feature,category,Страна операции
+is_foreign,feature,binary,1 — операция не в стране карты
+customer_age,feature,int,Возраст клиента
+tx_last_24h,feature,int,Операций по карте за прошлые сутки
+is_fraud,target,binary,1 — мошенническая операция

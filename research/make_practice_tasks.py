@@ -359,6 +359,279 @@ Submission: a CSV with columns `flow_id` and `is_attack`, where `is_attack` is a
     return {"answers": answers}
 
 
+def _sigmoid(z: np.ndarray) -> np.ndarray:
+    return 1 / (1 + np.exp(-z))
+
+
+def _intercept_for_rate(z: np.ndarray, rate: float) -> float:
+    """Сдвиг логита, при котором средняя вероятность события равна rate (бисекция — детерминированно)."""
+    lo, hi = -30.0, 30.0
+    for _ in range(100):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if _sigmoid(z + mid).mean() < rate else (lo, mid)
+    return (lo + hi) / 2
+
+
+@task("payments_binary_f1_rare", "f1", True)
+def payments(task_dir: Path) -> dict:
+    """Платежи: редкое мошенничество (~2.5%), F1 по положительному классу — нужен порог, а не argmax 0.5.
+
+    Дата строкой, test — следующий месяц после train (схема time + редкий класс, ревью #150). Продавцов 3 800,
+    в test четверть операций — у продавцов, которых нет в train (новые категории, #145).
+    """
+    rng = np.random.default_rng(SEED + 1)
+
+    def merchants(n: int, prefix: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "merchant_id": [f"{prefix}{i:05d}" for i in range(n)],
+                "merchant_category": rng.choice([f"mcc_{i:02d}" for i in range(20)], n),
+                "merchant_risk": rng.normal(0, 1, n),
+            }
+        )
+
+    old, new = merchants(3000, "M"), merchants(800, "N")
+    countries = np.array([f"C{i:02d}" for i in range(40)])
+    country_p = np.r_[0.7, np.full(39, 0.3 / 39)]
+    country_risk = dict(zip(countries, np.r_[0.0, rng.normal(0.8, 0.6, 39)], strict=True))
+
+    def sample_rows(n: int, start: str, end: str, new_share: float) -> tuple[pd.DataFrame, np.ndarray]:
+        stamps = pd.to_datetime(
+            rng.integers(pd.Timestamp(start).value // 10**9, pd.Timestamp(end).value // 10**9, n), unit="s"
+        )
+        from_new = rng.random(n) < new_share
+        merch = old.iloc[rng.integers(0, len(old), n)].reset_index(drop=True)
+        merch.loc[from_new] = new.iloc[rng.integers(0, len(new), int(from_new.sum()))].to_numpy()
+        df = pd.DataFrame({"date": stamps.strftime("%Y-%m-%d"), "hour": stamps.hour})
+        df["merchant_id"] = merch["merchant_id"]
+        df["merchant_category"] = merch["merchant_category"]
+        df["amount"] = rng.lognormal(7, 1.1, n).round(2)
+        df["device"] = rng.choice(["mobile", "web", "pos"], n, p=[0.5, 0.3, 0.2])
+        df["country"] = rng.choice(countries, n, p=country_p)
+        df["is_foreign"] = (df["country"] != "C00").astype(int)
+        df["customer_age"] = np.clip(rng.normal(40, 13, n), 18, 90).astype(int)
+        df["tx_last_24h"] = rng.poisson(2, n)
+        z = 2.0 * (  # множитель — сила сигнала: иначе F1 даже с порогом ~0.13 и тонет в шуме
+            1.1 * merch["merchant_risk"].to_numpy(dtype=float)
+            + df["country"].map(country_risk).to_numpy()
+            + 0.5 * np.log(df["amount"] / 1100)
+            + 0.9 * (df["hour"] < 6)
+            + 0.45 * np.sqrt(df["tx_last_24h"])
+            + 0.5 * (df["device"] == "web")
+            - 0.015 * (df["customer_age"] - 40)
+        ).to_numpy(dtype=float)
+        df.loc[rng.random(n) < 0.03, "amount"] = np.nan
+        return df, z
+
+    train, z_train = sample_rows(60000, "2024-01-01", "2024-10-01", new_share=0.0)
+    test_full, z_test = sample_rows(15000, "2024-10-01", "2024-11-01", new_share=0.25)
+    shift = _intercept_for_rate(z_train, 0.025)
+    train["is_fraud"] = (rng.random(len(train)) < _sigmoid(z_train + shift)).astype(int)
+    test_full["is_fraud"] = (rng.random(len(test_full)) < _sigmoid(z_test + shift)).astype(int)
+    ids = rng.permutation(len(train) + len(test_full)) + 1
+    train.insert(0, "id", ids[: len(train)])
+    test_full.insert(0, "id", ids[len(train) :])
+    test_full = test_full.sort_values("id").reset_index(drop=True)
+    answers = test_full[["id", "is_fraud"]]
+    test = test_full.drop(columns=["is_fraud"])
+    dictionary = _dictionary(
+        [
+            ("id", "id", "int", "Идентификатор операции"),
+            ("date", "feature", "date", "Дата операции, ГГГГ-ММ-ДД"),
+            ("hour", "feature", "int", "Час операции, 0–23"),
+            ("merchant_id", "feature", "category", "Продавец (тысячи значений; в test бывают новые)"),
+            ("merchant_category", "feature", "category", "Категория продавца (MCC)"),
+            ("amount", "feature", "numeric", "Сумма операции, ₽; бывают пропуски"),
+            ("device", "feature", "category", "Канал: mobile, web, pos"),
+            ("country", "feature", "category", "Страна операции"),
+            ("is_foreign", "feature", "binary", "1 — операция не в стране карты"),
+            ("customer_age", "feature", "int", "Возраст клиента"),
+            ("tx_last_24h", "feature", "int", "Операций по карте за прошлые сутки"),
+            ("is_fraud", "target", "binary", "1 — мошенническая операция"),
+        ]
+    )
+    md = _standard_md(
+        "Мошеннические платежи",
+        "Найдите мошеннические операции по картам. Мошенничество редкое — около 2–3% операций. В train — "
+        "операции за январь–сентябрь 2024 года, в test — за октябрь 2024 года.",
+        len(train),
+        len(test),
+        "`date` — дата строкой; `merchant_id`, `merchant_category`, `device`, `country` — категории; "
+        "`hour`, `amount`, `customer_age`, `tx_last_24h` — числа; `is_foreign` — флаг.",
+        "Для каждой строки `test.csv` — метка `is_fraud`: 1 (мошенничество) или 0.",
+        "F1-score по классу 1 (больше — лучше)",
+        "id,is_fraud",
+    )
+    _write(
+        task_dir,
+        {
+            "train.csv": train,
+            "test.csv": test,
+            "data_dictionary.csv": dictionary,
+            "sample_submission.csv": answers.assign(is_fraud=0),
+        },
+        md,
+    )
+    return {"answers": answers}
+
+
+@task("batches_ordinal_qwk", "qwk", True)
+def batches(task_dir: Path) -> dict:
+    """Оценка партии 1–5: порядковые классы числами, метрика QWK; в task.md список полей с ошибкой.
+
+    Как на public по вебинару: в описании одного поля нет, другое названо неверно — верный набор только в
+    data_dictionary.csv и в самих CSV.
+    """
+    rng = np.random.default_rng(SEED + 2)
+    n = 10000
+    suppliers = np.array([f"supplier_{i:02d}" for i in range(12)])
+    supplier_effect = dict(zip(suppliers, rng.normal(0, 0.5, 12), strict=True))
+    df = pd.DataFrame(
+        {
+            "temperature_c": rng.normal(72, 6, n).round(1),
+            "ph": rng.normal(6.5, 0.4, n).round(2),
+            "moisture": rng.beta(4, 12, n).round(3),
+            "density": rng.normal(1.04, 0.02, n).round(4),
+            "aging_days": rng.integers(1, 120, n),
+            "viscosity": rng.lognormal(3, 0.3, n).round(1),
+            "additive_mg": rng.gamma(2, 15, n).round(1),
+            "supplier": rng.choice(suppliers, n),
+            "line": rng.choice(["L1", "L2", "L3", "L4"], n, p=[0.4, 0.3, 0.2, 0.1]),
+        }
+    )
+    latent = (
+        -0.08 * (df["temperature_c"] - 72) ** 2 / 6
+        - 1.2 * (df["ph"] - 6.6).abs()
+        - 6 * (df["moisture"] - 0.25)
+        + 0.9 * np.log(df["aging_days"])
+        - 0.02 * df["additive_mg"]
+        + df["supplier"].map(supplier_effect)
+        + 0.4 * (df["line"] == "L1")
+        + rng.normal(0, 0.8, n)
+    )
+    cuts = np.quantile(latent, [0.05, 0.25, 0.70, 0.95])
+    df["grade"] = np.searchsorted(cuts, latent) + 1
+    df.loc[rng.random(n) < 0.04, "viscosity"] = np.nan
+    df.loc[rng.random(n) < 0.04, "ph"] = np.nan
+    train, test, answers, sample = _split(df, "grade", test_size=0.2, stratify=True)
+    dictionary = _dictionary(
+        [
+            ("id", "id", "int", "Идентификатор партии"),
+            ("temperature_c", "feature", "numeric", "Температура процесса, °C"),
+            ("ph", "feature", "numeric", "Кислотность; бывают пропуски"),
+            ("moisture", "feature", "numeric", "Влажность, доля 0–1"),
+            ("density", "feature", "numeric", "Плотность, г/см³"),
+            ("aging_days", "feature", "int", "Выдержка, дней"),
+            ("viscosity", "feature", "numeric", "Вязкость; бывают пропуски"),
+            ("additive_mg", "feature", "numeric", "Добавка, мг на кг"),
+            ("supplier", "feature", "category", "Поставщик сырья"),
+            ("line", "feature", "category", "Производственная линия"),
+            ("grade", "target", "int", "Оценка качества партии: 1 (худшая) … 5 (лучшая)"),
+        ]
+    )
+    md = _standard_md(
+        "Оценка качества партий",
+        "Эксперты оценивают каждую партию продукции по шкале от 1 до 5. Предскажите оценку по параметрам "
+        "производства. Ошибка на 2 балла хуже, чем на 1.",
+        len(train),
+        len(test),
+        # Ошибка намеренная: нет additive_mg, а viscosity названа «vsc» — верный набор в словаре и CSV
+        "`temperature_c`, `ph`, `moisture`, `density`, `aging_days`, `vsc` — числа; " "`supplier`, `line` — категории.",
+        "Для каждой строки `test.csv` — целая оценка `grade` от 1 до 5.",
+        "Quadratic Weighted Kappa, QWK (больше — лучше)",
+        "id,grade",
+    )
+    _write(
+        task_dir,
+        {"train.csv": train, "test.csv": test, "data_dictionary.csv": dictionary, "sample_submission.csv": sample},
+        md,
+    )
+    return {"answers": answers}
+
+
+@task("claims_regression_mape_rowno", "mape", False)
+def claims(task_dir: Path) -> dict:
+    """Страховые выплаты: MAPE (завышать дорого), скошенная сумма > 0 и номер записи, похожий на время.
+
+    record_no — порядок ввода записей; test — последние 20% записей, но данные от порядка не зависят. Схема time
+    по record_no здесь лишняя (ревью #150: номер строки не время) — агент должен остаться на kfold.
+    """
+    rng = np.random.default_rng(SEED + 3)
+    n = 25000
+    regions = np.array([f"R{i:02d}" for i in range(15)])
+    region_effect = dict(zip(regions, rng.normal(0, 0.25, 15), strict=True))
+    policy_effect = {"basic": -0.3, "standard": 0.0, "plus": 0.2, "premium": 0.45, "fleet": 0.1}
+    df = pd.DataFrame(
+        {
+            "record_no": np.arange(1, n + 1),
+            "region": rng.choice(regions, n),
+            "policy_type": rng.choice(list(policy_effect), n, p=[0.3, 0.35, 0.2, 0.1, 0.05]),
+            "channel": rng.choice(["office", "online", "agent"], n, p=[0.3, 0.5, 0.2]),
+            "vehicle_age": rng.integers(0, 25, n),
+            "driver_age": np.clip(rng.normal(42, 12, n), 18, 85).astype(int),
+            "sum_insured": rng.lognormal(13.5, 0.6, n).round(-3),
+            "prior_claims": rng.poisson(0.4, n),
+            "deductible": rng.choice([0, 5000, 15000, 30000], n, p=[0.4, 0.3, 0.2, 0.1]),
+        }
+    )
+    log_amount = (
+        2.5
+        + 0.55 * np.log(df["sum_insured"])
+        + df["region"].map(region_effect)
+        + df["policy_type"].map(policy_effect)
+        - 0.02 * df["vehicle_age"]
+        + 0.15 * df["prior_claims"]
+        - 0.000015 * df["deductible"]
+        + 0.004 * (df["driver_age"] - 42) ** 2 / 10
+        + rng.normal(0, 0.55, n)
+    )
+    df["claim_amount"] = np.exp(log_amount).round(0).clip(lower=500)
+    df.loc[rng.random(n) < 0.05, "vehicle_age"] = np.nan
+    df.insert(0, "id", rng.permutation(n) + 50000)
+    cut = int(n * 0.8)  # test — последние записи по record_no, но без сдвига в данных
+    train, test_full = df.iloc[:cut].reset_index(drop=True), df.iloc[cut:].sort_values("id").reset_index(drop=True)
+    answers = test_full[["id", "claim_amount"]]
+    test = test_full.drop(columns=["claim_amount"])
+    dictionary = _dictionary(
+        [
+            ("id", "id", "int", "Идентификатор убытка"),
+            ("record_no", "feature", "int", "Порядковый номер записи в журнале убытков"),
+            ("region", "feature", "category", "Регион"),
+            ("policy_type", "feature", "category", "Тип полиса"),
+            ("channel", "feature", "category", "Канал продажи полиса"),
+            ("vehicle_age", "feature", "int", "Возраст автомобиля, лет; бывают пропуски"),
+            ("driver_age", "feature", "int", "Возраст водителя"),
+            ("sum_insured", "feature", "numeric", "Страховая сумма, ₽"),
+            ("prior_claims", "feature", "int", "Убытков по полису раньше"),
+            ("deductible", "feature", "int", "Франшиза, ₽"),
+            ("claim_amount", "target", "numeric", "Сумма выплаты, ₽"),
+        ]
+    )
+    md = _standard_md(
+        "Сумма страховой выплаты",
+        "Оцените сумму выплаты по страховому убытку. Важна относительная точность: ошибиться на 10 000 ₽ "
+        "в выплате на 20 000 ₽ хуже, чем в выплате на 500 000 ₽.",
+        len(train),
+        len(test),
+        "`record_no`, `vehicle_age`, `driver_age`, `sum_insured`, `prior_claims`, `deductible` — числа; "
+        "`region`, `policy_type`, `channel` — категории.",
+        "Для каждой строки `test.csv` — положительное число `claim_amount`.",
+        "MAPE, mean absolute percentage error (меньше — лучше)",
+        "id,claim_amount",
+    )
+    _write(
+        task_dir,
+        {
+            "train.csv": train,
+            "test.csv": test,
+            "data_dictionary.csv": dictionary,
+            "sample_submission.csv": answers.assign(claim_amount=0),
+        },
+        md,
+    )
+    return {"answers": answers}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Пересоздать тренировочные задачи tasks/practice/")
     parser.add_argument("--only", nargs="*", choices=sorted(TASKS), help="какие задачи (по умолчанию все)")
