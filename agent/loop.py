@@ -47,6 +47,9 @@ def run_autoresearch(
     queue: list[Hypothesis] = []
     batch_start = len(history)  # с какого места истории начинается текущая пачка гипотез
     baseline_seconds = best[1].fit_seconds  # на входе best — бейзлайн: от него считаем цену гипотез
+    # Схему валидации выбрали один раз до цикла и посчитали в ней бейзлайн (#151, ADR 0008 D1, ADR 0013):
+    # все гипотезы идут в ней же, иначе acceptance не сравнит их с бейзлайном
+    validation = best[0].params.get("validation")
     for iteration in range(1, max_iterations + 1):
         # Не успеваем даже эксперимент ценой в бейзлайн — дальше пробовать нечего
         if not budget.has_time(needed_seconds=baseline_seconds * 1.2):
@@ -69,7 +72,7 @@ def run_autoresearch(
             log.info("Гипотезы закончились — завершаю цикл")
             break
         hyp = queue.pop(0)
-        log.info("Итерация %d: %s — %s", iteration, hyp.id, hyp.title)
+        log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
         reason = review(hyp, spec)
         needed = estimated_seconds(hyp, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
@@ -80,7 +83,7 @@ def run_autoresearch(
             history.append((hyp, _skipped(hyp, spec, reason)))
             memory.record(hyp.id, False, reason)
             continue
-        result = run_experiment(spec, profile, hyp, train, budget)
+        result = run_experiment(spec, profile, with_validation(hyp, validation), train, budget)
         history.append((hyp, result))
         if result.status != ExperimentStatus.OK:
             log.info("  ✗ %s: %s", result.status.value, result.error)
@@ -94,8 +97,7 @@ def run_autoresearch(
             on_new_best(hyp, result)
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
-    if hasattr(llm, "summary"):  # в тестах вместо LLMClient бывают подмены без счётчиков
-        log.info("LLM за цикл: %s", llm.summary())
+    llm.log_summary()  # токены и время LLM — тай-брейк при равном балле; журнал вызовов — llm_calls.jsonl
     return best
 
 
@@ -103,3 +105,10 @@ def _skipped(hyp: Hypothesis, spec: TaskSpec, reason: str) -> ExperimentResult:
     return ExperimentResult(
         hypothesis_id=hyp.id, status=ExperimentStatus.SKIPPED, metric_name=spec.metric.name, error=reason
     )
+
+
+def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:
+    """Гипотеза в схеме валидации бейзлайна. В историю идёт исходная гипотеза: её params — то, что предложено."""
+    if validation is None or "validation" in hyp.params:
+        return hyp  # своя схема гипотезы — acceptance отклонит её как несравнимую, но не подменяем молча
+    return hyp.model_copy(update={"params": {**hyp.params, "validation": validation}})
