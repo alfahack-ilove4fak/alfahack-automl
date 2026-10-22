@@ -626,3 +626,86 @@ def test_optuna_hidden_from_agent_until_honest_validation():
     section = ml.experiment.__doc__.split("Поддерживаемые params", 1)[1].split("\n", 1)[-1]
     keys = set(re.findall(r"^(\w+)\s+—", textwrap.dedent(section), re.MULTILINE))
     assert "optuna" not in keys
+
+
+def test_unseen_category_becomes_missing_but_catboost_keeps_it():
+    """#145: категория без строк в обучающей части → пропуск; известные значения и пропуски не трогаем."""
+    from ml.experiment import _hide_unseen
+
+    cats = ["A", "B", "C"]
+    x_fit = pd.DataFrame({"c": pd.Categorical(["A", "B", "A"], categories=cats), "n": [1.0, 2.0, 3.0]})
+    x_new = pd.DataFrame({"c": pd.Categorical(["A", "C", None, "B"], categories=cats), "n": [1.0, 2.0, 3.0, 4.0]})
+
+    hidden = _hide_unseen(_hyp(model="xgboost"), x_fit, x_new)
+
+    assert hidden["c"].tolist()[0] == "A" and hidden["c"].tolist()[3] == "B"
+    assert hidden["c"].isna().tolist() == [False, True, True, False]
+    assert list(hidden["c"].cat.categories) == cats  # словарь общий, коды известных категорий не сдвигаются
+    assert x_new["c"].tolist()[1] == "C"  # исходная таблица не изменена
+    assert _hide_unseen(_hyp(model="catboost"), x_fit, x_new) is x_new
+
+
+def test_unseen_category_reaches_model_as_missing(monkeypatch):
+    """#145: и в CV (валидация фолда), и в финальном обучении (test) модель видит новую категорию как пропуск."""
+    import ml.experiment
+
+    seen = []
+    real_fit, real_predict = ml.experiment._fit_model, ml.experiment._predict
+
+    def spy_fit(spec, hypothesis, x, y, eval_set=None, n_estimators=None):
+        if eval_set is not None:
+            seen.append(("cv", x["c"], eval_set[0]["c"]))
+        return real_fit(spec, hypothesis, x, y, eval_set, n_estimators)
+
+    def spy_predict(spec, model, x, log_target):
+        seen.append(("final", None, x["c"]))
+        return real_predict(spec, model, x, log_target)
+
+    monkeypatch.setattr(ml.experiment, "_fit_model", spy_fit)
+    monkeypatch.setattr(ml.experiment, "_predict", spy_predict)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    train.loc[train.index[-1], "c"] = "solo"  # одна строка: в своём фолде валидации, в его обучении — нет
+    test = train.drop(columns="y").head(3).copy()
+    test["c"] = ["new", "x", "solo"]  # "new" нет в train
+    hyp = _hyp(model_params={"n_estimators": 20})
+
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    fit_predict_final(spec, profile, hyp, train, test)
+
+    cv = [(fit_c, valid_c) for kind, fit_c, valid_c in seen if kind == "cv"]
+    assert cv and all(set(valid_c.dropna()) <= set(fit_c.dropna()) for fit_c, valid_c in cv)
+    assert sum(int(valid_c.isna().sum()) for _, valid_c in cv) == 1  # "solo" в своём фолде — пропуск
+    final = [c for kind, _, c in seen if kind == "final"][-1]  # последний _predict — test в fit_predict_final
+    assert final.isna().tolist() == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("task_type", "metric", "params", "expected"),
+    [
+        (TaskType.REGRESSION, "rmsle", {}, True),  # метрика на лог-шкале — учимся сразу под неё (#206)
+        (TaskType.REGRESSION, "msle", {}, True),
+        (TaskType.REGRESSION, "rmsle", {"log_target": False}, False),  # явный выбор гипотезы важнее умолчания
+        (TaskType.REGRESSION, "rmse", {}, False),
+        (TaskType.REGRESSION, "rmse", {"log_target": True}, True),
+        (TaskType.BINARY, "rmsle", {"log_target": True}, False),  # на классификации log_target не действует
+    ],
+)
+def test_log_target_default_follows_metric(task_type, metric, params, expected):
+    from ml.experiment import _use_log_target
+
+    assert _use_log_target(_spec(task_type, metric, greater=False), params) is expected
+
+
+def test_rmsle_default_log_target_gives_non_negative_answer():
+    # без log_target прогноз регрессии бывает < 0 (на practice/sales — до −0.5), а RMSLE ждёт y ≥ 0
+    spec = _spec(TaskType.REGRESSION, "rmsle", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    train["y"] = np.exp(train["y"]) * 0.1  # положительный скошенный target, часть значений около нуля
+    hyp = _hyp(model_params={"n_estimators": 50})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert (answer["y"] >= 0).all()
