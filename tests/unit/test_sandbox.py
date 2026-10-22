@@ -47,7 +47,7 @@ def test_timeout_kills_child_processes_too(tmp_path):
     marker = tmp_path / "alive.txt"
     code = (
         "import subprocess, sys\n"
-        f"subprocess.Popen([sys.executable, '-c', \"import time; time.sleep(3); open(r'{marker}', 'w').write('x')\"])\n"
+        f"subprocess.Popen([sys.executable, '-c', \"import time; time.sleep(3); open(r'{marker.as_posix()}', 'w').write('x')\"])\n"
         "import time; time.sleep(60)\n"
     )
     res = run_code(code, tmp_path, timeout=1.0, mem_mb=2048)
@@ -115,7 +115,7 @@ def test_stdin_is_closed(tmp_path):
 
 def test_never_raises_on_broken_workdir(tmp_path):
     blocker = tmp_path / "file"
-    blocker.write_text("я файл, а не каталог")
+    blocker.write_text("я файл, а не каталог", encoding="utf-8")
     res = run_code("print(1)", blocker / "sub", timeout=5, mem_mb=2048)  # нельзя создать каталог внутри файла
     assert res.exit_code == 127 and "песочница" in res.stderr
 

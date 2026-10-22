@@ -10,8 +10,9 @@
      периоды; иначе случайно, но полные дубликаты строк держим по одну сторону (иначе оценка завышена);
   2. собираем копию задачи (task.md, остальной train, новый test без target, sample_submission)
      и запускаем solution.py отдельным процессом с бюджетом времени — как платформа;
-  3. считаем метрику задачи и балл по формуле организаторов относительно тривиального ответа
-     (evaluation/local_score.py).
+  3. считаем метрику задачи и два балла по формуле организаторов (evaluation/local_score.py): относительно
+     тривиального ответа (score) и относительно сильного бейзлайна — лучшего из LightGBM по умолчанию и
+     тривиального ответа (model_score); второй ближе к бейзлайну организаторов, по нему сверяемся с public.
 Ответы лежат вне папки задачи — агент их не видит. Результаты дописываются в runs/harness/leaderboard.csv.
 """
 
@@ -49,6 +50,8 @@ COLUMNS = [
     "value",
     "baseline",
     "score",
+    "model_baseline",
+    "model_score",
     "status",
     "seconds",
     "peak_ram_mb",
@@ -210,9 +213,20 @@ def run_task(
         answers = pd.read_csv(out / "answers.csv")
         submission = pd.read_csv(new_spec.submission_path)
         merged = answers.merge(submission, on=spec.id_column, suffixes=("_true", "_pred"))
-        row.update(
-            score_submission(spec, merged[f"{spec.target}_true"], merged[f"{spec.target}_pred"], prepared["y_train"])
+        features = [c for c in test.columns if c != spec.id_column]
+        x_test = merged[[spec.id_column]].merge(test, on=spec.id_column, how="left")[features]
+        x_train = pd.read_csv(new_spec.train_path, low_memory=False).drop(columns=[spec.target], errors="ignore")
+        scores = score_submission(
+            spec,
+            merged[f"{spec.target}_true"],
+            merged[f"{spec.target}_pred"],
+            prepared["y_train"],
+            x_train=x_train.drop(columns=[spec.id_column], errors="ignore"),
+            x_test=x_test,
         )
+        if "model_error" in scores:
+            print(f"  ⚠️ модельный бейзлайн не посчитан: {scores.pop('model_error')}", flush=True)
+        row.update(scores)
         row["status"] = "OK" if code == 0 else ("TIMEOUT" if code is None else f"EXIT_{code}")
     except Exception as exc:  # noqa: BLE001 — упавшая задача не должна ронять весь прогон
         row["error"] = f"{type(exc).__name__}: {exc}"[:300]
@@ -230,6 +244,11 @@ def commit_id(root: Path = ROOT) -> str:
 
 def append_rows(rows: list[dict], path: Path = LEADERBOARD) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with path.open(encoding="utf-8") as f:
+            header = f.readline().strip().split(",")
+        if header != COLUMNS:  # старый лидерборд без новых колонок — переписываем с новой шапкой, строки сохраняем
+            pd.read_csv(path).reindex(columns=COLUMNS).to_csv(path, index=False)
     new = not path.exists()
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
@@ -240,17 +259,26 @@ def append_rows(rows: list[dict], path: Path = LEADERBOARD) -> None:
 
 def render(rows: list[dict]) -> str:
     lines = [
-        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Статус | Время, с | Пик RAM, МБ |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному | Статус | Время, с "
+        "| Пик RAM, МБ |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         status = r["status"] + (f" — {r['error']}" if r.get("error") else "")
+        model_score = r.get("model_score", float("nan"))
         lines.append(
             f"| {r['task']} | {r.get('split', '—')} | {r.get('metric', '—')} | {r.get('value', float('nan')):.5g} | "
-            f"{r.get('baseline', float('nan')):.5g} | {r['score']:.1f} | {status} | "
+            f"{r.get('baseline', float('nan')):.5g} | {r['score']:.1f} | {r.get('model_baseline', float('nan')):.5g} | "
+            f"{'—' if np.isnan(model_score) else f'{model_score:.1f}'} | {status} | "
             f"{r.get('seconds', 0):.0f} | {r.get('peak_ram_mb', 0):.0f} |"
         )
     lines.append(f"\nСредний балл: **{np.mean([r['score'] for r in rows]):.1f}** (платформа берёт среднее по задачам)")
+    model_scores = [r.get("model_score", float("nan")) for r in rows]
+    if not np.all(np.isnan(model_scores)):
+        lines.append(
+            f"Средний балл к сильному бейзлайну (лучший из LightGBM и тривиального): "
+            f"**{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
+        )
     return "\n".join(lines)
 
 
@@ -280,13 +308,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("укажи --all или --task")
     commit, date = commit_id(args.agent_root.resolve()), time.strftime("%Y-%m-%d %H:%M")
     rows = []
-    with tempfile.TemporaryDirectory(prefix="harness_") as tmp:
+    # Дочерние процессы агента могут дописывать файлы в момент удаления папки («Directory not empty») —
+    # ошибка уборки не должна терять результаты: строки пишем внутри with, уборку не роняем
+    with tempfile.TemporaryDirectory(prefix="harness_", ignore_cleanup_errors=True) as tmp:
         for task_md in tasks:
             print(f"… {task_md.parent.name}: бюджет {args.minutes} мин", flush=True)
             row = run_task(task_md, Path(tmp), args.minutes, args.frac, args.rows, args.llm, args.agent_root.resolve())
             rows.append({"date": date, "commit": commit, **row})
             print(f"  {row['status']}: балл {row['score']:.1f}", flush=True)
-    append_rows(rows, args.out)
+        append_rows(rows, args.out)
     print("\n" + render(rows))
     print(f"\nСтроки дописаны в {args.out}")
     return 0 if all(r["status"] == "OK" for r in rows) else 1

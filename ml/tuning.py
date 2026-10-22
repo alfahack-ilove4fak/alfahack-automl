@@ -80,8 +80,12 @@ def tune(
     ops,  # params.feature_ops в любом формате parse_feature_ops
     log_target: bool,
     budget: RunBudget,
+    split=None,
 ) -> dict:
-    """Лучшие model_params или {} (ни одно испытание не завершилось — остаются параметры гипотезы)."""
+    """Лучшие model_params или {} (ни одно испытание не завершилось — остаются параметры гипотезы).
+
+    split(rows, k) → фолды на строках rows: та же схема валидации, что у CV (ml/validation.py). Нет — kfold/stratified.
+    """
     from ml.experiment import DEFAULT_MODEL, SEED, _fold_score, _is_classification, _sample_rows, _split
 
     cfg = {**DEFAULTS, **(hypothesis.params.get("optuna") or {})}
@@ -89,10 +93,11 @@ def tune(
     classification = _is_classification(spec)
     timeout = max(0.0, min(float(cfg["timeout"]), budget.seconds_left() * BUDGET_SHARE))
     deadline = time.time() + timeout
+    rows = np.arange(len(y))
     if len(y) > int(cfg["rows"]):
         rows = _sample_rows(spec, y, int(cfg["rows"]))
         x, y, y_fit = x.iloc[rows], y[rows], y_fit[rows]
-    folds = _split(spec, y, int(cfg["folds"]))
+    folds = split(rows, int(cfg["folds"])) if split else _split(spec, y, int(cfg["folds"]))
     base = dict(hypothesis.params.get("model_params") or {})
 
     def objective(trial: optuna.Trial) -> float:

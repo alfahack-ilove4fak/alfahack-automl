@@ -6,8 +6,13 @@
 Обобщаем на любую метрику реестра: «меньше — лучше» → как RMSE, «больше — лучше» → как F1
 (у таких метрик потолок 1: F1, accuracy, ROC-AUC, R², Gini, MCC, QWK…).
 
-B организаторов неизвестен — берём тривиальный ответ (среднее / частый класс / доли классов).
-Поэтому абсолютный балл не равен баллу платформы: сравниваем версии агента между собой.
+B организаторов неизвестен, поэтому считаем два балла:
+  score       — относительно тривиального ответа (среднее / частый класс / доли классов). Сильно завышен:
+                годится только для сравнения версий агента между собой;
+  model_score — относительно сильного бейзлайна: лучшего из LightGBM по умолчанию (без подбора и признаков)
+                и тривиального ответа. Организаторы описали свой бейзлайн как «простейшую модель, которую DS
+                обучил руками за 5 минут» — человек не сдал бы модель хуже среднего. Так на public/regression
+                (отложены последние годы, LightGBM хуже среднего) средний балл двух задач 18.0 при public 17.46.
 """
 
 from __future__ import annotations
@@ -19,6 +24,8 @@ from evaluation.metrics import METRICS, compute_metric
 from interfaces.schemas import TaskSpec, TaskType
 
 BEST_FOR_GREATER = 1.0  # потолок метрик «больше — лучше»
+SEED = 42
+MODEL_THREADS = 4
 
 
 def organizer_score(metric_name: str, value: float, baseline: float) -> float:
@@ -73,14 +80,68 @@ def trivial_prediction(spec: TaskSpec, y_train: pd.Series, n: int) -> np.ndarray
     return np.full(n, prior[-1]) if spec.task_type == TaskType.BINARY else np.tile(prior, (n, 1))
 
 
-def score_submission(spec: TaskSpec, answers: pd.Series, submission: pd.Series, y_train: pd.Series) -> dict:
-    """Метрика агента, метрика бейзлайна и балл. answers и submission — в одном порядке строк."""
+def _model_frames(x_train: pd.DataFrame, x_test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Общие колонки; текстовые → category с категориями из train (новые значения в test → пропуск)."""
+    cols = [c for c in x_train.columns if c in x_test.columns]
+    train, test = x_train[cols].copy(), x_test[cols].copy()
+    for col in cols:
+        if not (pd.api.types.is_numeric_dtype(train[col]) or pd.api.types.is_bool_dtype(train[col])):
+            train[col] = train[col].astype(str).astype("category")
+            test[col] = pd.Categorical(test[col].astype(str), categories=train[col].cat.categories)
+    return train, test
+
+
+def model_prediction(spec: TaskSpec, x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.DataFrame) -> np.ndarray:
+    """Модельный бейзлайн: LightGBM по умолчанию, ответ в формате входа метрики (как trivial_prediction)."""
+    import lightgbm as lgb  # тяжёлый импорт — только когда бейзлайн реально считаем
+
+    train, test = _model_frames(x_train, x_test)
+    params = {"random_state": SEED, "n_jobs": MODEL_THREADS, "verbose": -1}
+    kind = METRICS[spec.metric.name].prediction
+    if kind == "value":
+        model = lgb.LGBMRegressor(**params).fit(train, pd.to_numeric(y_train).to_numpy(dtype=float))
+        return model.predict(test)
+    codes = _encode(spec, y_train)
+    model = lgb.LGBMClassifier(**params).fit(train, codes)
+    if kind == "label":
+        return model.predict(test).astype(int)
+    proba = np.zeros((len(test), len(spec.class_labels or [])))
+    proba[:, model.classes_] = model.predict_proba(test)  # классы, которых нет в train, — вероятность 0
+    return proba[:, -1] if spec.task_type == TaskType.BINARY else proba
+
+
+def score_submission(
+    spec: TaskSpec,
+    answers: pd.Series,
+    submission: pd.Series,
+    y_train: pd.Series,
+    x_train: pd.DataFrame | None = None,
+    x_test: pd.DataFrame | None = None,
+) -> dict:
+    """Метрика агента, метрики бейзлайнов и баллы. answers, submission и x_test — в одном порядке строк.
+
+    Сильный бейзлайн считаем, только если переданы признаки x_train/x_test: model_baseline — лучший из LightGBM
+    и тривиального ответа. Ошибка LightGBM не роняет оценку: model_baseline и model_score = NaN, причина —
+    в model_error.
+    """
     y = target_for_metric(spec, answers)
     value = compute_metric(spec.metric.name, y, prediction_for_metric(spec, submission))
     baseline = compute_metric(spec.metric.name, y, trivial_prediction(spec, y_train, len(y)))
-    return {
+    result = {
         "metric": spec.metric.name,
         "value": float(value),
         "baseline": float(baseline),
         "score": organizer_score(spec.metric.name, value, baseline),
     }
+    if x_train is not None and x_test is not None:
+        try:
+            lgbm = float(compute_metric(spec.metric.name, y, model_prediction(spec, x_train, y_train, x_test)))
+            better = max if METRICS[spec.metric.name].greater_is_better else min
+            model_baseline = better(lgbm, float(baseline)) if np.isfinite(lgbm) else float(baseline)
+            result["model_baseline"] = model_baseline
+            result["model_score"] = organizer_score(spec.metric.name, value, model_baseline)
+        except Exception as exc:  # noqa: BLE001 — бейзлайн вспомогательный, без него оценка агента остаётся
+            result.update(
+                model_baseline=float("nan"), model_score=float("nan"), model_error=f"{type(exc).__name__}: {exc}"
+            )
+    return result
