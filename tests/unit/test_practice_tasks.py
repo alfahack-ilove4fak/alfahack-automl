@@ -46,3 +46,40 @@ def test_answers_match_test(name):
     assert list(answers.columns) == [expected["id_column"], expected["target"]]
     assert answers[expected["id_column"]].tolist() == test[expected["id_column"]].tolist()
     assert answers[expected["target"]].notna().all()
+
+
+# Схема валидации, которую должен выбрать агент: задачи-ловушки ревью #150 (ADR 0013)
+EXPECTED_VALIDATION = {
+    "payments_binary_f1_rare": "time:date",  # test — следующий месяц, редкий класс во time-фолдах не роняет CV
+    "claims_regression_mape_rowno": "kfold",  # record_no — номер записи, а не время
+    "batches_ordinal_qwk": "stratified",
+}
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED_VALIDATION))
+def test_trap_tasks_get_expected_validation(name):
+    from ml.profiling import load_data, profile_data
+    from ml.validation import choose_validation
+
+    spec = parse_task(PRACTICE / name / "task.md")
+    train, test = load_data(spec)
+    assert choose_validation(spec, profile_data(spec, train, test), train, test) == EXPECTED_VALIDATION[name]
+
+
+def test_trap_tasks_keep_their_traps():
+    """Перегенерировали задачи — ловушки должны остаться: иначе задача проверяет не то, что написано в README."""
+    pay_train = pd.read_csv(PRACTICE / "payments_binary_f1_rare" / "train.csv")
+    pay_test = pd.read_csv(PRACTICE / "payments_binary_f1_rare" / "test.csv")
+    assert 0.01 < pay_train["is_fraud"].mean() < 0.05
+    assert pay_test["date"].min() > pay_train["date"].max()
+    assert 0.15 < (~pay_test["merchant_id"].isin(pay_train["merchant_id"])).mean() < 0.35
+
+    batches_md = (PRACTICE / "batches_ordinal_qwk" / "task.md").read_text(encoding="utf-8")
+    batches_cols = set(pd.read_csv(PRACTICE / "batches_ordinal_qwk" / "train.csv", nrows=1).columns)
+    assert "`vsc`" in batches_md and "additive_mg" not in batches_md  # ошибка в описании — намеренная
+    assert {"viscosity", "additive_mg"} <= batches_cols
+
+    claims_train = pd.read_csv(PRACTICE / "claims_regression_mape_rowno" / "train.csv")
+    claims_test = pd.read_csv(PRACTICE / "claims_regression_mape_rowno" / "test.csv")
+    assert claims_test["record_no"].min() > claims_train["record_no"].max()
+    assert (claims_train["claim_amount"] > 0).all()

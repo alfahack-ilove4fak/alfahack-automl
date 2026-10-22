@@ -1,0 +1,108 @@
+# Qwen для всех: прогоны с настоящей LLM в облаке GitHub — без ключа на ноутбуке.
+# Как: вкладка Actions → qwen → Run workflow → режим, задача, минуты, ветка.
+#   check   — связь с Qwen и остаток дневного бюджета (≈ 1 копейка, 1 мин)
+#   run     — агент с Qwen на одной задаче или на всех (--all) и сводка: запросы, гипотезы от LLM, ₽
+#   compare — харнесс «без LLM против Qwen» на задачах: помогает ли LLM честно
+# Ключ — секрет репозитория OPENAI_API_KEY (+ OPENAI_BASE_URL, OPENAI_MODEL), в логах GitHub маскирует его сам.
+# Бюджет общий: 600 ₽/сутки на команду, сброс в 03:00 МСК. Поэтому одновременно идёт только ОДИН такой запуск,
+# а перед прогоном — проверка остатка (меньше min_rub — стоп). Минуты Actions тоже общие (2000/мес) — не ставьте часы.
+# Подробно: docs/qwen.md
+name: qwen
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check — связь и бюджет; run — агент с Qwen; compare — без LLM против Qwen"
+        type: choice
+        options: [check, run, compare]
+        default: check
+      task:
+        description: "run: путь к task.md или all; compare: пусто = все задачи"
+        default: "tasks/public/multiclass/task.md"
+        required: false
+      minutes:
+        description: "Минут на задачу (на платформе 180; здесь 3–10)"
+        default: "5"
+        required: true
+      min_rub:
+        description: "Не запускать, если в дневном бюджете осталось меньше, ₽"
+        default: "50"
+        required: true
+
+concurrency:
+  group: qwen
+  cancel-in-progress: false
+
+jobs:
+  qwen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      LLM_MOCK: "0"
+      LLM_CACHE_DIR: llm_cache
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+
+      - name: Ключ задан
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::Нет секрета OPENAI_API_KEY в репозитории — его кладёт капитан (docs/qwen.md)"; exit 1
+          fi
+
+      # Кэш ответов LLM: одинаковый промпт → ответ из кэша, общий бюджет не тратится
+      - uses: actions/cache@v4
+        with:
+          path: llm_cache
+          key: qwen-llm-${{ github.run_id }}
+          restore-keys: qwen-llm-
+
+      - name: Связь и бюджет
+        run: |
+          uv run python scripts/qwen.py check | tee -a "$GITHUB_STEP_SUMMARY"
+          uv run python scripts/qwen.py budget --min-rub "${{ inputs.min_rub }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Агент с Qwen
+        if: inputs.mode == 'run'
+        run: |
+          if [ "${{ inputs.task }}" = "all" ]; then
+            for t in tasks/public/*/task.md; do
+              uv run python scripts/qwen.py run "$t" --minutes "${{ inputs.minutes }}" | tee -a "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            uv run python scripts/qwen.py run "${{ inputs.task }}" --minutes "${{ inputs.minutes }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Без LLM против Qwen (харнесс)
+        if: inputs.mode == 'compare'
+        run: |
+          args="--minutes ${{ inputs.minutes }}"
+          if [ -n "${{ inputs.task }}" ] && [ "${{ inputs.task }}" != "all" ] && [ "${{ inputs.task }}" != "tasks/public/multiclass/task.md" ]; then
+            args="$args --tasks ${{ inputs.task }}"
+          fi
+          uv run python scripts/qwen.py compare $args | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Сколько ушло
+        if: always()
+        run: uv run python scripts/qwen.py budget --min-rub 0 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Логи
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-${{ inputs.mode }}-${{ github.run_number }}
+          path: |
+            runs/**/agent.log
+            runs/**/*.md
+            runs/**/*.csv
+          if-no-files-found: ignore
+          retention-days: 7
