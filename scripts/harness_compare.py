@@ -77,7 +77,10 @@ def render(base: pd.DataFrame, head: pd.DataFrame, minutes: float | None = None,
     if used_llm:  # тай-брейк при равном балле: меньше токенов — выше место
         tok_b, tok_h = _llm_total(base, "llm_tokens"), _llm_total(head, "llm_tokens")
         rub_b, rub_h = _llm_total(base, "llm_rub"), _llm_total(head, "llm_rub")
-        lines += [f"Токены LLM: {tok_b:.0f} → {tok_h:.0f} ({tok_h - tok_b:+.0f}), {rub_b:.2f} → {rub_h:.2f} ₽", ""]
+        if "llm_tokens" in base.columns:
+            lines += [f"Токены LLM: {tok_b:.0f} → {tok_h:.0f} ({tok_h - tok_b:+.0f}), {rub_b:.2f} → {rub_h:.2f} ₽", ""]
+        else:  # база из старого лидерборда без колонок llm_* — «0 → N» было бы неправдой
+            lines += [f"Токены LLM: — → {tok_h:.0f}, — → {rub_h:.2f} ₽ (в базе расход не записан)", ""]
     errors = [f"- `{t}`: {e}" for t, e in head["error"].items() if isinstance(e, str) and e]
     if errors:
         lines += ["Ошибки в PR:", *errors, ""]

@@ -81,6 +81,32 @@ def test_with_validation_helper():
     assert "validation" not in h.params  # исходная гипотеза не меняется
 
 
+def test_validation_is_not_part_of_repeat_key():
+    # solution.py кладёт схему в params бейзлайна: «LightGBM по умолчанию» из playbook/LLM без схемы — всё равно повтор
+    from agent.hypotheses import params_key
+
+    lgbm = {"model": "lightgbm"}
+    assert params_key({**lgbm, "validation": "time:Year"}, "time:Year") == params_key(lgbm, "time:Year")
+    assert params_key({**lgbm, "validation": "group:dup"}, "time:Year") != params_key(lgbm, "time:Year")
+    assert params_key({**lgbm, "validation": "time:Year"}) != params_key(lgbm)  # без схемы прогона — ревью #164
+    assert params_key({**lgbm, "class_weight": "balanced"}, "time:Year") != params_key(lgbm, "time:Year")
+
+
+def test_default_lgbm_is_repeat_of_baseline_in_run_scheme():
+    # бейзлайн записан со схемой прогона; LLM предлагает LightGBM по умолчанию без схемы — это повтор
+    from agent.hypotheses import baseline_hypothesis
+    from agent.llm_hypotheses import parse_hypotheses
+
+    base = baseline_hypothesis()
+    base = base.model_copy(update={"params": {**base.params, "validation": "time:Year"}})
+    history = [(base, result("baseline", 42.0, "time:Year-5"))]
+    item = {"id": "lgbm_again", "kind": "model", "title": "LightGBM", "rationale": "", "params": dict(base.params)}
+    del item["params"]["validation"]
+    assert parse_hypotheses([item], history, k=3) == []
+    other = {**item, "id": "lgbm_dup", "params": {**item["params"], "validation": "group:dup"}}
+    assert [h.id for h in parse_hypotheses([other], history, k=3)] == ["lgbm_dup"]  # другая схема — не повтор
+
+
 @pytest.mark.parametrize(
     "run_scheme, own, skipped",
     [
@@ -98,3 +124,28 @@ def test_foreign_scheme_skipped_before_run(spec, profile, monkeypatch, run_schem
     assert (seen == []) is skipped
     if skipped:
         assert history[1][1].status == ExperimentStatus.SKIPPED and "несравнимы" in history[1][1].error
+
+
+def test_final_gets_params_written_by_cv(spec, profile, monkeypatch):
+    """#206: в финал уходит запущенная копия — с _best_iteration и _proba_weights из CV, а не исходная гипотеза."""
+
+    def fake_experiment(spec, profile, h, train, budget):
+        h.params["_best_iteration"] = 137  # как run_experiment: пишет в params той гипотезы, что запускал
+        h.params["_proba_weights"] = [1.0, 1.2]
+        return result(h.id, 40.0, f"{h.params.get('validation', 'kfold')}-5")
+
+    monkeypatch.setattr(loop, "run_experiment", fake_experiment)
+    batches = [[hyp("a")]]
+    monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: batches.pop(0) if batches else [])
+    finals = []
+    base = (hyp("baseline", validation="time:Year"), result("baseline", 42.0, "time:Year-5"))
+    history = [base]
+    best = loop.run_autoresearch(
+        spec, profile, None, RunBudget(), history, base, lambda h, r: finals.append(h), llm=None
+    )
+    assert [h.id for h in finals] == ["a"]
+    assert finals[0].params["_best_iteration"] == 137 and finals[0].params["_proba_weights"] == [1.0, 1.2]
+    assert finals[0].params["validation"] == "time:Year"
+    assert best[0] is finals[0]
+    # в историю по-прежнему исходная гипотеза: повторы ищутся по предложенным params
+    assert "_best_iteration" not in history[1][0].params and "validation" not in history[1][0].params

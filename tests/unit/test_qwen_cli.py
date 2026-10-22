@@ -278,3 +278,119 @@ def test_parse_agent_log_uses_source_tag():
     summary = parse_agent_log(log, known_ids={"lgbm_shallow"})
     assert summary.accepted == ["lgbm_shallow", "my_new_idea"]
     assert summary.accepted_llm == ["lgbm_shallow"]
+
+
+def _check_env(monkeypatch, chats):
+    """check без сети: переменные, DNS/TCP, /v1/models и бюджет — заглушки; ответы chat — по очереди из chats."""
+    monkeypatch.setattr(qwen, "check_network", lambda *a: [qwen.Line(qwen.OK, "TCP")])
+    monkeypatch.setattr(qwen, "check_models", lambda *a: qwen.Line(qwen.OK, "GET /v1/models", "200"))
+    monkeypatch.setattr(qwen, "http_get", lambda *a, **kw: (200, qwen.json.dumps(KEY_INFO).encode()))
+    calls = []
+
+    def fake_chat(key, prompt=qwen.CHECK_PROMPT, max_tokens=qwen.CHECK_MAX_TOKENS):
+        calls.append(prompt)
+        return chats[len(calls) - 1]
+
+    monkeypatch.setattr(qwen, "check_chat", fake_chat)
+    return calls
+
+
+def test_check_catches_network_cutting_long_answers(llm_env, monkeypatch, capsys):
+    # #193: короткий ответ за 3 с доходит, длинный рвётся на 11 с — раньше check был зелёным
+    cut = "APIConnectionError: Connection error. ← RemoteProtocolError: Server disconnected without sending a response."
+    calls = _check_env(
+        monkeypatch, [qwen.ChatResult(True, "3.1 с, ответ «Готов»", 3.1), qwen.ChatResult(False, cut, 11.1)]
+    )
+    assert qwen.main(["check"]) == 1
+    assert calls == [qwen.CHECK_PROMPT, qwen.LONG_PROMPT]
+    out = capsys.readouterr().out
+    assert "обрыв через 11.1 с" in out and "дольше ≈ 11 с" in out and "#193" in out
+
+
+def test_check_long_answer_ok(llm_env, monkeypatch, capsys):
+    _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0), qwen.ChatResult(True, "34 с, ответ «1. …»", 34.0)])
+    assert qwen.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "длинный ответ" in out and "Qwen отвечает" in out
+
+
+def test_check_long_answer_too_fast_is_only_a_warning(llm_env, monkeypatch, capsys):
+    _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0), qwen.ChatResult(True, "6 с", 6.0)])
+    assert qwen.main(["check"]) == 0
+    assert "не проверен" in capsys.readouterr().out
+
+
+def test_check_quick_skips_long_answer(llm_env, monkeypatch, capsys):
+    calls = _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0)])
+    assert qwen.main(["check", "--quick"]) == 0
+    assert calls == [qwen.CHECK_PROMPT]
+    assert "--quick" in capsys.readouterr().out
+
+
+def test_summary_counts_failed_requests_and_hints_disconnect():
+    # реальный хвост лога regression 22.10: 5 коротких запросов прошли, 6 запросов гипотез оборвались
+    cut = (
+        "[  29.4s] WARNING agent.llm: LLM ошибка (1 подряд): APIConnectionError: Connection error. "
+        "← RemoteProtocolError: Server disconnected without sending a response.\n"
+    )
+    log = cut * 6 + "[ 393.7s] INFO  agent.llm_hypotheses: LLM предложила 0 гипотез (потрачено 0.00 ₽ за 5 запросов)\n"
+    text = qwen.render_summary(qwen.parse_agent_log(log, known_ids=set()), spent_rub=None)
+    assert "запросов к LLM: 11 (успешных 5, с ошибкой 6)" in text
+    assert "рвёт долгие ответы" in text
+
+
+def _fake_client(monkeypatch, stream: bool):
+    """Подменяем LLMClient: запоминаем, с какими аргументами check_chat пошёл в API."""
+    seen = {}
+    usage = SimpleNamespace(prompt_tokens=5, completion_tokens=3, completion_tokens_details=None, model_extra={})
+    reply = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Готов"), finish_reason="stop")], usage=usage
+    )
+
+    class Completions:
+        def create(self, **kwargs):
+            seen.update(kwargs)
+            if kwargs.get("stream"):
+                chunk = SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="Готов"), finish_reason="stop")], usage=usage
+                )
+                return iter([chunk])
+            return reply
+
+    class Api:
+        chat = SimpleNamespace(completions=Completions())
+
+        def with_options(self, **kwargs):
+            return self
+
+    class FakeClient:
+        model = "qwen"
+        _client = Api()
+
+        def __init__(self, *a, **kw):
+            self.stream = stream
+
+    import agent.llm_client as llm_client
+
+    monkeypatch.setattr(llm_client, "LLMClient", FakeClient)
+    return seen
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_check_chat_goes_the_agent_way(llm_env, monkeypatch, stream):
+    # check должен ходить тем же путём, что агент: при LLM_STREAM=1 — потоком (#209), иначе прокси рвёт «молчащий» запрос
+    seen = _fake_client(monkeypatch, stream)
+    result = qwen.check_chat("key")
+    assert result.ok and "Готов" in result.detail
+    assert bool(seen.get("stream")) is stream
+    assert ("stream_options" in seen) is stream
+
+
+def test_check_long_failure_names_agent_mode(monkeypatch):
+    monkeypatch.setenv("LLM_STREAM", "0")
+    monkeypatch.setattr(qwen, "check_chat", lambda *a, **kw: qwen.ChatResult(False, "Server disconnected", 10.4))
+    line, _ = qwen.check_long("key")
+    assert "в режиме агента (без потока)" in line.detail and "LLM_STREAM=0" in line.detail
+    monkeypatch.setenv("LLM_STREAM", "1")
+    line, _ = qwen.check_long("key")
+    assert "в режиме агента (потоком)" in line.detail and "LLM_STREAM=0" not in line.detail
