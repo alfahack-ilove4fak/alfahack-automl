@@ -88,7 +88,7 @@ def ask_llm(
     if messages is None:
         return None
     try:
-        raw = llm.chat_json(messages, temperature=0.0, max_tokens=MAX_TOKENS, max_wait=MAX_WAIT)
+        raw = llm.chat_json(messages, temperature=0.0, max_tokens=MAX_TOKENS, max_wait=MAX_WAIT, purpose="task")
     except Exception:  # noqa: BLE001 — разбор без LLM всё равно есть
         log.exception("%s: запрос не удался — остаёмся на разборе по данным", PREFIX)
         return None

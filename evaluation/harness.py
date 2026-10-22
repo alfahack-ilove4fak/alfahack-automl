@@ -11,9 +11,10 @@
   2. собираем копию задачи (task.md, остальной train, новый test без target, sample_submission)
      и запускаем solution.py отдельным процессом с бюджетом времени — как платформа;
   3. считаем метрику задачи и два балла по формуле организаторов (evaluation/local_score.py): относительно
-     тривиального ответа (score) и относительно LightGBM по умолчанию на тех же данных (model_score) —
-     второй ближе к бейзлайну организаторов, по нему сверяемся с public.
+     тривиального ответа (score) и относительно сильного бейзлайна — лучшего из LightGBM по умолчанию и
+     тривиального ответа (model_score); второй ближе к бейзлайну организаторов, по нему сверяемся с public.
 Ответы лежат вне папки задачи — агент их не видит. Результаты дописываются в runs/harness/leaderboard.csv.
+Из CLI .env в корне подхватывается сам (ключ для --llm); сравнить «без LLM / с Qwen» — scripts/qwen.py compare.
 """
 
 from __future__ import annotations
@@ -59,32 +60,57 @@ COLUMNS = [
     "error",
 ]
 SEED = 42
+DATE_SHARE = 0.95  # колонку считаем датой, если так разбирается не меньше этой доли значений (как в стенде research)
 GRACE_SEC = 60  # сколько ждём сверх бюджета, прежде чем считать, что агент «завис»
 
 
 # --- 1. Отложенная часть
 
 
-def time_column(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> str | None:
-    """Целочисленная колонка с небольшим числом значений, где весь test лежит после train, — «период»."""
+def as_dates(series: pd.Series) -> pd.Series | None:
+    """Строки-даты → datetime, если разбирается почти всё (≥ DATE_SHARE непустых); иначе None."""
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return None
+    values = series.dropna()
+    if values.empty:
+        return None
+    with warnings.catch_warnings():  # pandas предупреждает, что формат угадывается по строкам
+        warnings.simplefilter("ignore")
+        parsed = pd.to_datetime(values.astype(str), errors="coerce", format="mixed")
+        if parsed.notna().mean() < DATE_SHARE:
+            return None
+        return pd.to_datetime(series.astype(str), errors="coerce", format="mixed")
+
+
+def time_column(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> tuple[str, pd.Series] | None:
+    """Колонка, по которой весь test лежит после train, и её значения в train для упорядочивания.
+
+    Как в стенде research (research/bench_playbook.py): целочисленный код периода (2–50 значений, «год 1–6»)
+    или дата строкой. Номер записи и прочие «растущие» числа периодом не считаем.
+    """
     for col in features:
-        if not (pd.api.types.is_integer_dtype(train[col]) and pd.api.types.is_integer_dtype(test[col])):
+        if pd.api.types.is_integer_dtype(train[col]) and pd.api.types.is_integer_dtype(test[col]):
+            if 1 < train[col].nunique() <= 50 and test[col].min() > train[col].max():
+                return col, train[col]
             continue
-        if 1 < train[col].nunique() <= 50 and test[col].min() > train[col].max():
-            return col
+        tr_dates, te_dates = as_dates(train[col]), as_dates(test[col])
+        if tr_dates is not None and te_dates is not None and te_dates.min() > tr_dates.max():
+            return col, tr_dates
     return None
 
 
 def holdout_mask(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame, frac: float) -> tuple[np.ndarray, str]:
     """Какие строки train уйдут в «скрытый тест» и как выбраны (для отчёта)."""
     features = [c for c in train.columns if c not in (spec.target, spec.id_column) and c in test.columns]
-    col = time_column(train, test, features)
-    if col:
-        counts = train[col].value_counts().sort_index(ascending=False)
+    found = time_column(train, test, features)
+    if found:
+        col, values = found
+        counts = values.value_counts().sort_index(ascending=False)  # последние периоды / даты — первыми
         last = counts.index[(counts.cumsum() >= frac * len(train)).argmax()]
-        mask = (train[col] >= last).to_numpy()
+        mask = (values >= last).to_numpy()
         if 0 < mask.mean() < 0.6:
-            return mask, f"time:{col}>={last}"
+            label = last.date() if isinstance(last, pd.Timestamp) else last
+            return mask, f"time:{col}>={label}"
 
     groups = pd.util.hash_pandas_object(train[features], index=False).to_numpy()
     rows = np.arange(len(train))
@@ -259,7 +285,7 @@ def append_rows(rows: list[dict], path: Path = LEADERBOARD) -> None:
 
 def render(rows: list[dict]) -> str:
     lines = [
-        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | LightGBM | Балл к LightGBM | Статус | Время, с "
+        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному | Статус | Время, с "
         "| Пик RAM, МБ |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
@@ -276,9 +302,22 @@ def render(rows: list[dict]) -> str:
     model_scores = [r.get("model_score", float("nan")) for r in rows]
     if not np.all(np.isnan(model_scores)):
         lines.append(
-            f"Средний балл к LightGBM: **{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
+            f"Средний балл к сильному бейзлайну (лучший из LightGBM и тривиального): "
+            f"**{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
         )
     return "\n".join(lines)
+
+
+def load_env_file(path: Path = ROOT / ".env") -> bool:
+    """Подхватить .env из корня репозитория (ключ Qwen и настройки), не перезаписывая заданные переменные.
+
+    Только для локального запуска: на платформе .env нет, ключ задаёт сама платформа.
+    """
+    if not path.exists():
+        return False
+    from dotenv import load_dotenv
+
+    return load_dotenv(path, override=False)
 
 
 def find_tasks() -> list[Path]:
@@ -307,13 +346,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("укажи --all или --task")
     commit, date = commit_id(args.agent_root.resolve()), time.strftime("%Y-%m-%d %H:%M")
     rows = []
-    with tempfile.TemporaryDirectory(prefix="harness_") as tmp:
+    # Дочерние процессы агента могут дописывать файлы в момент удаления папки («Directory not empty») —
+    # ошибка уборки не должна терять результаты: строки пишем внутри with, уборку не роняем
+    with tempfile.TemporaryDirectory(prefix="harness_", ignore_cleanup_errors=True) as tmp:
         for task_md in tasks:
             print(f"… {task_md.parent.name}: бюджет {args.minutes} мин", flush=True)
             row = run_task(task_md, Path(tmp), args.minutes, args.frac, args.rows, args.llm, args.agent_root.resolve())
             rows.append({"date": date, "commit": commit, **row})
             print(f"  {row['status']}: балл {row['score']:.1f}", flush=True)
-    append_rows(rows, args.out)
+        append_rows(rows, args.out)
     print("\n" + render(rows))
     print(f"\nСтроки дописаны в {args.out}")
     return 0 if all(r["status"] == "OK" for r in rows) else 1
@@ -322,4 +363,5 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → кириллица роняет вывод
         _stream.reconfigure(encoding="utf-8", errors="replace")
+    load_env_file()  # только CLI: тесты зовут main() без .env
     sys.exit(main())
