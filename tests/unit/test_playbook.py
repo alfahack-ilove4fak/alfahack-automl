@@ -129,3 +129,10 @@ def test_playbook_hypotheses_run(task_type, monkeypatch):
         assert result.status == ExperimentStatus.OK, f"{item['id']}: {result.error}"
         if item["params"].get("proba_weights") and spec.metric.name == "f1_macro":
             assert hyp.params.get("_proba_weights"), f"{item['id']}: множители классов не подобраны"
+
+
+def test_xgboost_proba_weights_after_lightgbm_one():
+    """Стенд v2: против бейзлайна xgboost_balanced_proba_weights на payments принимается зря (CV 0.21 против 0.10,
+    честно F1 0.13 против 0.18), против balanced_proba_weights (CV 0.27) — нет. Порядок защищает от ложного принятия."""
+    ids = [item["id"] for item in PLAYBOOK]
+    assert ids.index("balanced_proba_weights") < ids.index("xgboost_balanced_proba_weights")
