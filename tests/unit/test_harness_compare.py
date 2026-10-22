@@ -62,6 +62,13 @@ def test_llm_tokens_line_and_setup_say_llm_was_used():
     assert "с LLM" in text and "без LLM" not in text
 
 
+def test_base_without_llm_columns_shows_dash():
+    # ревью #217: старая база без llm_* — «0 → 6000» было бы неправдой
+    head = _board([_row("a", 10, 50) | {"llm_calls": 2, "llm_tokens": 6000, "llm_rub": 1.0}], "h")
+    text = render(_board([_row("a", 10, 50)], "b"), head)
+    assert "Токены LLM: — → 6000" in text
+
+
 def test_old_board_without_llm_columns_has_no_tokens_line():
     text = render(_board([_row("a", 10, 50)], "b"), _board([_row("a", 12, 48)], "h"))
     assert "Токены LLM" not in text and "без LLM" in text
