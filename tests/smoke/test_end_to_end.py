@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -80,4 +81,5 @@ def test_solution_end_to_end(builder, tmp_path):
     spec = parse_task(task_md)
     report = validate_submission(spec.submission_path, spec, pd.read_csv(spec.test_path))
     assert report.ok, report.problems
-    assert "Сохранён ответ «baseline»" in proc.stderr, proc.stderr[-3000:]
+    # на медленной машине ответ даёт облегчённая ступень лестницы бейзлайна (#176) — это тоже ответ модели
+    assert re.search(r"Сохранён ответ «baseline(_light)?»", proc.stderr), proc.stderr[-3000:]

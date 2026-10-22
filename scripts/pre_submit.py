@@ -14,7 +14,8 @@
   3. запуск: каталог задачи во временной папке (чистая среда, без кэшей прошлых запусков), туда — только
      корневые .py и requirements.txt из архива, `python solution.py task.md` из этого каталога, вне репозитория
      и без PYTHONPATH; агент обязан уложиться в бюджет, сохранить ответ бейзлайна (строка
-     «Сохранён ответ «baseline»» в логе) и оставить валидный submission.csv рядом с task.md.
+     «Сохранён ответ «baseline»» или «…«baseline_light»» в логе) и оставить валидный submission.csv рядом с task.md.
+     Какая ступень бейзлайна сработала (#176), видно в отчёте: облегчённая или «без CV» — ⚠️, ресурсов не хватило.
 По умолчанию LLM выключена (LLM_MOCK=1); --llm берёт OPENAI_* из окружения и тратит общий бюджет ₽.
 Отчёт — в консоль и в runs/pre_submit/report-ГГГГММДД-ЧЧММ.md.
 """
@@ -66,7 +67,8 @@ FORBIDDEN_CALLS = {"os.rename": rb"\bos\.rename\s*\(", "shutil.move": rb"\bshuti
 # Признаки чужой библиотеки внутри архива: ставить пакеты на платформе нельзя, только requirements.txt
 FOREIGN_SUFFIXES = (".whl", ".so", ".pyd", ".dll", ".egg", ".tar.gz")
 FOREIGN_PARTS = ("site-packages/", ".dist-info/", ".egg-info/")
-BASELINE_SAVED = "Сохранён ответ «baseline»"
+# Ответ бейзлайна сохранён: полная CV — «baseline», облегчённая ступень лестницы (solution.LIGHT_ID) — «baseline_light»
+BASELINE_SAVED = re.compile(r"Сохранён ответ «(baseline(?:_light)?)» \(([^)]*)\)")
 GRACE_SEC = 60  # сколько ждём сверх бюджета, прежде чем считать, что агент «завис»
 
 
@@ -76,6 +78,7 @@ class TaskRun:
     ok: bool = False
     seconds: float = 0.0
     peak_ram_mb: float = 0.0
+    baseline: str = ""  # какая ступень бейзлайна сохранила ответ и с какой CV — для отчёта репетиции
     problems: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     stderr_tail: str = ""
@@ -271,8 +274,18 @@ def run_task(task_md: Path, zip_path: Path, workdir: Path, minutes: float, rows:
             result.problems += report.problems
         except Exception as exc:  # noqa: BLE001 — не смогли проверить = не сабмитим
             result.problems.append(f"не удалось проверить ответ: {exc}")
-    if BASELINE_SAVED not in stderr:
-        result.problems.append(f"в логе нет «{BASELINE_SAVED}» — бейзлайн не сохранён, сдан только тривиальный ответ")
+    saved = BASELINE_SAVED.search(stderr)
+    if saved is None:
+        result.problems.append(
+            "в логе нет «Сохранён ответ «baseline»» — бейзлайн не сохранён, сдан только тривиальный ответ"
+        )
+    else:
+        rung, score = saved.groups()
+        result.baseline = f"{rung} ({score})"
+        if rung != "baseline":
+            result.warnings.append("полная CV бейзлайна не успела — сохранён облегчённый, цикл гипотез пропущен")
+        elif score == "без CV":
+            result.warnings.append("CV бейзлайна не посчиталась ни на одной ступени — ответ модели без CV")
     result.ok = not result.problems
     return result
 
@@ -296,13 +309,15 @@ def render_report(zip_path: Path, archive_problems: list[str], notes: list[str],
         *([f"- {OK} структура, размер, requirements.txt, импорты"] if not archive_problems else []),
         "",
         "## Запуск как на платформе",
-        "| Задача | Итог | Время, с | Пик RAM, МБ | Что не так |",
-        "|---|---|---|---|---|",
+        "| Задача | Итог | Время, с | Пик RAM, МБ | Бейзлайн | Что не так |",
+        "|---|---|---|---|---|---|",
     ]
     for r in runs:
         issues = "; ".join([*r.problems, *[f"{WARN} {w}" for w in r.warnings]]) or "—"
         status = OK if r.ok else FAIL
-        lines.append(f"| {r.name} | {status} | {r.seconds:.0f} | {r.peak_ram_mb:.0f} | {issues} |")
+        lines.append(
+            f"| {r.name} | {status} | {r.seconds:.0f} | {r.peak_ram_mb:.0f} | {r.baseline or '—'} | {issues} |"
+        )
     for r in runs:
         if not r.ok:
             lines += ["", f"### Конец лога {r.name}", "```", r.stderr_tail.strip(), "```"]
