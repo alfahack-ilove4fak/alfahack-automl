@@ -1,6 +1,7 @@
 """Работа с Qwen локально: проверка связи, остаток бюджета, прогон агента с LLM, сравнение «без LLM / с Qwen».
 
-    uv run python scripts/qwen.py check                     # всё ли в порядке со связью (тратит копейки)
+    uv run python scripts/qwen.py check                     # связь + длинный ответ, как у гипотез (≈ 30 с, ≈ 1 ₽)
+    uv run python scripts/qwen.py check --quick             # только короткий запрос (копейки)
     uv run python scripts/qwen.py budget                    # сколько ₽ осталось на сегодня (бесплатно)
     uv run python scripts/qwen.py run tasks/public/regression/task.md --minutes 10
     uv run python scripts/qwen.py compare --minutes 5 --tasks tasks/public/regression/task.md
@@ -37,6 +38,15 @@ REQUIRED = ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL")
 MSK = timezone(timedelta(hours=3), "МСК")
 HTTP_TIMEOUT = 15.0
 CHECK_MAX_TOKENS = 600  # Qwen рассуждает: при max_tokens < ~300 content бывает пустым
+CHECK_PROMPT = "Ответь одним словом: готов"
+# Длинная проверка: запрос гипотез идёт ≈ 35 с, а некоторые сети рвут HTTPS-ответы дольше ≈ 10 с (#193)
+LONG_PROMPT = (
+    "Предложи 5 гипотез улучшения LightGBM для табличной задачи классификации. "
+    "На каждую — абзац из 3–4 предложений с обоснованием."
+)
+LONG_MAX_TOKENS = 2500
+LONG_MIN_SECONDS = 15.0  # ответ быстрее — обрыв на ~10 с этим запросом не проверить
+LONG_TIMEOUT = 90.0
 DEFAULT_MIN_RUB = 30.0
 NO_KEY_HINT = "впиши OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL в .env (ключ даёт капитан лично, не через чат)"
 
@@ -244,27 +254,29 @@ class ChatResult:
     cost: float | None = None
 
 
-def check_chat(key: str) -> ChatResult:
+def check_chat(key: str, prompt: str = CHECK_PROMPT, max_tokens: int = CHECK_MAX_TOKENS) -> ChatResult:
     """Один запрос через LLMClient — тот же клиент (очистка env, base_url, таймауты), что у агента."""
     saved = {name: os.environ.get(name) for name in ("LLM_MOCK", "LLM_CACHE_DIR")}
     os.environ.update(LLM_MOCK="0", LLM_CACHE_DIR="")  # проверяем связь, а не playbook и не кэш
+    started = time.time()
     try:
         from agent.llm_client import LLMClient
 
-        client = LLMClient(timeout=60)
+        client = LLMClient(timeout=LONG_TIMEOUT)
         if client._client is None:  # noqa: SLF001
             return ChatResult(False, "клиент не создан — нет ключа или модели")
         started = time.time()
-        # сырой ответ нужен ради usage (cost, reasoning_tokens) — chat() отдаёт только текст
-        response = client._client.chat.completions.create(  # noqa: SLF001
+        # сырой ответ нужен ради usage (cost, reasoning_tokens) — chat() отдаёт только текст;
+        # без повторов: обрыв должен быть виден сразу, а не через 3 попытки
+        response = client._client.with_options(max_retries=0).chat.completions.create(  # noqa: SLF001
             model=client.model,
-            messages=[{"role": "user", "content": "Ответь одним словом: готов"}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=CHECK_MAX_TOKENS,
+            max_tokens=max_tokens,
         )
         seconds = time.time() - started
     except Exception as exc:  # noqa: BLE001
-        return ChatResult(False, error_chain(exc, key))
+        return ChatResult(False, error_chain(exc, key), time.time() - started)
     finally:
         for name, value in saved.items():  # run/compare дальше решают про кэш сами
             if value is None:
@@ -285,8 +297,21 @@ def check_chat(key: str) -> ChatResult:
     if cost is not None:
         parts.append(f"цена {float(cost):.4f} ₽")
     if not text and choice.finish_reason == "length":
-        parts.append(f"упёрлись в max_tokens={CHECK_MAX_TOKENS}: рассуждения съели лимит")
+        parts.append(f"упёрлись в max_tokens={max_tokens}: рассуждения съели лимит")
     return ChatResult(bool(text), ", ".join(parts), seconds, float(cost) if cost is not None else None)
+
+
+def check_long(key: str) -> tuple[Line, float]:
+    """Длинный ответ (≈ 20–40 с), как запрос гипотез. Ловит сеть, которая рвёт ответы дольше N секунд:
+    короткий запрос при этом проходит, а агент не получает ни одной гипотезы (#193)."""
+    result = check_chat(key, LONG_PROMPT, LONG_MAX_TOKENS)
+    if result.ok and result.seconds >= LONG_MIN_SECONDS:
+        return Line(OK, "длинный ответ", result.detail), result.seconds
+    if result.ok:
+        return Line(
+            WARN, "длинный ответ", f"{result.detail} — пришёл быстрее {LONG_MIN_SECONDS:g} с, обрыв не проверен"
+        ), result.seconds
+    return Line(FAIL, "длинный ответ", f"обрыв через {result.seconds:.1f} с: {result.detail}"), result.seconds
 
 
 def cmd_check(args: argparse.Namespace, from_shell: set[str]) -> int:
@@ -311,13 +336,26 @@ def cmd_check(args: argparse.Namespace, from_shell: set[str]) -> int:
     models = check_models(base_url, key)
     chat = check_chat(key)
     show([models, Line(OK if chat.ok else FAIL, "chat/completions через LLMClient", chat.detail)])
+    long, long_seconds = None, 0.0
+    if chat.ok and not args.quick:
+        long, long_seconds = check_long(key)
+        show([long])
     try:
         show([budget_line(fetch_budget(base_url, key), args.min_rub)])
     except Exception as exc:  # noqa: BLE001
         show([Line(WARN, "бюджет", error_chain(exc, key))])
 
+    if chat.ok and long is not None and long.status == FAIL:
+        print(
+            f"\n{FAIL} Короткие ответы доходят, длинные — нет: сеть (точка доступа, провайдер, VPN) рвёт ответы "
+            f"дольше ≈ {long_seconds:.0f} с. Запрос гипотез идёт ≈ 35 с — агент не получит ни одной и уйдёт "
+            "на playbook. Живые прогоны с Qwen запускай с другой сети или в Actions (#193)."
+        )
+        return 1
     if chat.ok:
         print(f"\n{OK} Qwen отвечает — агент будет брать гипотезы у LLM.")
+        if long is None:
+            print(f"{WARN} Длинный ответ не проверялся (--quick): обрыв долгих ответов так не увидеть.")
         return 0
     if models.status == FAIL and models.detail.startswith("401"):
         hint = "ключ не принят: сверь OPENAI_API_KEY с выданным капитаном"
@@ -359,6 +397,7 @@ LOG_ITERATION = re.compile(r"Итерация \d+: (\S+) — .*?(?:\[(llm|playbo
 LOG_ACCEPTED = "✓ лучше:"
 LOG_TRUNCATED = "LLM упёрлась в лимит"
 LOG_OFF = "LLM выключена"
+DISCONNECT = "Server disconnected without sending a response"
 
 
 @dataclass
@@ -366,7 +405,7 @@ class LogSummary:
     llm_off: bool = False
     batches: int = 0
     proposed: int = 0
-    calls: int = 0  # успешных запросов (llm.calls — считает и рефлексию, и критика)
+    calls: int = 0  # успешных запросов (llm.calls: рефлексия и критик тоже); упавшие — в errors
     errors: list[str] = field(default_factory=list)
     truncated: int = 0
     accepted: list[str] = field(default_factory=list)
@@ -415,13 +454,19 @@ def render_summary(summary: LogSummary, spent_rub: float | None) -> str:
     if summary.llm_off:
         lines.append(f"  {FAIL} агент считал LLM выключенной (нет ключа/модели или LLM_MOCK=1)")
     lines += [
-        f"  запросов к LLM (успешных): {summary.calls}, пачек гипотез: {summary.batches}",
+        f"  запросов к LLM: {summary.calls + len(summary.errors)} (успешных {summary.calls}, "
+        f"с ошибкой {len(summary.errors)}), пачек гипотез: {summary.batches}",
         f"  гипотез от LLM предложено: {summary.proposed}, принято: {len(summary.accepted_llm)}"
         + (f" ({', '.join(summary.accepted_llm)})" if summary.accepted_llm else ""),
         f"  всего принятых гипотез: {len(summary.accepted)}"
         + (f" ({', '.join(summary.accepted)})" if summary.accepted else ""),
         f"  ошибок LLM: {len(summary.errors)}" + (f", последняя: {summary.errors[-1][:300]}" if summary.errors else ""),
     ]
+    if any(DISCONNECT in error for error in summary.errors):
+        lines.append(
+            f"  {WARN} сервер обрывал ответ («{DISCONNECT}»): похоже, сеть рвёт долгие ответы — "
+            "проверь `qwen.py check` (длинный ответ) или запускай с другой сети (#193)"
+        )
     if summary.truncated:
         lines.append(f"  {WARN} ответ упёрся в лимит токенов {summary.truncated} раз — увеличь LLM_REASONING_TOKENS")
     if spent_rub is not None:
@@ -582,7 +627,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"порог остатка бюджета, ₽ (по умолчанию {DEFAULT_MIN_RUB:g})",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("check", parents=[common], help="переменные, сеть, /v1/models, один запрос chat, бюджет")
+    check = sub.add_parser("check", parents=[common], help="переменные, сеть, /v1/models, запросы chat, бюджет")
+    check.add_argument(
+        "--quick", action="store_true", help="без длинного ответа (≈ 30 с и ≈ 1 ₽): только короткий запрос"
+    )
     sub.add_parser("budget", parents=[common], help="потрачено/лимит/остаток ₽ и время сброса (код 2 — мало)")
     run = sub.add_parser("run", parents=[common], help="агент на задаче с Qwen + сводка по LLM и ₽")
     run.add_argument("task", type=Path, help="путь к task.md")

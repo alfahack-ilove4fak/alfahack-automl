@@ -278,3 +278,62 @@ def test_parse_agent_log_uses_source_tag():
     summary = parse_agent_log(log, known_ids={"lgbm_shallow"})
     assert summary.accepted == ["lgbm_shallow", "my_new_idea"]
     assert summary.accepted_llm == ["lgbm_shallow"]
+
+
+def _check_env(monkeypatch, chats):
+    """check без сети: переменные, DNS/TCP, /v1/models и бюджет — заглушки; ответы chat — по очереди из chats."""
+    monkeypatch.setattr(qwen, "check_network", lambda *a: [qwen.Line(qwen.OK, "TCP")])
+    monkeypatch.setattr(qwen, "check_models", lambda *a: qwen.Line(qwen.OK, "GET /v1/models", "200"))
+    monkeypatch.setattr(qwen, "http_get", lambda *a, **kw: (200, qwen.json.dumps(KEY_INFO).encode()))
+    calls = []
+
+    def fake_chat(key, prompt=qwen.CHECK_PROMPT, max_tokens=qwen.CHECK_MAX_TOKENS):
+        calls.append(prompt)
+        return chats[len(calls) - 1]
+
+    monkeypatch.setattr(qwen, "check_chat", fake_chat)
+    return calls
+
+
+def test_check_catches_network_cutting_long_answers(llm_env, monkeypatch, capsys):
+    # #193: короткий ответ за 3 с доходит, длинный рвётся на 11 с — раньше check был зелёным
+    cut = "APIConnectionError: Connection error. ← RemoteProtocolError: Server disconnected without sending a response."
+    calls = _check_env(
+        monkeypatch, [qwen.ChatResult(True, "3.1 с, ответ «Готов»", 3.1), qwen.ChatResult(False, cut, 11.1)]
+    )
+    assert qwen.main(["check"]) == 1
+    assert calls == [qwen.CHECK_PROMPT, qwen.LONG_PROMPT]
+    out = capsys.readouterr().out
+    assert "обрыв через 11.1 с" in out and "дольше ≈ 11 с" in out and "#193" in out
+
+
+def test_check_long_answer_ok(llm_env, monkeypatch, capsys):
+    _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0), qwen.ChatResult(True, "34 с, ответ «1. …»", 34.0)])
+    assert qwen.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "длинный ответ" in out and "Qwen отвечает" in out
+
+
+def test_check_long_answer_too_fast_is_only_a_warning(llm_env, monkeypatch, capsys):
+    _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0), qwen.ChatResult(True, "6 с", 6.0)])
+    assert qwen.main(["check"]) == 0
+    assert "не проверен" in capsys.readouterr().out
+
+
+def test_check_quick_skips_long_answer(llm_env, monkeypatch, capsys):
+    calls = _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0)])
+    assert qwen.main(["check", "--quick"]) == 0
+    assert calls == [qwen.CHECK_PROMPT]
+    assert "--quick" in capsys.readouterr().out
+
+
+def test_summary_counts_failed_requests_and_hints_disconnect():
+    # реальный хвост лога regression 22.10: 5 коротких запросов прошли, 6 запросов гипотез оборвались
+    cut = (
+        "[  29.4s] WARNING agent.llm: LLM ошибка (1 подряд): APIConnectionError: Connection error. "
+        "← RemoteProtocolError: Server disconnected without sending a response.\n"
+    )
+    log = cut * 6 + "[ 393.7s] INFO  agent.llm_hypotheses: LLM предложила 0 гипотез (потрачено 0.00 ₽ за 5 запросов)\n"
+    text = qwen.render_summary(qwen.parse_agent_log(log, known_ids=set()), spent_rub=None)
+    assert "запросов к LLM: 11 (успешных 5, с ошибкой 6)" in text
+    assert "рвёт долгие ответы" in text
