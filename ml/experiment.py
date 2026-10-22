@@ -29,6 +29,9 @@
                    выбирается один раз до цикла (choose_validation) и одинакова у всех гипотез (ADR 0008, D1)
   proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
                    (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
+  ensemble       — список моделей, прогноз — среднее их прогнозов (вероятностей у классификации): ["lightgbm", "xgboost"]
+                   или [{model: xgboost, model_params: {...}}, ...]; у каждой своя ранняя остановка и число деревьев.
+                   Остальные params (log_target, class_weight, feature_ops, proba_weights…) — общие для всех моделей
 
 """
 
@@ -334,11 +337,111 @@ def _fit_model(
     eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
     n_estimators: int | None = None,
 ) -> tuple[object, int]:
-    """Выбрать модель по params.model и обучить её."""
+    """Выбрать модель по params.model (или ансамбль по params.ensemble) и обучить её."""
+    if hypothesis.params.get("ensemble"):
+        return _fit_ensemble(spec, hypothesis, x, y, eval_set, n_estimators)
     name = str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower()
     if name not in MODEL_FITTERS:
         raise ValueError(f"неизвестная модель {name!r}, доступны: {sorted(MODEL_FITTERS)}")
     return MODEL_FITTERS[name](spec, hypothesis, x, y, eval_set, n_estimators)
+
+
+def _ensemble_members(hypothesis: Hypothesis) -> list[Hypothesis]:
+    """params.ensemble → гипотезы-участники: общие params гипотезы + своя модель и её model_params."""
+    members = hypothesis.params["ensemble"]
+    if not isinstance(members, list) or len(members) < 2:
+        raise ValueError("ensemble — список хотя бы из 2 моделей")
+    common = {k: v for k, v in hypothesis.params.items() if k not in ("ensemble", "model", "model_params")}
+    out = []
+    for item in members:
+        spec_item = {"model": item} if isinstance(item, str) else dict(item)
+        if "ensemble" in spec_item:
+            raise ValueError("вложенный ансамбль не поддерживается")
+        model = str(spec_item.get("model") or DEFAULT_MODEL).strip().lower()
+        if model not in MODEL_FITTERS:
+            raise ValueError(f"неизвестная модель {model!r} в ensemble, доступны: {sorted(MODEL_FITTERS)}")
+        params = {**common, "model": model, "model_params": dict(spec_item.get("model_params") or {})}
+        out.append(hypothesis.model_copy(update={"params": params}))
+    return out
+
+
+def _fill_missing_categories(x: pd.DataFrame) -> pd.DataFrame:
+    """Пропуск в категории → отдельная категория: CatBoost не принимает NaN в cat_features (пропуск даёт _hide_unseen)."""
+    cols = [c for c in x.columns if isinstance(x[c].dtype, pd.CategoricalDtype) and x[c].isna().any()]
+    if not cols:
+        return x
+    x = x.copy()
+    for col in cols:
+        if MISSING_CATEGORY not in x[col].cat.categories:
+            x[col] = x[col].cat.add_categories(MISSING_CATEGORY)
+        x[col] = x[col].fillna(MISSING_CATEGORY)
+    return x
+
+
+MISSING_CATEGORY = "__missing__"
+
+
+class _Ensemble:
+    """Среднее прогнозов моделей. У классификации — среднее вероятностей (все учились на одних закодированных y)."""
+
+    def __init__(self, models: list, fill_categories: list[bool]):
+        self.models = models
+        self.fill_categories = fill_categories
+        self.classes_ = getattr(models[0], "classes_", None)
+
+    def _inputs(self, x: pd.DataFrame):
+        filled = None
+        for model, fill in zip(self.models, self.fill_categories, strict=True):
+            if fill and filled is None:
+                filled = _fill_missing_categories(x)
+            yield model, filled if fill else x
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        return np.mean([np.asarray(m.predict(xi), dtype=float).reshape(len(x)) for m, xi in self._inputs(x)], axis=0)
+
+    def predict_proba(self, x: pd.DataFrame) -> np.ndarray:
+        return np.mean([m.predict_proba(xi) for m, xi in self._inputs(x)], axis=0)
+
+
+def _fit_ensemble(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: list[int] | int | None = None,
+) -> tuple[_Ensemble, list[int]]:
+    """Обучить участников ансамбля. Число деревьев — своё у каждого: список из CV (n_estimators) или ранняя остановка."""
+    members = _ensemble_members(hypothesis)
+    if n_estimators is not None and not isinstance(n_estimators, list):
+        n_estimators = [n_estimators] * len(members)
+    models, iters, fills = [], [], []
+    for i, member in enumerate(members):
+        fill = member.params["model"] == "catboost"
+        x_m = _fill_missing_categories(x) if fill else x
+        eval_m = eval_set
+        if fill and eval_set is not None:
+            eval_m = (_fill_missing_categories(eval_set[0]), eval_set[1])
+        n_m = None if n_estimators is None else n_estimators[i]
+        model, best_iter = MODEL_FITTERS[member.params["model"]](spec, member, x_m, y, eval_m, n_m)
+        models.append(model)
+        iters.append(int(best_iter))
+        fills.append(fill)
+    return _Ensemble(models, fills), iters
+
+
+def _mean_best_iteration(best_iters: list) -> int | list[int]:
+    """Среднее число деревьев по фолдам; у ансамбля — по каждому участнику отдельно."""
+    if best_iters and isinstance(best_iters[0], list):
+        return [int(v) for v in np.mean(best_iters, axis=0)]
+    return int(np.mean(best_iters))
+
+
+def _final_estimators(best: int | list[int] | None) -> int | list[int]:
+    """Деревьев на всём train: чуть больше, чем на 4/5 из CV (у ансамбля — для каждого участника)."""
+    if isinstance(best, list):
+        return [max(50, int(b * 1.1)) for b in best]
+    return max(50, int((500 if best is None else best) * 1.1))
 
 
 def _hide_unseen(hypothesis: Hypothesis, x_fit: pd.DataFrame, x_new: pd.DataFrame) -> pd.DataFrame:
@@ -511,6 +614,8 @@ def run_experiment(
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scheme, column = parse_validation(params.get("validation"), spec)
         features = profile.numeric_features + profile.categorical_features
+        if params.get("optuna") and params.get("ensemble"):
+            raise ValueError("optuna и ensemble вместе не поддерживаются: подбор идёт для одной модели")
         if params.get("optuna") and "_optuna_best" not in params:
             from ml.tuning import tune  # здесь: tuning сам импортирует этот модуль
 
@@ -558,7 +663,7 @@ def run_experiment(
                         error=f"не успеет: прогноз ещё {forecast:.0f} с, осталось {budget.seconds_left():.0f} с",
                         validation=validation,
                     )
-        hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
+        hypothesis.params.setdefault("_best_iteration", _mean_best_iteration(best_iters))
         if _use_proba_weights(spec, params):
             gib = spec.metric.greater_is_better
             plain = float(np.mean(scores))
@@ -666,8 +771,7 @@ def fit_predict_final(
     ops = params.get("feature_ops")
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
-    # На всех данных деревьев нужно чуть больше, чем на 4/5 из CV
-    n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
+    n_estimators = _final_estimators(params.get("_best_iteration"))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
     pred = _predict(spec, model, x_test, log_target)
     if _use_proba_weights(spec, params) and params.get("_proba_weights"):

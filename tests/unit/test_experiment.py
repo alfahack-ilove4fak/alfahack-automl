@@ -709,3 +709,57 @@ def test_rmsle_default_log_target_gives_non_negative_answer():
     assert result.status == ExperimentStatus.OK, result.error
     answer = fit_predict_final(spec, profile, hyp, train, test)
     assert (answer["y"] >= 0).all()
+
+
+def test_ensemble_averages_members_and_keeps_their_tree_counts():
+    """params.ensemble: прогноз — среднее участников, число деревьев из CV — своё у каждого."""
+    from ml.experiment import _fit_ensemble
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(ensemble=["lightgbm", {"model": "linear"}])
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+    iters = hyp.params["_best_iteration"]
+    assert isinstance(iters, list) and len(iters) == 2 and iters[1] == 0  # у линейной модели деревьев нет
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert answer["y"].notna().all()
+
+    from ml.profiling import make_matrix
+
+    x, x_test = make_matrix(profile, train, test)
+    model, _ = _fit_ensemble(spec, hyp, x, train["y"].to_numpy(), n_estimators=[30, 0])
+    members = [m.predict(x_test) for m in model.models]
+    np.testing.assert_allclose(model.predict(x_test), np.mean(members, axis=0))
+
+
+def test_ensemble_classification_with_catboost_and_unseen_category():
+    """CatBoost в ансамбле получает новую категорию как отдельное значение, а не NaN (иначе CatBoost падает)."""
+    pytest.importorskip("catboost")
+    pytest.importorskip("xgboost")
+    spec = _spec(TaskType.BINARY, "roc_auc", greater=True, labels=["neg", "pos"])
+    train, test, profile = _data(TaskType.BINARY)
+    test = test.copy()
+    test.loc[test.index[:3], "c"] = "new"  # категории нет в train
+    hyp = _hyp(ensemble=["lightgbm", "xgboost", {"model": "catboost", "model_params": {"iterations": 30}}])
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert len(answer) == len(test)
+
+
+@pytest.mark.parametrize(
+    "params, message",
+    [
+        ({"ensemble": ["lightgbm"]}, "хотя бы из 2"),
+        ({"ensemble": ["lightgbm", "magic"]}, "magic"),
+        ({"ensemble": ["lightgbm", "linear"], "optuna": {"trials": 2}}, "optuna"),
+    ],
+)
+def test_bad_ensemble_is_failed_not_exception(params, message):
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    result = run_experiment(spec, profile, _hyp(**params), train, RunBudget())
+    assert result.status == ExperimentStatus.FAILED and message in result.error
