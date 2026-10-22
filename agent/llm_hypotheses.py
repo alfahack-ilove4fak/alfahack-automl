@@ -11,7 +11,7 @@ import re
 
 from pydantic import ValidationError
 
-from agent.hypotheses import params_key
+from agent.hypotheses import params_key, run_scheme
 from agent.llm_client import LLMClient
 from agent.memory import ResearchMemory
 from agent.prompting import allowed_param_keys, build_hypothesis_messages, build_reflection_messages
@@ -38,7 +38,8 @@ def parse_hypotheses(raw, history: list[tuple[Hypothesis, ExperimentResult]], k:
     """Ответ LLM (уже JSON) → не более k новых гипотез. Мусорные элементы пропускаются по одному."""
     allowed_params = allowed_param_keys()
     seen_ids = {h.id for h, _ in history}
-    seen_params = {params_key(h.params) for h, _ in history}
+    scheme = run_scheme(history)
+    seen_params = {params_key(h.params, scheme) for h, _ in history}
     out: list[Hypothesis] = []
     for item in _items(raw):
         if not isinstance(item, dict):
@@ -54,7 +55,7 @@ def parse_hypotheses(raw, history: list[tuple[Hypothesis, ExperimentResult]], k:
             continue
         if not isinstance(hyp.params.get("model_params", {}), dict):
             continue
-        key = params_key(hyp.params)
+        key = params_key(hyp.params, scheme)
         if key in seen_params:
             log.info("Гипотеза LLM %s отброшена — повтор уже проверенных params", hyp.id)
             continue

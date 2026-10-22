@@ -85,8 +85,26 @@ def test_validation_is_not_part_of_repeat_key():
     # solution.py кладёт схему в params бейзлайна: «LightGBM по умолчанию» из playbook/LLM без схемы — всё равно повтор
     from agent.hypotheses import params_key
 
-    assert params_key({"model": "lightgbm", "validation": "time:Year"}) == params_key({"model": "lightgbm"})
-    assert params_key({"model": "lightgbm", "class_weight": "balanced"}) != params_key({"model": "lightgbm"})
+    lgbm = {"model": "lightgbm"}
+    assert params_key({**lgbm, "validation": "time:Year"}, "time:Year") == params_key(lgbm, "time:Year")
+    assert params_key({**lgbm, "validation": "group:dup"}, "time:Year") != params_key(lgbm, "time:Year")
+    assert params_key({**lgbm, "validation": "time:Year"}) != params_key(lgbm)  # без схемы прогона — ревью #164
+    assert params_key({**lgbm, "class_weight": "balanced"}, "time:Year") != params_key(lgbm, "time:Year")
+
+
+def test_default_lgbm_is_repeat_of_baseline_in_run_scheme():
+    # бейзлайн записан со схемой прогона; LLM предлагает LightGBM по умолчанию без схемы — это повтор
+    from agent.hypotheses import baseline_hypothesis
+    from agent.llm_hypotheses import parse_hypotheses
+
+    base = baseline_hypothesis()
+    base = base.model_copy(update={"params": {**base.params, "validation": "time:Year"}})
+    history = [(base, result("baseline", 42.0, "time:Year-5"))]
+    item = {"id": "lgbm_again", "kind": "model", "title": "LightGBM", "rationale": "", "params": dict(base.params)}
+    del item["params"]["validation"]
+    assert parse_hypotheses([item], history, k=3) == []
+    other = {**item, "id": "lgbm_dup", "params": {**item["params"], "validation": "group:dup"}}
+    assert [h.id for h in parse_hypotheses([other], history, k=3)] == ["lgbm_dup"]  # другая схема — не повтор
 
 
 @pytest.mark.parametrize(
