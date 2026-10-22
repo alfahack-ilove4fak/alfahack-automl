@@ -6,12 +6,15 @@
     uv run python scripts/pre_submit.py --task tasks/practice/x/task.md --task tasks/public/regression/task.md
 
 Что проверяем (любой ❌ → код выхода 1, сабмитить нельзя):
-  1. архив: в корне только solution.py и requirements.txt, < 100 МБ, requirements.txt совпадает с репозиторием;
+  1. архив: в корне только solution.py и requirements.txt, < 100 МБ, requirements.txt совпадает с репозиторием
+     и с reference/requirements.txt (набор библиотек платформы);
   2. код внутри solution.py: импорты только из стандартной библиотеки, наших пакетов и requirements.txt,
-     нет запуска pip (на платформе он недоступен);
-  3. запуск: каталог задачи во временной папке, туда — только корневые .py и requirements.txt из архива,
-     `python solution.py task.md` из этого каталога, вне репозитория и без PYTHONPATH;
-     агент обязан уложиться в бюджет и оставить валидный submission.csv рядом с task.md.
+     нет запуска pip (на платформе он недоступен), нет os.rename/shutil.move (перенос файла между файловыми
+     системами давал 0 баллов, #148), нет чужих библиотек внутри (.whl, .so, site-packages — только наш код);
+  3. запуск: каталог задачи во временной папке (чистая среда, без кэшей прошлых запусков), туда — только
+     корневые .py и requirements.txt из архива, `python solution.py task.md` из этого каталога, вне репозитория
+     и без PYTHONPATH; агент обязан уложиться в бюджет, сохранить ответ бейзлайна (строка
+     «Сохранён ответ «baseline»» в логе) и оставить валидный submission.csv рядом с task.md.
 По умолчанию LLM выключена (LLM_MOCK=1); --llm берёт OPENAI_* из окружения и тратит общий бюджет ₽.
 Отчёт — в консоль и в runs/pre_submit/report-ГГГГММДД-ЧЧММ.md.
 """
@@ -57,6 +60,13 @@ IMPORT_TO_PACKAGE = {
     "langchain_openai": "langchain-openai",
 }
 REQUIRED_PAYLOAD = ["solution.py", "research/playbook.yaml"]
+PLATFORM_REQUIREMENTS = ROOT / "reference" / "requirements.txt"  # набор библиотек платформы от организаторов
+# Перенос файла: между файловыми системами (каталог задачи ↔ /tmp) у других команд давал 0 баллов (#148)
+FORBIDDEN_CALLS = {"os.rename": rb"\bos\.rename\s*\(", "shutil.move": rb"\bshutil\.move\s*\("}
+# Признаки чужой библиотеки внутри архива: ставить пакеты на платформе нельзя, только requirements.txt
+FOREIGN_SUFFIXES = (".whl", ".so", ".pyd", ".dll", ".egg", ".tar.gz")
+FOREIGN_PARTS = ("site-packages/", ".dist-info/", ".egg-info/")
+BASELINE_SAVED = "Сохранён ответ «baseline»"
 GRACE_SEC = 60  # сколько ждём сверх бюджета, прежде чем считать, что агент «завис»
 
 
@@ -72,6 +82,13 @@ class TaskRun:
 
 
 # --- 1–2. Архив и код внутри него
+
+
+def requirement_lines(requirements: str) -> list[str]:
+    """Строки «пакет==версия» без комментариев и пустых строк — для сравнения двух requirements.txt."""
+    return sorted(
+        line.split("#")[0].strip().lower() for line in requirements.splitlines() if line.split("#")[0].strip()
+    )
 
 
 def allowed_packages(requirements: str) -> set[str]:
@@ -133,6 +150,14 @@ def check_archive(zip_path: Path) -> tuple[list[str], list[str]]:
         problems.append(f"архив {size_mb:.1f} МБ — больше лимита {MAX_ZIP_MB} МБ")
     if requirements != (ROOT / "requirements.txt").read_text(encoding="utf-8"):
         problems.append("requirements.txt в архиве отличается от репозитория — платформа поставит не те версии")
+    if not PLATFORM_REQUIREMENTS.exists():
+        problems.append(f"нет {PLATFORM_REQUIREMENTS.relative_to(ROOT)} — не с чем сверить библиотеки платформы")
+    else:
+        ours = set(requirement_lines(requirements))
+        platform = set(requirement_lines(PLATFORM_REQUIREMENTS.read_text(encoding="utf-8")))
+        if ours != platform:
+            diff = sorted(ours - platform)[:3] + [f"нет {x}" for x in sorted(platform - ours)[:3]]
+            problems.append(f"requirements.txt отличается от reference/requirements.txt (платформы): {diff}")
 
     try:
         payload = read_payload(solution_code)
@@ -144,9 +169,18 @@ def check_archive(zip_path: Path) -> tuple[list[str], list[str]]:
     problems += [
         f"импорт вне requirements.txt — {item}" for item in bad_imports(payload, allowed_packages(requirements))
     ]
-    for name, data in payload.items():
-        if name.endswith(".py") and re.search(rb"pip\s+install|-m\s+pip", data):
+    for name, data in sorted(payload.items()):
+        if name.endswith(FOREIGN_SUFFIXES) or any(part in name for part in FOREIGN_PARTS):
+            problems.append(f"{name}: чужая библиотека внутри архива — на платформе только requirements.txt")
+        if not name.endswith(".py"):
+            continue
+        if re.search(rb"pip\s+install|-m\s+pip", data):
             problems.append(f"{name}: запуск pip — на платформе недоступен")
+        for call, pattern in FORBIDDEN_CALLS.items():
+            if re.search(pattern, data):
+                problems.append(
+                    f"{name}: {call} — перенос между файловыми системами давал 0 баллов, пиши файл на месте"
+                )
     return problems, notes
 
 
@@ -237,8 +271,8 @@ def run_task(task_md: Path, zip_path: Path, workdir: Path, minutes: float, rows:
             result.problems += report.problems
         except Exception as exc:  # noqa: BLE001 — не смогли проверить = не сабмитим
             result.problems.append(f"не удалось проверить ответ: {exc}")
-    if "Сохранён ответ «" not in stderr:
-        result.warnings.append("в логе нет «Сохранён ответ» — похоже, сдан только тривиальный ответ")
+    if BASELINE_SAVED not in stderr:
+        result.problems.append(f"в логе нет «{BASELINE_SAVED}» — бейзлайн не сохранён, сдан только тривиальный ответ")
     result.ok = not result.problems
     return result
 
