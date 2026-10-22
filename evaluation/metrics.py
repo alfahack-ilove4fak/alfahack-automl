@@ -9,6 +9,12 @@
 
 На входе метрик классификации — то, что даёт ml/experiment.py: метки закодированы числами 0..k-1,
 вероятности — матрица (n, k); «положительный» класс бинарной задачи — последний (код 1).
+
+Параметрические метрики: «pinball@0.9» — pinball (квантильная) потеря для квантиля 0.9. В реестре только
+«pinball» (квантиль 0.5), остальные уровни METRICS собирает по имени; find_metric_in_text берёт уровень из текста.
+
+Ранжирование (ndcg, map) — приближение: в метрику приходят только y и прогноз, без групп (query_id), поэтому
+считаем по всей таблице как по одному запросу. Честное «NDCG@10 внутри запроса» требует групп в контракте (#186).
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Literal
 
 import numpy as np
@@ -62,6 +69,39 @@ def _wape(y, p):
     return float(np.abs(y - p).sum() / total) if total else 0.0
 
 
+def _huber(y, p, delta=1.0):
+    """Huber loss: квадрат ошибки до delta, дальше линейно (устойчива к выбросам)."""
+    err = np.abs(np.asarray(y, dtype=float) - np.asarray(p, dtype=float))
+    return float(np.mean(np.where(err <= delta, 0.5 * err**2, delta * (err - 0.5 * delta))))
+
+
+def _pinball(y, p, alpha=0.5):
+    return float(skm.mean_pinball_loss(y, p, alpha=alpha))
+
+
+def _positive(p):
+    """Девиансы Пуассона/гаммы/Твиди требуют прогноз > 0 — отрицательный прогноз регрессии обрезаем."""
+    return np.clip(np.asarray(p, dtype=float), 1e-9, None)
+
+
+# --- ранжирование (приближение без групп, см. шапку)
+
+
+def _ndcg(y, p):
+    y = np.asarray(y, dtype=float)
+    relevance = y - min(y.min(), 0.0)  # NDCG требует неотрицательную релевантность
+    return float(skm.ndcg_score(relevance[None, :], np.asarray(p, dtype=float)[None, :]))
+
+
+def _map(y, p):
+    """Mean average precision: релевантно y > 0; если нулей нет — верхняя половина по y."""
+    y = np.asarray(y, dtype=float)
+    relevant = y > 0 if (y <= 0).any() else y > np.median(y)
+    if relevant.all() or not relevant.any():
+        return 0.0
+    return float(skm.average_precision_score(relevant.astype(int), np.asarray(p, dtype=float)))
+
+
 # --- классификация по меткам
 
 
@@ -106,8 +146,27 @@ def _logloss(y, proba):
     return float(skm.log_loss(y, proba))
 
 
-METRICS: dict[str, Metric] = {
-    m.name: m
+def _pinball_metric(alpha: float) -> Metric:
+    return Metric(f"pinball@{alpha:g}", partial(_pinball, alpha=alpha), False, "value")
+
+
+class _Registry(dict):
+    """Реестр метрик; имена вида «pinball@0.9» собираются по запросу и в реестр не записываются."""
+
+    def __missing__(self, name: str) -> Metric:
+        base, sep, param = name.partition("@")
+        if sep and base == "pinball":
+            try:
+                alpha = float(param)
+            except ValueError:
+                raise KeyError(name) from None
+            if 0 < alpha < 1:
+                return _pinball_metric(alpha)
+        raise KeyError(name)
+
+
+METRICS: dict[str, Metric] = _Registry(
+    (m.name, m)
     for m in [
         # --- регрессия
         Metric(
@@ -172,6 +231,56 @@ METRICS: dict[str, Metric] = {
             False,
             "value",
             ("medae", "median absolute error", "медианн* абсолютн* ошибк*"),
+        ),
+        Metric(
+            "huber",
+            _huber,
+            False,
+            "value",
+            ("huber loss", "huber", "функци* хьюбер*", "потер* хьюбер*"),
+        ),
+        Metric(
+            "pinball",
+            _pinball,
+            False,
+            "value",
+            ("pinball loss", "pinball", "quantile loss", "квантильн* потер*", "квантильн* функци* потерь"),
+        ),
+        Metric(
+            "poisson_deviance",
+            lambda y, p: float(skm.mean_poisson_deviance(y, _positive(p))),
+            False,
+            "value",
+            ("poisson deviance", "mean poisson deviance", "пуассоновск* девианс*", "девианс* пуассон*"),
+        ),
+        Metric(
+            "gamma_deviance",
+            lambda y, p: float(skm.mean_gamma_deviance(y, _positive(p))),
+            False,
+            "value",
+            ("gamma deviance", "mean gamma deviance", "гамма-девианс*", "девианс* гамм*"),
+        ),
+        Metric(
+            "tweedie_deviance",
+            lambda y, p: float(skm.mean_tweedie_deviance(y, _positive(p), power=1.5)),
+            False,
+            "value",
+            ("tweedie deviance", "mean tweedie deviance", "tweedie", "девианс* твиди"),
+        ),
+        # --- ранжирование
+        Metric(
+            "ndcg",
+            _ndcg,
+            True,
+            "value",
+            ("ndcg", "normalized discounted cumulative gain", "нормализованн* дисконтированн*"),
+        ),
+        Metric(
+            "map",
+            _map,
+            True,
+            "value",
+            ("mean average precision", "map@*"),
         ),
         Metric(
             "r2",
@@ -332,11 +441,18 @@ METRICS: dict[str, Metric] = {
             ),
         ),
     ]
-}
+)
 
 # Порядок проверки при поиске в тексте: при совпадении позиции побеждает тот, кто раньше в списке.
 # Сначала длинные/специфичные имена, иначе «f1» перебьёт «f1 macro», а «auc» — «auc-pr».
 SEARCH_ORDER = [
+    "ndcg",
+    "map",  # «mean average precision» раньше «average precision» (pr_auc)
+    "pinball",
+    "huber",
+    "poisson_deviance",
+    "gamma_deviance",
+    "tweedie_deviance",
     "f1_macro",
     "f1_weighted",
     "f1_micro",
@@ -367,9 +483,11 @@ SEARCH_ORDER = [
 
 def compute_metric(name: str, y_true, y_pred) -> float:
     """Посчитать метрику по имени из реестра."""
-    if name not in METRICS:
-        raise KeyError(f"Неизвестная метрика «{name}». Есть: {sorted(METRICS)}")
-    return METRICS[name].fn(y_true, y_pred)
+    try:
+        metric = METRICS[name]
+    except KeyError:
+        raise KeyError(f"Неизвестная метрика «{name}». Есть: {sorted(METRICS)}") from None
+    return metric.fn(y_true, y_pred)
 
 
 # Фразы, после которых обычно называют основную метрику: ищем сначала рядом с ними (по порядку списка)
@@ -410,13 +528,37 @@ def find_metric_in_text(text: str) -> str | None:
     Упоминания с отрицанием («we do NOT use accuracy», «Macro F1, а не Accuracy») пропускаем.
     """
     low = text.lower()
+    found = None
     for marker in MARKERS:
         pos = low.find(marker)
         if pos != -1:
             found = _first_metric(low, pos, pos + 200)
             if found:
-                return found
-    return _first_metric(low, 0, len(low))
+                break
+    found = found or _first_metric(low, 0, len(low))
+    if found == "pinball":
+        level = _quantile_level(low)
+        if level is not None and level != 0.5:
+            return f"pinball@{level:g}"
+    return found
+
+
+_QUANTILE_WORD = re.compile(r"quantile|percentile|квантил|перцентил|alpha|α|tau|τ")
+_DECIMAL_LEVEL = re.compile(r"(?<![\d.,])0[.,](\d{1,3})(?!\d|[.,]\d)")  # «0.9.» в конце фразы — тоже 0.9
+_PERCENT_LEVEL = re.compile(r"(?<!\d)(\d{1,2})\s*(?:%|-?(?:й|ый|го|th)\b)")
+
+
+def _quantile_level(text: str) -> float | None:
+    """Уровень квантиля рядом со словом «quantile/квантиль/alpha»: «0.9», «0,9», «90%», «90-й» → 0.9."""
+    for word in _QUANTILE_WORD.finditer(text):
+        window = text[max(0, word.start() - 40) : word.end() + 40]
+        decimal = _DECIMAL_LEVEL.search(window)
+        if decimal:
+            return float("0." + decimal.group(1))
+        percent = _PERCENT_LEVEL.search(window)
+        if percent and 0 < int(percent.group(1)) < 100:
+            return int(percent.group(1)) / 100
+    return None
 
 
 def _first_metric(text: str, start: int, end: int) -> str | None:

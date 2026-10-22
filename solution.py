@@ -33,7 +33,15 @@ from agent.loop import run_autoresearch
 from agent.task_parser import find_task_files, parse_task
 from evaluation.metrics import METRICS
 from evaluation.submission import per_class_columns, validate_submission, write_submission_atomic
-from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
+from interfaces.schemas import (
+    DataProfile,
+    ExperimentResult,
+    ExperimentStatus,
+    Hypothesis,
+    RunBudget,
+    TaskSpec,
+    TaskType,
+)
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
 from ml.validation import choose_validation
@@ -84,14 +92,14 @@ def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: R
        acceptance не сравнивает разные схемы, поэтому бейзлайн обязан быть в той же схеме, что и гипотезы;
     2. та же модель в обычной CV — если выбранная схема не посчиталась (например, редкий класс во time-фолдах);
     3. облегчённая: 3 фолда, меньше деревьев, CV на сэмпле ≤ LIGHT_MAX_ROWS — если не хватило времени или памяти.
+       После нехватки времени/памяти ступень 2 пропускается: та же модель на тех же строках не успеет и снова.
     """
     log = setup_logging()
     try:
         validation = choose_validation(spec, profile, train, test)
     except Exception:  # noqa: BLE001 — без выбранной схемы работаем в обычной CV
         log.exception("Схема валидации не выбрана — обычная CV")
-        validation = None
-    log.info("Схема валидации: %s", validation or "обычная CV")
+        validation = None  # сам выбор схемы пишет её в лог с причиной
     base = baseline_hypothesis()
     rungs = []
     if validation not in PLAIN_SCHEMES:
@@ -101,6 +109,8 @@ def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: R
     rungs.append((light, train.sample(n=min(len(train), LIGHT_MAX_ROWS), random_state=0)))
     result = None
     for hyp, rows in rungs:
+        if hyp.id != LIGHT_ID and result is not None and _out_of_resources(result):
+            continue  # полная CV не успела или не влезла в память — сразу облегчённая ступень
         result = run_experiment(spec, profile, hyp, rows, budget)
         if result.mean_score is not None:
             return hyp, result
@@ -130,6 +140,11 @@ def blind_answer(task_md: Path) -> pd.DataFrame | None:
         numeric = pd.api.types.is_numeric_dtype(values) and not values.empty
         out[col] = float(values.mean()) if numeric else (str(values.astype(str).mode()[0]) if len(values) else "")
     return out
+
+
+def _out_of_resources(result: ExperimentResult) -> bool:
+    """CV упала из-за времени или памяти (а не из-за схемы валидации) — повтор той же модели не поможет."""
+    return result.status == ExperimentStatus.TIMEOUT or "memory" in (result.error or "").lower()
 
 
 class AnswerKeeper:
