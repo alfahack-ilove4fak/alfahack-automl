@@ -106,7 +106,9 @@ XGBOOST_PARAMS = {
     "colsample_bytree": 0.8,
     "tree_method": "hist",
     "enable_categorical": True,  # категории pandas из make_matrix — без ручного кодирования
-    "max_cat_to_onehot": 1,
+    # Категории до 64 значений — разбиения «одна против остальных», а не по подмножествам: подмножества на
+    # десятках категорий запоминают train и ломаются при сдвиге (#145: public/regression честно RMSE 135.7 → 46.7)
+    "max_cat_to_onehot": 64,
     "random_state": SEED,
     "n_jobs": -1,
     "verbosity": 0,
@@ -326,6 +328,28 @@ def _fit_model(
     return MODEL_FITTERS[name](spec, hypothesis, x, y, eval_set, n_estimators)
 
 
+def _hide_unseen(hypothesis: Hypothesis, x_fit: pd.DataFrame, x_new: pd.DataFrame) -> pd.DataFrame:
+    """Категории, которых нет в обучающей части, → пропуск в x_new (#145).
+
+    Словарь категорий общий для train и test (make_matrix): у новой категории есть код, но ни одной строки в обучении.
+    XGBoost отправляет её по произвольной ветке разбиения: на practice/sales (все даты отложенной части новые) честно
+    RMSLE 1.63 против 0.49 с пропуском.
+    Пропуск модели обрабатывают штатно (ветка, выученная для пропусков). CatBoost не трогаем: пропуск в категории
+    он не принимает, а новую категорию и так кодирует априорной статистикой.
+    """
+    if str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower() == "catboost":
+        return x_new
+    cols = [c for c in x_new.columns if isinstance(x_new[c].dtype, pd.CategoricalDtype)]
+    unseen = {c: ~x_new[c].isin(x_fit[c].unique()) & x_new[c].notna() for c in cols}
+    unseen = {c: mask for c, mask in unseen.items() if mask.any()}
+    if not unseen:
+        return x_new
+    x_new = x_new.copy()
+    for col, mask in unseen.items():
+        x_new[col] = x_new[col].mask(mask)
+    return x_new
+
+
 def _predict(spec: TaskSpec, model, x: pd.DataFrame, log_target: bool):
     """Предсказание в том виде, который нужен метрике задачи."""
     if not _is_classification(spec):
@@ -423,6 +447,7 @@ def _fold_score(
     Третий элемент — вероятности классов на валидации (для proba_weights), у регрессии None.
     """
     x_tr, x_va = x.iloc[tr], x.iloc[va]
+    x_va = _hide_unseen(hypothesis, x_tr, x_va)
     if ops:
         x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
     known = np.ones(len(va), dtype=bool)
@@ -467,6 +492,7 @@ def run_experiment(
         rows = _cv_rows(spec, profile, y, budget)
         if rows is not None:
             train, y = train.iloc[rows], y[rows]
+        profile, train, _ = with_feature_code(spec, profile, hypothesis, train)
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scheme, column = parse_validation(params.get("validation"), spec)
@@ -575,13 +601,52 @@ def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.nd
     return {col: proba[:, i] for i, col in enumerate(columns)}
 
 
+def with_feature_code(
+    spec: TaskSpec,
+    profile: DataProfile,
+    hypothesis: Hypothesis,
+    train: pd.DataFrame,
+    test: pd.DataFrame | None = None,
+) -> tuple[DataProfile, pd.DataFrame, pd.DataFrame | None]:
+    """Код признаков от LLM (`Hypothesis.code`, ADR 0008 D4) → новые числовые колонки в train/test и профиле.
+
+    Код исполняется в песочнице (agent/feature_code.apply_feature_code) на признаках train+test вместе,
+    **без target и id**; новые колонки берутся только числовые. Ошибка кода → исключение → FAILED гипотезы
+    (в run_experiment) или прежний ответ (в fit_predict_final). Без кода — всё как было.
+    """
+    if not hypothesis.code:
+        return profile, train, test
+    from agent.feature_code import apply_feature_code  # здесь: agent сам импортирует ml — без цикла импортов
+
+    features = profile.numeric_features + profile.categorical_features
+    parts = [train[features]] + ([test[features]] if test is not None else [])
+    table = pd.concat(parts, ignore_index=True)
+    out, note = apply_feature_code(hypothesis.code, table, target=spec.target)
+    if out is None:
+        raise ValueError(f"код признаков отклонён: {note}")
+    new = [c for c in out.columns if c not in features]
+    clash = [c for c in new if c in train.columns or (test is not None and c in test.columns)]
+    if clash:
+        raise ValueError(f"код признаков перезаписал бы колонки {clash}")
+    values = out[new].to_numpy()
+    train = train.copy()
+    train[new] = values[: len(train)]
+    if test is not None:
+        test = test.copy()
+        test[new] = values[len(train) :]
+    log.info("Код признаков «%s»: +%d колонок %s%s", hypothesis.id, len(new), new, f" ({note})" if note else "")
+    return profile.model_copy(update={"numeric_features": profile.numeric_features + new}), train, test
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
     """Обучение на всём train с числом деревьев из CV и предсказание test в формате сабмита."""
     params = hypothesis.params
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
+    profile, train, test = with_feature_code(spec, profile, hypothesis, train, test)
     x, x_test = make_matrix(profile, train, test)
+    x_test = _hide_unseen(hypothesis, x, x_test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
     ops = params.get("feature_ops")

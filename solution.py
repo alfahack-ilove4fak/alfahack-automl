@@ -6,7 +6,9 @@
 
 Стратегия «сначала надёжно, потом умно»:
   0. сразу пишем тривиальный ответ (среднее / самый частый класс) — файл есть всегда;
-  1. обучаем надёжный бейзлайн и перезаписываем ответ;
+  1. обучаем надёжный бейзлайн и перезаписываем ответ. Бейзлайн не посчитался — лестница отступления (#171):
+     обычная CV вместо выбранной схемы → облегчённый бейзлайн → модель без CV; тривиальный ответ — только если
+     не обучилась ни одна модель;
   2. цикл AutoResearch улучшает модель, пока есть время; каждый новый лучший сразу сохраняется.
 
 Защита от нулевого балла: ответ пишется атомарно и проверяется после каждой записи; сторож
@@ -17,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import threading
@@ -27,12 +30,21 @@ import pandas as pd
 
 from agent.hypotheses import baseline_hypothesis
 from agent.loop import run_autoresearch
-from agent.task_parser import find_task_files, parse_task
+from agent.task_parser import find_task_files, parse_task, spec_for_target
 from evaluation.metrics import METRICS
 from evaluation.submission import per_class_columns, validate_submission, write_submission_atomic
-from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
+from interfaces.schemas import (
+    DataProfile,
+    ExperimentResult,
+    ExperimentStatus,
+    Hypothesis,
+    RunBudget,
+    TaskSpec,
+    TaskType,
+)
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
+from ml.validation import choose_validation
 from runtime.budget import StagePlan, ensure_final_reserve, make_budget, plan_stages
 from runtime.log import setup_logging
 from runtime.watchdog import Watchdog
@@ -52,8 +64,42 @@ def _class_share_answer(spec: TaskSpec, y, test, class_columns: list[str]):
     return test[[spec.id_column]].assign(**dict(zip(class_columns, probs, strict=True)))[spec.submission_columns]
 
 
+def all_targets(spec: TaskSpec) -> list[str]:
+    return [spec.target, *spec.extra_targets]
+
+
+def join_targets(spec: TaskSpec, test, parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """Склеить ответы по отдельным таргетам (id, таргет) в один по колонкам шаблона. Строки — в порядке test."""
+    out = test[[spec.id_column]].copy()
+    for part in parts:
+        column = part.columns[-1]
+        out[column] = part[column].to_numpy()
+    return out[spec.submission_columns]
+
+
+def fit_extra_targets(spec: TaskSpec, train, test) -> list[pd.DataFrame]:
+    """Ответы по дополнительным таргетам (#174): LightGBM по умолчанию на каждый, без CV.
+
+    Цикл AutoResearch улучшает только основной таргет; сбой по дополнительному — его тривиальный ответ.
+    """
+    log = setup_logging()
+    parts = []
+    for target in spec.extra_targets:
+        sub = spec_for_target(spec, target, train[target])
+        try:
+            parts.append(fit_predict_final(sub, profile_data(sub, train, test), baseline_hypothesis(), train, test))
+            log.info("Таргет %s (%s): модель обучена", target, sub.task_type.value)
+        except Exception:  # noqa: BLE001 — один таргет не должен стоить ответа по остальным
+            log.exception("Таргет %s: модель не обучилась — тривиальный ответ", target)
+            parts.append(trivial_answer(sub, train, test))
+    return parts
+
+
 def trivial_answer(spec: TaskSpec, train, test):
     """Ответ без модели: страховка на случай, если всё остальное упадёт."""
+    if spec.extra_targets:  # несколько таргетов (#174): тривиальный ответ по каждому
+        parts = [trivial_answer(spec_for_target(spec, t, train[t]), train, test) for t in all_targets(spec)]
+        return join_targets(spec, test, parts)
     y = train[spec.target]
     class_columns = per_class_columns(spec)
     if class_columns and spec.task_type != TaskType.REGRESSION:
@@ -65,6 +111,74 @@ def trivial_answer(spec: TaskSpec, train, test):
     else:
         value = str(y.astype(str).mode()[0])
     return test[[spec.id_column]].assign(**{spec.target: value})[spec.submission_columns]
+
+
+LIGHT_ID = "baseline_light"
+LIGHT_MAX_ROWS = 200_000  # облегчённый бейзлайн: CV на сэмпле — порядок качества тот же, время в разы меньше
+LIGHT_PARAMS = {"n_folds": 3, "model_params": {"n_estimators": 500, "learning_rate": 0.1}}
+PLAIN_SCHEMES = (None, "kfold", "stratified")
+
+
+def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: RunBudget):
+    """Бейзлайн с запасными ступенями (#151, #171). → (гипотеза, результат); результат без скора — CV не удалась.
+
+    1. LightGBM в схеме валидации, похожей на скрытый test (choose_validation, ADR 0013) — один раз до цикла:
+       acceptance не сравнивает разные схемы, поэтому бейзлайн обязан быть в той же схеме, что и гипотезы;
+    2. та же модель в обычной CV — если выбранная схема не посчиталась (например, редкий класс во time-фолдах);
+    3. облегчённая: 3 фолда, меньше деревьев, CV на сэмпле ≤ LIGHT_MAX_ROWS — если не хватило времени или памяти.
+       После нехватки времени/памяти ступень 2 пропускается: та же модель на тех же строках не успеет и снова.
+    """
+    log = setup_logging()
+    try:
+        validation = choose_validation(spec, profile, train, test)
+    except Exception:  # noqa: BLE001 — без выбранной схемы работаем в обычной CV
+        log.exception("Схема валидации не выбрана — обычная CV")
+        validation = None  # сам выбор схемы пишет её в лог с причиной
+    base = baseline_hypothesis()
+    rungs = []
+    if validation not in PLAIN_SCHEMES:
+        rungs.append((base.model_copy(update={"params": {**base.params, "validation": validation}}), train))
+    rungs.append((base, train))
+    light = base.model_copy(update={"id": LIGHT_ID, "params": {**base.params, **LIGHT_PARAMS}})
+    rungs.append((light, train.sample(n=min(len(train), LIGHT_MAX_ROWS), random_state=0)))
+    result = None
+    for hyp, rows in rungs:
+        if hyp.id != LIGHT_ID and result is not None and _out_of_resources(result):
+            continue  # полная CV не успела или не влезла в память — сразу облегчённая ступень
+        result = run_experiment(spec, profile, hyp, rows, budget)
+        if result.mean_score is not None:
+            return hyp, result
+        log.warning("Бейзлайн «%s» не посчитался (%s: %s) — следующая ступень", hyp.id, result.status, result.error)
+    return light, result
+
+
+def blind_answer(task_md: Path) -> pd.DataFrame | None:
+    """Ответ без TaskSpec (#187): разбор задачи упал, образца ответа нет — лучше любой ответ, чем никакого.
+
+    id — колонка `id` test, иначе первая. Ответ — колонки, которые есть только в train: упомянутые в task.md,
+    иначе последняя. Значение — среднее (число) или самое частое (остальное). None — не из чего собрать.
+    """
+    files = find_task_files(task_md)
+    if "train" not in files or "test" not in files:
+        return None
+    test = pd.read_csv(files["test"])
+    extra = [c for c in pd.read_csv(files["train"], nrows=0).columns if c not in test.columns]
+    if not extra or test.empty:
+        return None
+    text = task_md.read_text(encoding="utf-8", errors="replace")
+    targets = [c for c in extra if re.search(rf"(?<!\w){re.escape(c)}(?!\w)", text)] or extra[-1:]
+    y = pd.read_csv(files["train"], usecols=targets)
+    out = test[["id" if "id" in test.columns else test.columns[0]]].copy()
+    for col in targets:
+        values = y[col].dropna()
+        numeric = pd.api.types.is_numeric_dtype(values) and not values.empty
+        out[col] = float(values.mean()) if numeric else (str(values.astype(str).mode()[0]) if len(values) else "")
+    return out
+
+
+def _out_of_resources(result: ExperimentResult) -> bool:
+    """CV упала из-за времени или памяти (а не из-за схемы валидации) — повтор той же модели не поможет."""
+    return result.status == ExperimentStatus.TIMEOUT or "memory" in (result.error or "").lower()
 
 
 class AnswerKeeper:
@@ -113,6 +227,9 @@ class AnswerKeeper:
                 if sample is not None:
                     shutil.copyfile(sample, self.path)
                     log.error("Финал (%s): ответа не было — скопирован %s", reason, sample.name)
+                elif (blind := blind_answer(self.task_md)) is not None:
+                    write_submission_atomic(blind, self.path)
+                    log.error("Финал (%s): ответа и образца нет — ответ без разбора задачи: %s", reason, list(blind))
                 else:
                     log.error("Финал (%s): ответа нет, и образца sample_submission тоже", reason)
         except Exception:  # noqa: BLE001 — финализация не должна ронять процесс
@@ -134,26 +251,31 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
         began = time.time()
         try:
             answer = fit_predict_final(spec, profile, hyp, train, test)
+            if spec.extra_targets:
+                answer = join_targets(spec, test, [answer[[spec.id_column, spec.target]], *extra_answers])
             problems = keeper.write(answer[spec.submission_columns])
-            log.info(
-                "Сохранён ответ «%s» (CV %s=%.5f), проверка: %s",
-                hyp.id,
-                res.metric_name,
-                res.mean_score,
-                "OK" if not problems else problems,
-            )
+            score = "без CV" if res.mean_score is None else f"CV {res.metric_name}={res.mean_score:.5f}"
+            log.info("Сохранён ответ «%s» (%s), проверка: %s", hyp.id, score, "OK" if not problems else problems)
         except Exception:  # noqa: BLE001 — старый валидный ответ остаётся на месте
             log.exception("Не удалось сохранить ответ гипотезы %s", hyp.id)
         return time.time() - began
 
     profile = profile_data(spec, train, test)
+    # Дополнительные таргеты — один раз до бейзлайна: их ответ нужен в каждой записи модели
+    extra_answers = fit_extra_targets(spec, train, test) if spec.extra_targets else []
     parsed_at = time.time()
-    base = baseline_hypothesis()
-    base_result = run_experiment(spec, profile, base, train, budget)
+    base, base_result = baseline_ladder(spec, profile, train, test, budget)
     log.info("Шаг 1: бейзлайн %s=%s ± %s", base_result.metric_name, base_result.mean_score, base_result.std_score)
     history = [(base, base_result)]
     if base_result.mean_score is None:
-        log.error("Бейзлайн не обучился — остаёмся с тривиальным ответом")
+        # Ни одна CV не посчиталась: сравнивать гипотезы не с чем, но обученная модель почти всегда лучше среднего
+        log.error("CV бейзлайна не удалась ни на одной ступени — финальная модель без CV, цикл пропускаем")
+        save(base, base_result, profile)
+        return
+    if base.id == LIGHT_ID:
+        # Облегчённая CV (3 фолда, сэмпл) несравнима с гипотезами цикла, а полная не успела — ресурсов мало
+        log.warning("Бейзлайн посчитан только облегчённым — сохраняем его, цикл AutoResearch пропускаем")
+        save(base, base_result, profile)
         return
     final_seconds = save(base, base_result, profile)
     if time.time() > plan.baseline_end:

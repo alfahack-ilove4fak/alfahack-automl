@@ -1,4 +1,4 @@
-"""Скачать последнюю автосборку dev (workflow build, каждые 45 минут) в папку dist/.
+"""Скачать последнюю автосборку dev (workflow build, 2 раза в день) в папку dist/.
 
     uv run python scripts/get_build.py            # свежий ZIP в dist/
     uv run python scripts/get_build.py --list     # только показать последние сборки

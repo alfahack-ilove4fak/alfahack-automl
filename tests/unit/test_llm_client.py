@@ -4,9 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_client import MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
+from agent.llm_client import DEFAULT_REASONING_TOKENS, MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
 
 MESSAGES = [{"role": "user", "content": "предложи гипотезы"}]
+
+
+@pytest.fixture(autouse=True)
+def fast_retries(monkeypatch):
+    """Повторы при обрыве — без пауз: тесты не ждут по 17 с (тест с длинной паузой задаёт её сам)."""
+    monkeypatch.setattr("agent.llm_client.RETRY_BACKOFF", (0.0, 0.0, 0.0))
 
 
 @pytest.fixture
@@ -152,7 +158,7 @@ def test_reasoning_reserve_added_to_max_tokens(client, monkeypatch):
     client._client = fake
     client.chat(MESSAGES, max_tokens=800)
     assert sent["max_tokens"] == 800 + client.reasoning_tokens
-    assert client.reasoning_tokens == 3000
+    assert client.reasoning_tokens == DEFAULT_REASONING_TOKENS == 6000
 
 
 def test_reasoning_reserve_from_env(monkeypatch):
@@ -218,10 +224,10 @@ def test_no_time_no_request(client):
     assert client.failures == 0  # нехватка времени — не сбой LLM
 
 
-def test_short_time_single_attempt_with_short_timeout(client):
+def test_short_time_uses_short_timeout(client):
     fake = client._client = FakeOpenAI(["{}"])
     assert client.chat(MESSAGES, seconds_left=400) == "{}"
-    assert fake.options == {"timeout": 100.0, "max_retries": 0}
+    assert fake.options["max_retries"] == 0 and fake.options["timeout"] == pytest.approx(100.0, abs=0.5)
 
 
 def test_plenty_of_time_default_timeout(client):
@@ -263,11 +269,12 @@ def live_env(monkeypatch):
         ("sk-test-123", "127.0.0.1:9/v1", "UnsupportedProtocol"),  # URL без схемы
     ],
 )
-def test_connection_error_logs_real_cause(live_env, caplog, key, base_url, cause):
+def test_connection_error_logs_real_cause(live_env, caplog, monkeypatch, key, base_url, cause):
+    monkeypatch.setattr("agent.llm_client.RETRY_BACKOFF", (0.0, 0.0, 0.0))  # повторы без пауз — тест быстрый
     live_env.setenv("OPENAI_API_KEY", key)
     live_env.setenv("OPENAI_BASE_URL", base_url)
     llm = LLMClient()
-    assert llm.chat(MESSAGES, seconds_left=400) is None  # одна попытка без повторов — тест быстрый
+    assert llm.chat(MESSAGES, seconds_left=400) is None  # все попытки упали — один сбой клиента
     assert llm.failures == 1
     assert "Connection error" in caplog.text and cause in caplog.text  # видно настоящую причину
 
@@ -404,3 +411,180 @@ def test_log_summary_mentions_tokens(live_client, caplog):
     with caplog.at_level(logging.INFO, logger="agent.llm"):
         live_client.log_summary()
     assert "LLM итог: 1 запросов" in caplog.text and "токены 150" in caplog.text
+
+
+# ---------------------------------------------------------------- устойчивость к перегруженному серверу (22.10)
+
+
+def _openai_errors():
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    disconnect = openai.APIConnectionError(message="Connection error.", request=request)
+
+    def status(code, text):
+        return openai.APIStatusError(text, response=httpx.Response(code, request=request), body=None)
+
+    return disconnect, status
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    monkeypatch.setattr("agent.llm_client.RETRY_BACKOFF", (0.0, 0.0, 0.0))
+
+
+def test_disconnect_is_retried_and_succeeds(client, no_pause):
+    disconnect, _ = _openai_errors()
+    fake = client._client = FakeOpenAI([disconnect, disconnect, "{}"])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 3 and client.failures == 0
+
+
+def test_bad_request_is_not_retried(client, no_pause):
+    _, status = _openai_errors()
+    fake = client._client = FakeOpenAI([status(401, "Unauthorized"), "{}"])
+    assert client.chat(MESSAGES) is None
+    assert fake.requests == 1
+
+
+def test_server_error_is_retried(client, no_pause):
+    _, status = _openai_errors()
+    fake = client._client = FakeOpenAI([status(503, "overloaded"), "{}"])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 2
+
+
+def test_gives_up_after_all_retries(client, no_pause):
+    disconnect, _ = _openai_errors()
+    fake = client._client = FakeOpenAI([disconnect] * 4)
+    assert client.chat(MESSAGES) is None
+    assert fake.requests == 4 and client.failures == 1  # 1 + 3 повтора = один сбой клиента
+
+
+def test_no_retry_when_time_is_short(client, monkeypatch):
+    monkeypatch.setattr("agent.llm_client.RETRY_BACKOFF", (120.0, 120.0, 120.0))
+    disconnect, _ = _openai_errors()
+    fake = client._client = FakeOpenAI([disconnect, "{}"])
+    assert client.chat(MESSAGES, seconds_left=400) is None  # пауза 120 с не влезает в 100 с ожидания
+    assert fake.requests == 1
+
+
+def test_pause_after_failures_then_llm_comes_back(client, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("agent.llm_client.time.monotonic", lambda: clock[0])
+    client._client = FakeOpenAI([TimeoutError("нет сети")] * 3 + ["{}"])
+    for _ in range(3):
+        client.chat(MESSAGES)
+    assert not client.available()  # пауза после трёх сбоев подряд
+    clock[0] += 130  # пауза COOLDOWN_SECONDS (120 с) прошла
+    assert client.available()
+    assert client.chat(MESSAGES) == "{}"
+    assert client.failures == 0
+
+
+def test_reasoning_effort_sent_in_extra_body(client):
+    seen = {}
+
+    class Spy(FakeOpenAI):
+        def _create(self, **kwargs):
+            seen.update(kwargs)
+            return super()._create(**kwargs)
+
+    client._client = Spy(["{}"])
+    client.chat(MESSAGES)
+    assert seen["extra_body"] == {"reasoning_effort": "low"}
+
+
+def test_reasoning_effort_dropped_if_server_rejects(client, no_pause):
+    _, status = _openai_errors()
+    calls = []
+
+    class Picky(FakeOpenAI):
+        def _create(self, **kwargs):
+            calls.append("extra_body" in kwargs)
+            if "extra_body" in kwargs:
+                raise status(400, "unsupported parameter: reasoning_effort")
+            return super()._create(**kwargs)
+
+    client._client = Picky(["{}", "{}"])
+    assert client.chat(MESSAGES) == "{}"
+    assert calls == [True, False] and client.reasoning_effort == ""
+    client.chat(MESSAGES + [{"role": "user", "content": "ещё"}])
+    assert calls[-1] is False  # дальше без параметра
+
+
+def test_reasoning_effort_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK", "1")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+    assert LLMClient().reasoning_effort == ""
+
+
+# ---------------------------------------------------------------- потоковый ответ (прокси рвёт обычный через ~10 с)
+
+
+def _chunk(content=None, finish=None, usage=None):
+    choices = [] if content is None and finish is None else [
+        SimpleNamespace(delta=SimpleNamespace(content=content), finish_reason=finish)
+    ]  # fmt: skip
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+class StreamOpenAI(FakeOpenAI):
+    """Отдаёт ответы чанками, как OpenAI при stream=True; элемент-исключение — обрыв посреди потока."""
+
+    def __init__(self, streams):
+        super().__init__([])
+        self.streams = list(streams)
+        self.kwargs = []
+
+    def _create(self, **kwargs):
+        self.requests += 1
+        self.kwargs.append(kwargs)
+        stream = self.streams.pop(0)
+        if isinstance(stream, Exception):
+            raise stream
+
+        def gen():
+            for item in stream:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+
+        return gen()
+
+
+def test_stream_is_requested_and_collected(client):
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, cost=0.02)
+    fake = client._client = StreamOpenAI([[_chunk('{"ok"'), _chunk(": true}", "stop"), _chunk(usage=usage)]])
+    assert client.chat_json(MESSAGES) == {"ok": True}
+    assert fake.kwargs[0]["stream"] is True and fake.kwargs[0]["stream_options"] == {"include_usage": True}
+    assert client.rub_spent == pytest.approx(0.02) and client.prompt_tokens == 10
+
+
+def test_stream_cut_midway_is_retried(client):
+    disconnect, _ = _openai_errors()
+    fake = client._client = StreamOpenAI([[_chunk("{"), disconnect], [_chunk("{}", "stop")]])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 2
+
+
+def test_stream_length_finish_is_reported_as_truncated(client, caplog):
+    client._client = StreamOpenAI([[_chunk("", "length")]])
+    assert client.chat(MESSAGES) == ""
+    assert "упёрлась в лимит" in caplog.text
+
+
+def test_stream_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK", "1")
+    monkeypatch.setenv("LLM_STREAM", "0")
+    assert LLMClient().stream is False
+
+
+def test_raw_httpx_cut_midstream_is_retried(client):
+    import httpx
+
+    cut = httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+    fake = client._client = StreamOpenAI([[_chunk("{"), cut], [_chunk("{}", "stop")]])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 2
