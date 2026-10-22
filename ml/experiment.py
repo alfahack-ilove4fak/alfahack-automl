@@ -86,6 +86,9 @@ BASE_PARAMS = {
     "n_jobs": min(os.cpu_count() or 1, 4),
 }
 EARLY_STOPPING = 100
+FINAL_TREES_MARGIN = 1.1  # на всём train деревьев нужно чуть больше, чем в фолде CV
+CV_TRAIN_SHARE = 0.8  # доля train в фолде kfold-5 — под неё подобран FINAL_TREES_MARGIN
+MAX_TREES_SCALE = 3.0  # поправка на долю train не больше ×3: деревьев с данными растёт медленнее, чем линейно
 MAX_CV_ROWS = 500_000  # больше строк для сравнения гипотез не нужно: скор стабилен, а время растёт линейно
 MIN_CV_ROWS = 1_000  # меньше — оценка бессмысленна, лучше честно упасть по памяти
 RAM_FACTOR = 6  # пик памяти эксперимента ≈ RAM_FACTOR × размер матрицы (копии фолдов, бины и деревья модели)
@@ -438,11 +441,12 @@ def _mean_best_iteration(best_iters: list) -> int | list[int]:
     return int(np.mean(best_iters))
 
 
-def _final_estimators(best: int | list[int] | None) -> int | list[int]:
-    """Деревьев на всём train: чуть больше, чем на 4/5 из CV (у ансамбля — для каждого участника)."""
+def _final_estimators(best: int | list[int] | None, scale: float = 1.0) -> int | list[int]:
+    """Деревьев на всём train: чуть больше, чем в CV, × поправка на долю train (у ансамбля — для каждого участника)."""
+    factor = FINAL_TREES_MARGIN * scale
     if isinstance(best, list):
-        return [max(50, int(b * 1.1)) for b in best]
-    return max(50, int((500 if best is None else best) * 1.1))
+        return [max(50, int(b * factor)) for b in best]
+    return max(50, int((500 if best is None else best) * factor))
 
 
 def _hide_unseen(hypothesis: Hypothesis, x_fit: pd.DataFrame, x_new: pd.DataFrame) -> pd.DataFrame:
@@ -665,6 +669,8 @@ def run_experiment(
                         validation=validation,
                     )
         hypothesis.params.setdefault("_best_iteration", _mean_best_iteration(best_iters))
+        # Доля train в фолде: у time-схемы — расширяющееся окно (в среднем ≈ половина), финалу нужно больше деревьев
+        hypothesis.params.setdefault("_train_fraction", round(float(np.mean([len(tr) for tr, _ in folds])) / len(y), 4))
         if _use_proba_weights(spec, params):
             gib = spec.metric.greater_is_better
             plain = float(np.mean(scores))
@@ -758,6 +764,18 @@ def with_feature_code(
     return profile.model_copy(update={"numeric_features": profile.numeric_features + new}), train, test
 
 
+def _trees_scale(params: dict) -> float:
+    """Во сколько раз финалу нужно больше деревьев, чем в CV, из-за доли train в фолдах (#218: схема time:).
+
+    Ранняя остановка в фолде, где train — треть данных, наступает раньше, чем нужно модели на всём train.
+    Для kfold-5 (доля 0.8) поправки нет — там хватает FINAL_TREES_MARGIN. Нет _train_fraction — тоже без поправки.
+    """
+    fraction = params.get("_train_fraction")
+    if not fraction:
+        return 1.0
+    return min(MAX_TREES_SCALE, max(1.0, CV_TRAIN_SHARE / float(fraction)))
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
@@ -772,7 +790,7 @@ def fit_predict_final(
     ops = params.get("feature_ops")
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
-    n_estimators = _final_estimators(params.get("_best_iteration"))
+    n_estimators = _final_estimators(params.get("_best_iteration"), _trees_scale(params))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
     pred = _predict(spec, model, x_test, log_target)
     if _use_proba_weights(spec, params) and params.get("_proba_weights"):

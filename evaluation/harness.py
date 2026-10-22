@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import shutil
 import subprocess
@@ -56,6 +57,10 @@ COLUMNS = [
     "status",
     "seconds",
     "peak_ram_mb",
+    "llm_calls",
+    "llm_errors",
+    "llm_tokens",
+    "llm_rub",
     "minutes",
     "error",
 ]
@@ -199,6 +204,32 @@ def run_with_limits(cmd: list[str], cwd: Path, env: dict[str, str], timeout: flo
     return (None if killed else proc.returncode), time.time() - started, peak
 
 
+def llm_usage(run_dir: Path) -> dict:
+    """Расход LLM за прогон из журнала агента run_dir/llm_calls.jsonl — для тай-брейка (вебинар: токены, затем время).
+
+    Ответы из кэша не считаем: на платформе кэша нет, а здесь он прячет настоящий расход. Нет журнала — нули.
+    """
+    usage = {"llm_calls": 0, "llm_errors": 0, "llm_tokens": 0, "llm_rub": 0.0}
+    ledger = run_dir / "llm_calls.jsonl"
+    if not ledger.exists():
+        return usage
+    for line in ledger.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            call = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # строку дописывал убитый по таймауту агент
+        if not isinstance(call, dict) or call.get("cached"):
+            continue
+        if not call.get("ok"):
+            usage["llm_errors"] += 1
+            continue
+        usage["llm_calls"] += 1
+        usage["llm_tokens"] += int(call.get("prompt") or 0) + int(call.get("completion") or 0)
+        usage["llm_rub"] += float(call.get("cost") or 0.0)
+    usage["llm_rub"] = round(usage["llm_rub"], 4)
+    return usage
+
+
 def run_task(
     task_md: Path,
     workdir: Path,
@@ -229,6 +260,7 @@ def run_task(
             env,
             minutes * 60 + GRACE_SEC,
         )
+        row.update(llm_usage(out / "run"))  # до проверки ответа: расход важен и у невалидного сабмита
         spec: TaskSpec = prepared["spec"]
         new_spec = parse_task(prepared["task_md"])
         test = pd.read_csv(new_spec.test_path)
@@ -286,8 +318,8 @@ def append_rows(rows: list[dict], path: Path = LEADERBOARD) -> None:
 def render(rows: list[dict]) -> str:
     lines = [
         "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному | Статус | Время, с "
-        "| Пик RAM, МБ |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Пик RAM, МБ | LLM: запросов (ошибок) | Токены LLM | ₽ |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         status = r["status"] + (f" — {r['error']}" if r.get("error") else "")
@@ -296,7 +328,8 @@ def render(rows: list[dict]) -> str:
             f"| {r['task']} | {r.get('split', '—')} | {r.get('metric', '—')} | {r.get('value', float('nan')):.5g} | "
             f"{r.get('baseline', float('nan')):.5g} | {r['score']:.1f} | {r.get('model_baseline', float('nan')):.5g} | "
             f"{'—' if np.isnan(model_score) else f'{model_score:.1f}'} | {status} | "
-            f"{r.get('seconds', 0):.0f} | {r.get('peak_ram_mb', 0):.0f} |"
+            f"{r.get('seconds', 0):.0f} | {r.get('peak_ram_mb', 0):.0f} | "
+            f"{r.get('llm_calls', 0)} ({r.get('llm_errors', 0)}) | {r.get('llm_tokens', 0)} | {r.get('llm_rub', 0.0):.2f} |"
         )
     lines.append(f"\nСредний балл: **{np.mean([r['score'] for r in rows]):.1f}** (платформа берёт среднее по задачам)")
     model_scores = [r.get("model_score", float("nan")) for r in rows]
@@ -304,6 +337,13 @@ def render(rows: list[dict]) -> str:
         lines.append(
             f"Средний балл к сильному бейзлайну (лучший из LightGBM и тривиального): "
             f"**{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
+        )
+    calls = sum(r.get("llm_calls", 0) + r.get("llm_errors", 0) for r in rows)
+    if calls:
+        tokens, rub = sum(r.get("llm_tokens", 0) for r in rows), sum(r.get("llm_rub", 0.0) for r in rows)
+        lines.append(
+            f"LLM за прогон: {calls} запросов, **{tokens} токенов** ({tokens / len(rows):.0f} на задачу), {rub:.2f} ₽ "
+            "— тай-брейк при равном балле"
         )
     return "\n".join(lines)
 
