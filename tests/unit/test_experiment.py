@@ -616,18 +616,6 @@ def test_optuna_tunes_on_the_same_validation_scheme(monkeypatch):
         assert train["year"].iloc[tr].max() < train["year"].iloc[va].min()
 
 
-def test_optuna_hidden_from_agent_until_honest_validation():
-    """Ревью #115: подбор на KFold честно хуже бейзлайна — LLM и playbook не должны видеть ключ optuna (до #29)."""
-    import re
-    import textwrap
-
-    import ml.experiment
-
-    section = ml.experiment.__doc__.split("Поддерживаемые params", 1)[1].split("\n", 1)[-1]
-    keys = set(re.findall(r"^(\w+)\s+—", textwrap.dedent(section), re.MULTILINE))
-    assert "optuna" not in keys
-
-
 def test_unseen_category_becomes_missing_but_catboost_keeps_it():
     """#145: категория без строк в обучающей части → пропуск; известные значения и пропуски не трогаем."""
     from ml.experiment import _hide_unseen
@@ -763,3 +751,31 @@ def test_bad_ensemble_is_failed_not_exception(params, message):
     train, _, profile = _data(TaskType.REGRESSION)
     result = run_experiment(spec, profile, _hyp(**params), train, RunBudget())
     assert result.status == ExperimentStatus.FAILED and message in result.error
+
+
+def test_optuna_true_uses_defaults(monkeypatch):
+    # LLM и playbook пишут optuna: true — подбор со значениями по умолчанию, а не тихий пропуск (#200)
+    import ml.tuning as tuning
+
+    seen = {}
+
+    def fake_tune(spec, hypothesis, *args, **kwargs):
+        seen["cfg"] = hypothesis.params["optuna"]
+        return {"num_leaves": 15}
+
+    monkeypatch.setattr(tuning, "tune", fake_tune)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(model_params={"n_estimators": 20}, optuna=True)
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert seen["cfg"] is True and hyp.params["model_params"]["num_leaves"] == 15
+
+
+def test_agent_sees_optuna_and_ensemble_keys():
+    # агент берёт допустимые ключи params из docstring ml/experiment.py — открытые для #200 ключи должны быть там
+    from agent.prompting import allowed_param_keys
+
+    assert {"optuna", "ensemble"} <= allowed_param_keys()
