@@ -69,7 +69,7 @@ def run_autoresearch(
             log.info("Гипотезы закончились — завершаю цикл")
             break
         hyp = queue.pop(0)
-        log.info("Итерация %d: %s — %s", iteration, hyp.id, hyp.title)
+        log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
         reason = review(hyp, spec)
         needed = estimated_seconds(hyp, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
@@ -94,6 +94,7 @@ def run_autoresearch(
             on_new_best(hyp, result)
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
+    llm.log_summary()  # токены и время LLM — тай-брейк при равном балле; журнал вызовов — llm_calls.jsonl
     return best
 
 
