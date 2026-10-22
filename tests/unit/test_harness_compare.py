@@ -59,3 +59,16 @@ def test_main_takes_last_row_per_task(tmp_path):
     pd.DataFrame([_row("a", 15, 45) | {"commit": "h"}]).to_csv(head, index=False)
     assert main([str(base), str(head), "--out", str(out)]) == 0
     assert "10.0 → 15.0" in out.read_text(encoding="utf-8")
+
+
+def test_append_rows_migrates_old_leaderboard_header(tmp_path):
+    """Старый лидерборд без колонок модельного бейзлайна — не ломается, старые строки сохраняются."""
+    from evaluation.harness import COLUMNS, append_rows
+
+    path = tmp_path / "leaderboard.csv"
+    old = [c for c in COLUMNS if c not in ("model_baseline", "model_score")]
+    pd.DataFrame([{c: 1 for c in old} | {"task": "old"}], columns=old).to_csv(path, index=False)
+    append_rows([{"task": "new", "score": 5.0, "model_score": 2.0}], path)
+    board = pd.read_csv(path)
+    assert list(board.columns) == COLUMNS
+    assert board.task.tolist() == ["old", "new"] and board.model_score.isna().tolist() == [True, False]

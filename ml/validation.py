@@ -2,7 +2,7 @@
 
 ADR 0008, D1: схему выбирают один раз до цикла (choose_validation), все гипотезы считаются в ней, а
 ExperimentResult.validation = "<схема>-<число фолдов>" — результаты разных схем не сравниваются.
-Решение о схеме по умолчанию и цифры — docs/decisions/0012-validation-default.md.
+Решение о схеме по умолчанию и цифры — docs/decisions/0013-validation-default.md.
 
 Значения params.validation:
   kfold              — случайные фолды (по умолчанию для регрессии)
@@ -32,7 +32,8 @@ DUPLICATE_SHARE = 0.10  # от этой доли дубликатов в train �
 TIME_PARSE_SHARE = 0.9  # колонка — время, если столько значений читается как число или дата
 TIME_MIN_PERIODS = 3
 TIME_MAX_PERIODS = 50  # больше различных значений — режем на равные по числу строк периоды
-TIME_NAME_HINT = re.compile(r"year|date|time|month|week|day|period|год|дата|время|месяц", re.IGNORECASE)
+# Имя «про время»: слово в начале имени или после не-буквы (Year_Factor, sale_date), но не update_count
+TIME_NAME_HINT = re.compile(r"(?<![a-zа-я])(year|date|time|month|week|day|period|год|дата|время|месяц)", re.IGNORECASE)
 
 
 def _is_classification(spec: TaskSpec) -> bool:
@@ -74,8 +75,15 @@ def time_values(series: pd.Series) -> np.ndarray | None:
 
 
 def duplicate_groups(features: pd.DataFrame) -> np.ndarray:
-    """Номер группы для каждой строки: строки с одинаковыми признаками — одна группа."""
-    return pd.util.hash_pandas_object(features.astype(str), index=False).to_numpy()
+    """Номер группы для каждой строки: строки с одинаковыми признаками — одна группа.
+
+    Числа и категории pandas хеширует сам (NaN — одинаково); к строке приводим только object, где бывают смешанные
+    типы. astype(str) для всей таблицы на 1M × 40 — 78 с и +2.6 ГБ на каждую гипотезу (ревью #150).
+    """
+    text = [c for c in features.columns if features[c].dtype == object]
+    if text:
+        features = features.astype(dict.fromkeys(text, str))
+    return pd.util.hash_pandas_object(features, index=False).to_numpy()
 
 
 def _rare_mask(spec: TaskSpec, y: np.ndarray, n_folds: int) -> np.ndarray:
@@ -154,13 +162,38 @@ def make_folds(
     t = time_values(train[column])
     if t is None:
         raise ValueError(f"колонка {column!r} не похожа на время")
-    return _time_folds(t, n_folds)
+    folds = _time_folds(t, n_folds)
+    if _is_classification(spec):
+        # Период с одним классом (редкое событие) ломает и обучение, и метрику вроде ROC-AUC — такие фолды выбрасываем
+        y = np.asarray(y)
+        folds = [(tr, va) for tr, va in folds if len(np.unique(y[tr])) > 1 and len(np.unique(y[va])) > 1]
+        if not folds:
+            raise ValueError(f"схема time:{column}: в каждом фолде обучение или проверка содержат один класс")
+    return folds
+
+
+def _time_folds_ok(spec: TaskSpec, train: pd.DataFrame, column: str, features: list[str]) -> bool:
+    """Схема time:<колонка> даёт хотя бы 2 рабочих фолда (проверка «всухую», без обучения)."""
+    if spec.target not in train.columns:
+        return True
+    try:
+        folds = make_folds(spec, "time", column, train, features, train[spec.target].to_numpy(), 5, None)
+    except ValueError as err:
+        log.info("Схема time:%s не подходит: %s", column, err)
+        return False
+    if len(folds) < 2:
+        log.info("Схема time:%s не подходит: рабочих фолдов %d", column, len(folds))
+        return False
+    return True
 
 
 def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame, test: pd.DataFrame) -> str:
     """Схема по умолчанию, похожая на то, как устроен скрытый test. Вызывать один раз до цикла (ADR 0008, D1).
 
     1. Есть колонка времени, и test лежит после train → time:<колонка> (обучение на прошлом, проверка на будущем).
+       Колонка — время, только если имя «про время», это даты строкой или значений не больше TIME_MAX_PERIODS:
+       номер строки (record_no) на случайном разбиении тоже «продолжается» в test, но временем не является.
+       Кандидат, у которого после выброса фолдов с одним классом осталось меньше 2 фолдов, пропускается.
     2. Иначе ≥ DUPLICATE_SHARE строк train — полные дубликаты признаков → group:duplicates.
     3. Иначе kfold / stratified.
     """
@@ -173,17 +206,22 @@ def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame,
         if t_train is None or t_test is None or np.isnan(t_test).all():
             continue
         t_train, t_test = t_train[~np.isnan(t_train)], t_test[~np.isnan(t_test)]
-        if len(np.unique(t_train)) < TIME_MIN_PERIODS:
+        n_values = len(np.unique(t_train))
+        if n_values < TIME_MIN_PERIODS:
+            continue
+        is_date_text = pd.to_numeric(train[col], errors="coerce").notna().mean() < TIME_PARSE_SHARE
+        if not (TIME_NAME_HINT.search(col) or is_date_text or n_values <= TIME_MAX_PERIODS):
             continue
         # test «после» train: почти весь test не раньше почти всего train, а середина test — строго позже.
         # Строгость отсекает почти постоянные колонки (флаг, который почти всегда 0): у них «0 ≥ 0» выполняется
         q95_train = np.quantile(t_train, 0.95)
         if np.quantile(t_test, 0.05) >= q95_train and np.median(t_test) > q95_train:
             candidates.append(col)
-    if candidates:
-        candidates.sort(key=lambda c: (not TIME_NAME_HINT.search(c), len(np.unique(train[c].dropna()))))
-        log.info("Схема валидации: по времени (%s) — test лежит после train; кандидаты: %s", candidates[0], candidates)
-        return f"time:{candidates[0]}"
+    candidates.sort(key=lambda c: (not TIME_NAME_HINT.search(c), len(np.unique(train[c].dropna()))))
+    for col in candidates:
+        if _time_folds_ok(spec, train, col, features):
+            log.info("Схема валидации: по времени (%s) — test лежит после train; кандидаты: %s", col, candidates)
+            return f"time:{col}"
     if features:
         share = float(pd.Series(duplicate_groups(train[features])).duplicated(keep=False).mean())
         if share >= DUPLICATE_SHARE:

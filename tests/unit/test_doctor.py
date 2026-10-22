@@ -76,3 +76,46 @@ def test_not_logged_in_is_red_without_retries(fake_gh):
     calls = fake_gh([NOT_LOGGED], repo_code=1)
     assert _login(doctor.check_gh()).status == doctor.FAIL
     assert calls["auth"] == 1
+
+
+# ------------------------------------------------------------------ запрос к LLM
+
+
+@pytest.fixture
+def fake_llm(monkeypatch):
+    """Подменяем LLMClient: настоящий .env не читаем, в сеть не ходим."""
+    import dotenv
+
+    from agent.llm_client import LLMClient
+
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **kw: False)
+    monkeypatch.setenv("LLM_CACHE_DIR", "")
+
+    def setup(available, answer):
+        monkeypatch.setattr(LLMClient, "available", lambda self: available)
+        monkeypatch.setattr(LLMClient, "chat", lambda self, *a, **kw: answer)
+
+    return setup
+
+
+def test_llm_call_none_answer_is_fail_not_crash(fake_llm):
+    """chat() вернул None (LLM не ответила) — ❌ с пояснением, а не AttributeError до печати таблицы."""
+    fake_llm(available=True, answer=None)
+    check = doctor.check_llm_call()
+    assert check.status == doctor.FAIL
+    assert "нет ответа" in check.detail
+
+
+def test_llm_call_without_client_says_why(fake_llm):
+    """Нет ключа или LLM_MOCK=1 — говорим об этом прямо, а не отсылаем к пустому логу."""
+    fake_llm(available=False, answer=None)
+    check = doctor.check_llm_call()
+    assert check.status == doctor.FAIL
+    assert "клиент не создан" in check.detail
+
+
+def test_llm_call_ok_shows_answer_and_time(fake_llm):
+    fake_llm(available=True, answer="  готов\n")
+    check = doctor.check_llm_call()
+    assert check.status == doctor.OK
+    assert check.detail.startswith("готов за ")

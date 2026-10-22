@@ -107,3 +107,89 @@ def test_choose_validation_ignores_almost_constant_flag():
     train = pd.DataFrame({"flag": flag_train, "x": rng.normal(size=500)})
     test = pd.DataFrame({"flag": flag_test, "x": rng.normal(size=200)})
     assert not choose_validation(_spec(), _profile(["flag", "x"]), train, test).startswith("time")
+
+
+def _rare_event(n_months=6, per_month=200, seed=3):
+    """Бинарная задача с редким событием по месяцам; в месяцах 1 и 3 событий нет совсем (ревью #150)."""
+    rng = np.random.default_rng(seed)
+    month = np.repeat(np.arange(1, n_months + 1), per_month)
+    x = rng.normal(size=len(month))
+    y = np.where((x > 2.0) & ~np.isin(month, [1, 3]), "1", "0")
+    y[np.flatnonzero(~np.isin(month, [1, 3]))[::40]] = "1"  # в остальных месяцах события точно есть
+    return pd.DataFrame({"month": month, "x": x, "y": y})
+
+
+def test_time_folds_drop_periods_with_one_class():
+    train = _rare_event()
+    spec = _spec(TaskType.BINARY, ["0", "1"])
+    folds = make_folds(spec, "time", "month", train, ["month", "x"], train["y"].to_numpy(), 5, _split)
+    assert folds
+    for tr, va in folds:
+        assert train["y"].iloc[tr].nunique() == 2 and train["y"].iloc[va].nunique() == 2
+
+
+def test_rare_event_with_time_scheme_does_not_fail():
+    """Классификация + time: период без положительных не роняет гипотезу (ROC-AUC на одном классе не считается)."""
+    from interfaces.schemas import Hypothesis, HypothesisKind, MetricSpec, RunBudget
+    from ml.experiment import run_experiment
+
+    train = _rare_event()
+    spec = _spec(TaskType.BINARY, ["0", "1"]).model_copy(
+        update={"metric": MetricSpec(name="roc_auc", greater_is_better=True)}
+    )
+    hyp = Hypothesis(
+        id="h",
+        kind=HypothesisKind.MODEL,
+        title="тест",
+        params={"validation": "time:month", "model_params": {"n_estimators": 20}},
+    )
+    result = run_experiment(spec, _profile(["month", "x"]), hyp, train, RunBudget())
+    assert result.status.value == "ok", result.error
+
+
+def test_choose_validation_skips_time_without_two_working_folds():
+    """Событие только в последнем месяце: у time нет ни одного фолда с двумя классами → другая схема."""
+    rng = np.random.default_rng(4)
+    month = np.repeat(np.arange(1, 7), 100)
+    train = pd.DataFrame({"month": month, "x": rng.normal(size=600)})
+    train["y"] = np.where((month == 6) & (train["x"] > 0), "1", "0")
+    test = pd.DataFrame({"month": np.full(50, 7), "x": rng.normal(size=50)})
+    chosen = choose_validation(_spec(TaskType.BINARY, ["0", "1"]), _profile(["month", "x"]), train, test)
+    assert not chosen.startswith("time")
+
+
+def test_choose_validation_row_number_is_not_time():
+    """Номер строки на случайном разбиении «продолжается» в test, но это не время (ревью #150)."""
+    rng = np.random.default_rng(5)
+    train = pd.DataFrame({"record_no": np.arange(400), "x": rng.normal(size=400)})
+    test = pd.DataFrame({"record_no": np.arange(400, 500), "x": rng.normal(size=100)})
+    assert choose_validation(_spec(), _profile(["record_no", "x"]), train, test) == "kfold"
+    # те же номера, но имя «про время» — время
+    named = train.rename(columns={"record_no": "day_index"})
+    named_test = test.rename(columns={"record_no": "day_index"})
+    assert choose_validation(_spec(), _profile(["day_index", "x"]), named, named_test) == "time:day_index"
+
+
+def test_time_name_hint_needs_word_start():
+    from ml.validation import TIME_NAME_HINT
+
+    assert TIME_NAME_HINT.search("Year_Factor") and TIME_NAME_HINT.search("sale_date")
+    assert not TIME_NAME_HINT.search("update_count")
+
+
+def test_duplicate_groups_without_text_conversion_of_numbers():
+    """Группы те же, что при astype(str): числа, NaN, категории и object со смешанными типами."""
+    from ml.validation import duplicate_groups
+
+    df = pd.DataFrame(
+        {
+            "a": [1.0, 1.0, np.nan, np.nan, 2.0],
+            "c": pd.Categorical(["x", "x", "y", "y", "x"]),
+            "o": ["s", "s", 3, 3, "s"],
+        }
+    )
+    groups = duplicate_groups(df)
+    assert groups[0] == groups[1] and groups[2] == groups[3]
+    assert len(set(groups)) == 3
+    reference = pd.util.hash_pandas_object(df.astype(str), index=False).to_numpy()
+    assert (pd.Series(groups).factorize()[0] == pd.Series(reference).factorize()[0]).all()

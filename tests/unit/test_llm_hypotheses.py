@@ -1,6 +1,7 @@
 """Гипотезы от LLM: разбор ответа, фильтры, запасной playbook и живучесть цикла. Настоящая LLM не вызывается."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,12 +34,14 @@ class FakeLLM:
     def __init__(self, answer, available=True):
         self.answer, self._available = answer, available
         self.requests, self.rub_spent, self.calls = 0, 0.0, 0
+        self.kwargs = None
 
     def available(self):
         return self._available
 
     def chat_json(self, messages, **kwargs):
         self.requests += 1
+        self.kwargs = kwargs
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -169,3 +172,39 @@ def test_loop_survives_any_llm_answer(spec, profile, monkeypatch, answer):
     assert len(history) == 5
     assert len({h.id for h, _ in history}) == 5  # без повторов
     assert llm.requests == 2  # 4 итерации по 3 гипотезы за запрос
+
+
+def test_budget_positional_as_in_protocol(spec, profile):
+    # контракт 1.1 (D3): propose_hypotheses(spec, profile, history, k, budget)
+    llm = FakeLLM([GOOD])
+    budget = RunBudget(total_seconds=1000, safety_seconds=0)
+    out = propose_hypotheses(spec, profile, baseline_history(), 3, budget, llm=llm)
+    assert out[0].id == "lgbm_l2"
+    assert 990 < llm.kwargs["seconds_left"] <= 1000  # остаток бюджета дошёл до LLM-клиента
+
+
+def test_no_time_left_playbook_only(spec, profile, monkeypatch):
+    def no_request(**kwargs):
+        raise AssertionError("при нехватке времени запроса к LLM быть не должно")
+
+    monkeypatch.setenv("LLM_MOCK", "1")
+    monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
+    client = LLMClient()
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=no_request)))
+    budget = RunBudget(total_seconds=60, safety_seconds=0)
+    out = propose_hypotheses(spec, profile, baseline_history(), k=2, budget=budget, llm=client)
+    assert [h.source for h in out] == ["playbook", "playbook"]
+
+
+def test_loop_passes_budget(spec, profile, monkeypatch):
+    seen = []
+
+    def fake_propose(spec, profile, history, k=3, budget=None, llm=None, memory=None):
+        seen.append(budget)
+        return []
+
+    monkeypatch.setattr(loop, "propose_hypotheses", fake_propose)
+    budget = RunBudget()
+    history = baseline_history()
+    loop.run_autoresearch(spec, profile, None, budget, history, history[0], lambda h, r: None, llm=FakeLLM(None))
+    assert seen == [budget]

@@ -7,7 +7,7 @@
 Скрытый ключ optuna — {trials, timeout, folds, rows}: подбор model_params (ml/tuning.py). Его нет в списке ниже,
 поэтому LLM и playbook его не выбирают: на public/regression подбор на KFold честно хуже бейзлайна (год 5: RMSE 53.99
 против 51.25, ревью #115) — он оптимизирует утечку через повторы объектов. Теперь подбор идёт на схеме гипотезы
-(params.validation): на time:Year_Factor честно 45.92 против 51.25 (ADR 0012). Вернуть в список, когда solution.py
+(params.validation): на time:Year_Factor честно 45.92 против 51.25 (ADR 0013). Вернуть в список, когда solution.py
 передаёт choose_validation во все гипотезы — иначе по умолчанию снова kfold.
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):

@@ -6,9 +6,16 @@
   * Все ответы кэшируются на диск (LLM_CACHE_DIR): повторный запуск на той же задаче не тратит рубли.
   * Считаем потраченные рубли по usage из ответа. Цены — в .env (⚠️ уточнить у организаторов).
 
+  * Запрос знает остаток бюджета (ADR 0008, D3): ждём ответа не дольше LLM_TIME_SHARE оставшегося времени,
+    а если это меньше MIN_CALL_SECONDS — не зовём LLM совсем (полный таймаут с повторами — до 6 минут).
+
   * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (2–2.5 тыс. токенов
     на промпт гипотез) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
     в обоих вариантах и /no_think не действуют), поэтому к каждому запросу добавляем запас REASONING_TOKENS.
+
+  * openai любую ошибку отправки (кривой ключ, URL без схемы, отказ сервера, прокси) показывает одинаково —
+    «Connection error.». Поэтому в лог пишем всю цепочку причин (ключ в ней скрываем), а ключ и URL из
+    окружения чистим от пробелов, \\r\\n и кавычек: .env из Windows даёт «Illegal header value b'Bearer …\\r'».
 
 Переменные окружения: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL (как в baseline.py организаторов),
 LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
@@ -20,18 +27,29 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from runtime.log import get_logger
 
 log = get_logger("llm")
 
 DEFAULT_REASONING_TOKENS = 3000
+MAX_RETRIES = 2
+LLM_TIME_SHARE = 0.25  # какую долю оставшегося времени можно ждать LLM: остальное — экспериментам
+MIN_CALL_SECONDS = 30.0  # запрос гипотез с рассуждениями идёт 10–20 с; меньше 30 с ждать бессмысленно
+
+
+def _env(name: str) -> str:
+    """Значение переменной без пробелов, \\r\\n и обрамляющих кавычек (частые ошибки при правке .env)."""
+    return os.getenv(name, "").strip().strip("\"'").strip()
 
 
 class LLMClient:
     def __init__(self, rub_limit: float = 0.0, timeout: float = 120.0):
-        self.model = os.getenv("OPENAI_MODEL", "")
+        self.model = _env("OPENAI_MODEL")
+        self.timeout = timeout
         self.rub_limit = rub_limit
         self.rub_spent = 0.0
         self.calls = 0
@@ -42,22 +60,49 @@ class LLMClient:
         cache = os.getenv("LLM_CACHE_DIR")
         self.cache_dir = Path(cache) if cache else None
         self._client = None
-        if os.getenv("LLM_MOCK") == "1" or not os.getenv("OPENAI_API_KEY") or not self.model:
+        self._api_key = _env("OPENAI_API_KEY")
+        if os.getenv("LLM_MOCK") == "1" or not self._api_key or not self.model:
             log.warning("LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook")
             return
         from openai import OpenAI  # импорт здесь: без ключа библиотека даже не нужна
 
-        self._client = OpenAI(timeout=timeout, max_retries=2)
+        base_url = _env("OPENAI_BASE_URL") or None  # None — openai возьмёт адрес по умолчанию
+        if base_url and urlsplit(base_url).scheme not in ("http", "https"):
+            log.warning("OPENAI_BASE_URL без http(s):// — запросы упадут с «Connection error»")
+        proxy = any(os.getenv(k) for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"))
+        log.info(
+            "LLM: модель %s, сервер %s%s",
+            self.model,
+            urlsplit(base_url).netloc or base_url if base_url else "по умолчанию",
+            ", через прокси из окружения" if proxy else "",
+        )
+        self._client = OpenAI(api_key=self._api_key, base_url=base_url, timeout=timeout, max_retries=MAX_RETRIES)
 
     def available(self) -> bool:
         if self._client is None or self.failures >= 3:
             return False
         return not (self.rub_limit and self.rub_spent >= self.rub_limit)
 
-    def chat(self, messages: list[dict], temperature: float = 0.2, max_tokens: int = 2000) -> str | None:
-        """Один запрос к модели. Возвращает текст ответа или None, если LLM недоступна или упала.
+    def time_limit(self, seconds_left: float | None) -> float | None:
+        """Сколько ждать ответа при таком остатке бюджета: None — без ограничения, 0 — не звать LLM."""
+        if seconds_left is None:
+            return None
+        limit = LLM_TIME_SHARE * seconds_left
+        if limit < MIN_CALL_SECONDS:
+            return 0.0
+        return None if limit >= self.timeout * (1 + MAX_RETRIES) else limit
+
+    def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.2,
+        max_tokens: int = 2000,
+        seconds_left: float | None = None,
+    ) -> str | None:
+        """Один запрос к модели. Возвращает текст ответа или None, если LLM недоступна, упала или нет времени.
 
         max_tokens — сколько нужно на сам ответ; к нему добавляется запас на рассуждения модели.
+        seconds_left — остаток бюджета агента (budget.seconds_left()); None — не ограничивать.
         """
         key = hashlib.sha256(json.dumps([self.model, messages, temperature], ensure_ascii=False).encode()).hexdigest()
         cached = self._cache_get(key)
@@ -65,8 +110,14 @@ class LLMClient:
             return cached
         if not self.available():
             return None
+        limit = self.time_limit(seconds_left)
+        if limit == 0:
+            log.info("До конца бюджета %.0f с — LLM не зовём, гипотезы из playbook", seconds_left)
+            return None
+        # мало времени — одна попытка с коротким таймаутом вместо таймаута с повторами
+        client = self._client if limit is None else self._client.with_options(timeout=limit, max_retries=0)
         try:
-            response = self._client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
@@ -74,7 +125,7 @@ class LLMClient:
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
             self.failures += 1
-            log.warning("LLM ошибка (%d подряд): %s", self.failures, exc)
+            log.warning("LLM ошибка (%d подряд): %s", self.failures, self._describe_error(exc))
             return None
         self.failures = 0
         self.calls += 1
@@ -114,6 +165,18 @@ class LLMClient:
             return objects
         log.warning("LLM вернула невалидный JSON")
         return None
+
+    def _describe_error(self, exc: BaseException) -> str:
+        """«APIConnectionError: Connection error. ← ConnectError: [Errno 111] …» — вся цепочка, ключ скрыт."""
+        parts, seen = [], set()
+        while exc is not None and id(exc) not in seen and len(parts) < 5:
+            seen.add(id(exc))
+            parts.append(f"{type(exc).__name__}: {exc}")
+            exc = exc.__cause__ or exc.__context__
+        text = " ← ".join(parts)
+        if self._api_key:
+            text = text.replace(self._api_key, "***")
+        return re.sub(r"Bearer\s+[^\s'\"]+", "Bearer ***", text)  # httpx печатает заголовок целиком
 
     def _cache_get(self, key: str) -> str | None:
         if self.cache_dir and (self.cache_dir / f"{key}.txt").exists():
