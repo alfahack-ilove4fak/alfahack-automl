@@ -98,3 +98,28 @@ def test_foreign_scheme_skipped_before_run(spec, profile, monkeypatch, run_schem
     assert (seen == []) is skipped
     if skipped:
         assert history[1][1].status == ExperimentStatus.SKIPPED and "несравнимы" in history[1][1].error
+
+
+def test_final_gets_params_written_by_cv(spec, profile, monkeypatch):
+    """#206: в финал уходит запущенная копия — с _best_iteration и _proba_weights из CV, а не исходная гипотеза."""
+
+    def fake_experiment(spec, profile, h, train, budget):
+        h.params["_best_iteration"] = 137  # как run_experiment: пишет в params той гипотезы, что запускал
+        h.params["_proba_weights"] = [1.0, 1.2]
+        return result(h.id, 40.0, f"{h.params.get('validation', 'kfold')}-5")
+
+    monkeypatch.setattr(loop, "run_experiment", fake_experiment)
+    batches = [[hyp("a")]]
+    monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: batches.pop(0) if batches else [])
+    finals = []
+    base = (hyp("baseline", validation="time:Year"), result("baseline", 42.0, "time:Year-5"))
+    history = [base]
+    best = loop.run_autoresearch(
+        spec, profile, None, RunBudget(), history, base, lambda h, r: finals.append(h), llm=None
+    )
+    assert [h.id for h in finals] == ["a"]
+    assert finals[0].params["_best_iteration"] == 137 and finals[0].params["_proba_weights"] == [1.0, 1.2]
+    assert finals[0].params["validation"] == "time:Year"
+    assert best[0] is finals[0]
+    # в историю по-прежнему исходная гипотеза: повторы ищутся по предложенным params
+    assert "_best_iteration" not in history[1][0].params and "validation" not in history[1][0].params
