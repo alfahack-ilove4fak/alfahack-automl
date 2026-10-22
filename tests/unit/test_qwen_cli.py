@@ -263,3 +263,18 @@ def test_run_summarises_new_log_and_spend(llm_env, monkeypatch, tmp_path, capsys
     assert seen["env"]["LLM_MOCK"] == "0" and seen["env"]["LLM_CACHE_DIR"] == ""
     out = capsys.readouterr().out
     assert "предложено: 5, принято: 1" in out and "0.50 ₽" in out
+
+
+def test_parse_agent_log_uses_source_tag():
+    """Метка [llm]/[playbook] в строке итерации важнее угадывания по id."""
+    from qwen import parse_agent_log
+
+    log = (
+        "[  10.0s] INFO  agent.loop: Итерация 1: lgbm_shallow — Неглубокие деревья [llm]\n"
+        "[  20.0s] INFO  agent.loop:   ✓ лучше: 0.50000 → 0.51000 — t=2.5\n"
+        "[  30.0s] INFO  agent.loop: Итерация 2: my_new_idea — Что-то новое [playbook]\n"
+        "[  40.0s] INFO  agent.loop:   ✓ лучше: 0.51000 → 0.52000 — t=2.1\n"
+    )
+    summary = parse_agent_log(log, known_ids={"lgbm_shallow"})
+    assert summary.accepted == ["lgbm_shallow", "my_new_idea"]
+    assert summary.accepted_llm == ["lgbm_shallow"]

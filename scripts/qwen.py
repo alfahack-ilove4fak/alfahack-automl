@@ -355,7 +355,7 @@ def cmd_budget(args: argparse.Namespace, from_shell: set[str]) -> int:
 
 LOG_PROPOSED = re.compile(r"LLM предложила (\d+) гипотез \(потрачено ([\d.]+) ₽ за (\d+) запросов\)")
 LOG_ERROR = re.compile(r"LLM ошибка \((\d+) подряд\): (.*)")
-LOG_ITERATION = re.compile(r"Итерация \d+: (\S+) — ")
+LOG_ITERATION = re.compile(r"Итерация \d+: (\S+) — .*?(?:\[(llm|playbook|baseline)\])?\s*$")
 LOG_ACCEPTED = "✓ лучше:"
 LOG_TRUNCATED = "LLM упёрлась в лимит"
 LOG_OFF = "LLM выключена"
@@ -385,10 +385,11 @@ def playbook_ids() -> set[str]:
 def parse_agent_log(text: str, known_ids: set[str] | None = None) -> LogSummary:
     """Что делала LLM в прогоне: пачки и гипотезы, запросы, ошибки, какие принятые гипотезы — от LLM.
 
-    Принятая гипотеза считается «от LLM», если её id не из playbook (в логе нет поля source).
+    Источник гипотезы — метка `[llm]`/`[playbook]` в строке «Итерация …»; в старых логах без метки
+    принятая гипотеза считается «от LLM», если её id не из playbook.
     """
     known_ids = playbook_ids() if known_ids is None else known_ids
-    summary, current = LogSummary(), None
+    summary, current, source = LogSummary(), None, None
     for line in text.splitlines():
         if LOG_OFF in line:
             summary.llm_off = True
@@ -401,10 +402,10 @@ def parse_agent_log(text: str, known_ids: set[str] | None = None) -> LogSummary:
         elif LOG_TRUNCATED in line:
             summary.truncated += 1
         elif m := LOG_ITERATION.search(line):
-            current = m.group(1)
+            current, source = m.group(1), m.group(2)
         elif LOG_ACCEPTED in line and current:
             summary.accepted.append(current)
-            if current not in known_ids:
+            if source == "llm" or (source is None and current not in known_ids):
                 summary.accepted_llm.append(current)
     return summary
 
