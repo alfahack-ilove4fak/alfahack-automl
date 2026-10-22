@@ -121,8 +121,9 @@ def run_code(
                 kwargs["start_new_session"] = True  # своя группа процессов → можно убить всё дерево
                 if resource is not None and mem_mb > 0:
                     kwargs["preexec_fn"] = _limit_memory(mem_mb)
+            # -I игнорирует PYTHONIOENCODING из _clean_env → UTF-8 включаем флагом, иначе на Windows вывод в cp1252
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-u", str(script)],
+                [sys.executable, "-I", "-X", "utf8", "-u", str(script)],
                 cwd=workdir,
                 env=_clean_env(workdir, env),
                 stdin=subprocess.DEVNULL,
