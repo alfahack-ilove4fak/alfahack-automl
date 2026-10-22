@@ -107,6 +107,9 @@ def test_hang_in_loop_is_cut_by_watchdog(tmp_path, mode):
     _assert_valid_submission(task_md)
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="SIGTERM на Windows = TerminateProcess, обработчик не вызывается; платформа — Linux"
+)
 def test_sigterm_in_the_middle_of_loop(tmp_path):
     """Платформа (или docker stop) прислала SIGTERM, пока цикл завис, — ответ с бейзлайном остаётся валидным."""
     proc, task_md = _start(tmp_path, "sleep", budget_sec=600, safety_sec=90)
