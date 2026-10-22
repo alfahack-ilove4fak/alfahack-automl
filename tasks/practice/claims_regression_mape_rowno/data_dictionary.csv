@@ -1,0 +1,12 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор убытка
+record_no,feature,int,Порядковый номер записи в журнале убытков
+region,feature,category,Регион
+policy_type,feature,category,Тип полиса
+channel,feature,category,Канал продажи полиса
+vehicle_age,feature,int,"Возраст автомобиля, лет; бывают пропуски"
+driver_age,feature,int,Возраст водителя
+sum_insured,feature,numeric,"Страховая сумма, ₽"
+prior_claims,feature,int,Убытков по полису раньше
+deductible,feature,int,"Франшиза, ₽"
+claim_amount,target,numeric,"Сумма выплаты, ₽"
