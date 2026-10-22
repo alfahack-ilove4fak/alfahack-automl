@@ -36,6 +36,7 @@ class FakeLLM:
     def chat_json(self, messages, **kwargs):
         self.requests += 1
         self.last_messages = messages
+        self.last_kwargs = kwargs
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -111,6 +112,12 @@ def test_skipped_when_llm_unavailable_or_no_time(spec, profile, on):
     llm = FakeLLM(REJECT_B)
     assert critique(spec, profile, [], [hyp("b")], llm, RunBudget(total_seconds=100, safety_seconds=0)) == {}
     assert llm.requests == 0
+
+
+def test_remaining_time_passed_to_client(spec, profile, on):
+    llm = FakeLLM([])
+    critique(spec, profile, [], [hyp("a")], llm, RunBudget(total_seconds=1000, safety_seconds=0))
+    assert 990 < llm.last_kwargs["seconds_left"] <= 1000  # LLMClient ограничит ожидание четвертью остатка
 
 
 def test_candidates_one_per_line():
