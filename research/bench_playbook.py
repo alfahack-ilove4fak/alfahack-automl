@@ -184,28 +184,30 @@ def bench_task(task_md: Path, only: set[str] | None) -> list[dict]:
 
 
 def summarize(rows: pd.DataFrame) -> pd.DataFrame:
-    """Сводка по гипотезам: выигрыш на честной части и решения агента (порядок playbook — по wins, потом gain)."""
+    """Сводка по гипотезам — порядок playbook: доля задач, где гипотеза честно лучше бейзлайна, потом медиана выигрыша.
+
+    Медиана, а не среднее: на метриках с маленьким бейзлайном (F1 редкого класса ≈ 0.18) любой сдвиг даёт ±50–100%
+    и перекрывает остальные задачи. accepted — сколько раз агент принял бы гипотезу, accepted_and_win — из них по делу.
+    """
     rows = rows.drop_duplicates(["task", "id"], keep="last")  # несколько CSV: бейзлайн задачи считается в каждом
     df = rows[rows["id"] != "baseline"].copy()
     if df.empty or "honest_gain" not in df:
         return pd.DataFrame()
     df["honest_win"] = df["honest_gain"] > 0
     df["accepted"] = df["accepted"].eq(True) if "accepted" in df else False
-    # выигрыш в долях бейзлайна — чтобы складывать задачи с разными метриками
+    # выигрыш в % от бейзлайна — чтобы сравнивать задачи с разными метриками
     base = rows[rows["id"] == "baseline"].set_index("task")["honest"]
-    df["honest_rel"] = df["honest_gain"] / df["task"].map(base).abs()
-    return (
-        df.groupby("id", sort=False)
-        .agg(
-            tasks=("task", "size"),
-            wins=("honest_win", "sum"),
-            mean_rel_gain=("honest_rel", "mean"),
-            accepted=("accepted", "sum"),
-            accepted_and_win=("honest_win", lambda w: int((w & df.loc[w.index, "accepted"]).sum())),
-            seconds=("seconds", "mean"),
-        )
-        .sort_values(["wins", "mean_rel_gain"], ascending=False)
+    df["honest_rel"] = 100 * df["honest_gain"] / df["task"].map(base).abs()
+    summary = df.groupby("id", sort=False).agg(
+        tasks=("task", "size"),
+        wins=("honest_win", "sum"),
+        median_gain_pct=("honest_rel", "median"),
+        accepted=("accepted", "sum"),
+        accepted_and_win=("honest_win", lambda w: int((w & df.loc[w.index, "accepted"]).sum())),
+        seconds=("seconds", "mean"),
     )
+    summary.insert(2, "win_share", summary["wins"] / summary["tasks"])
+    return summary.sort_values(["win_share", "median_gain_pct"], ascending=False)
 
 
 def main() -> int:

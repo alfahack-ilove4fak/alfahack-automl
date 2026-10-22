@@ -90,4 +90,17 @@ def test_summarize_counts_honest_wins_and_agent_decisions():
     )
     row = summarize(rows).loc["h"]
     assert (row.tasks, row.wins, row.accepted, row.accepted_and_win) == (2, 1, 2, 1)
-    assert np.isclose(row.mean_rel_gain, (0.1 - 0.25) / 2)
+    assert row.win_share == 0.5
+    assert np.isclose(row.median_gain_pct, (10 - 25) / 2)
+
+
+def test_summarize_orders_by_win_share_then_median():
+    rows = pd.DataFrame(
+        [{"task": t, "id": "baseline", "honest": 1.0, "seconds": 1} for t in "abc"]
+        + [
+            {"task": t, "id": "wide", "honest_gain": g, "seconds": 1}
+            for t, g in zip("abc", [0.01, 0.01, -0.5], strict=True)
+        ]
+        + [{"task": "a", "id": "narrow", "honest_gain": 0.2, "seconds": 1}]  # 1/1 задач — выше, чем 2/3
+    )
+    assert list(summarize(rows).index) == ["narrow", "wide"]
