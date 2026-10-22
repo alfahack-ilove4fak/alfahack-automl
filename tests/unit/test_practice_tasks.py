@@ -79,6 +79,11 @@ def test_trap_tasks_keep_their_traps():
     assert "`vsc`" in batches_md and "additive_mg" not in batches_md  # ошибка в описании — намеренная
     assert {"viscosity", "additive_mg"} <= batches_cols
 
+    search_train = pd.read_csv(PRACTICE / "search_ranking_ndcg" / "train.csv")
+    search_test = pd.read_csv(PRACTICE / "search_ranking_ndcg" / "test.csv")
+    assert not set(search_train["query_id"]) & set(search_test["query_id"])  # в test — новые запросы
+    assert set(search_train["relevance"]) == {0, 1, 2, 3}
+
     claims_train = pd.read_csv(PRACTICE / "claims_regression_mape_rowno" / "train.csv")
     claims_test = pd.read_csv(PRACTICE / "claims_regression_mape_rowno" / "test.csv")
     assert claims_test["record_no"].min() > claims_train["record_no"].max()
