@@ -115,6 +115,16 @@ def test_chat_counts_rubles_and_calls(client):
     assert client.rub_spent == pytest.approx(2.0)
 
 
+def test_chat_counts_tokens_and_seconds(client):
+    # при равном балле организаторы сравнивают расход токенов, затем время — считаем оба за прогон
+    client._client = FakeOpenAI(['{"ok": true}', '{"ok": 2}'])
+    client.chat_json(MESSAGES)
+    client.chat_json(MESSAGES + [{"role": "user", "content": "ещё"}])
+    assert (client.prompt_tokens, client.completion_tokens) == (2000, 1000)
+    assert client.seconds >= 0
+    assert "токенов 2000 вход / 1000 выход" in client.summary() and "запросов 2" in client.summary()
+
+
 def test_api_errors_disable_llm_after_three_in_row(client):
     client._client = FakeOpenAI([TimeoutError("нет сети")] * 3)
     for _ in range(3):

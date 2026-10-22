@@ -71,12 +71,12 @@ def parse_task(task_md: Path) -> TaskSpec:
         id_column, target = submission_columns[0], submission_columns[-1]
         if target not in train_cols:
             # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
-            target = _guess_target(train_cols, test_cols, dictionary)
+            target = _guess_target(train_cols, test_cols, dictionary, files["test"])
             notes.append(
                 f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
             )
     else:
-        target = _guess_target(train_cols, test_cols, dictionary)
+        target = _guess_target(train_cols, test_cols, dictionary, files["test"])
         id_column = _guess_id(test_cols, dictionary)
         submission_columns = [id_column, target]
         notes.append("Нет sample_submission: id и target определены по train/test/словарю")
@@ -180,20 +180,35 @@ def _read_dictionary(path: Path | None) -> dict[str, dict]:
         return {}
     try:
         df = pd.read_csv(path)
+        # формат словаря не гарантирован (вебинар): «Feature, Role, Type» и «feature, role, dtype» — одно и то же
+        df.columns = [str(c).strip().lower() for c in df.columns]
         key = "feature" if "feature" in df.columns else df.columns[0]
         return {str(row[key]): row.to_dict() for _, row in df.iterrows()}
     except Exception:  # noqa: BLE001 — словарь не обязателен
         return {}
 
 
-def _guess_target(train_cols, test_cols, dictionary) -> str:
+def _guess_target(train_cols, test_cols, dictionary, test_path: Path | None = None) -> str:
     for name, row in dictionary.items():
-        if str(row.get("role", "")).lower() == "target" and name in train_cols:
+        if str(row.get("role", "")).strip().lower() == "target" and name in train_cols:
             return name
     extra = [c for c in train_cols if c not in test_cols]
     if len(extra) == 1:
         return extra[0]
+    if not extra and test_path is not None:
+        # target есть и в test, но пустой (заготовка под ответ): ищем колонку train, которая в test вся пустая
+        empty = _empty_test_columns(test_path, [c for c in train_cols if c in test_cols])
+        if len(empty) == 1:
+            return empty[0]
     raise ValueError(f"Не удалось определить target: колонки только в train = {extra}")
+
+
+def _empty_test_columns(test_path: Path, columns: list[str]) -> list[str]:
+    try:
+        test = pd.read_csv(test_path, usecols=columns)
+    except Exception:  # noqa: BLE001 — не прочитали — значит, не угадали
+        return []
+    return [c for c in columns if test[c].isna().all()]
 
 
 def _guess_id(test_cols, dictionary) -> str:
@@ -207,11 +222,15 @@ def _guess_task_type(y: pd.Series, metric_name: str | None, dict_row: dict | Non
     if metric_name is not None and METRICS[metric_name].prediction == "value":
         return TaskType.REGRESSION
     n_unique = y.nunique(dropna=True)
+    # 0.0/1.0 (так читаются целые метки с пропусками или записанные как float) — те же целые метки
+    integer_values = pd.api.types.is_integer_dtype(y) or (
+        pd.api.types.is_float_dtype(y) and bool((y.dropna() % 1 == 0).all())
+    )
     is_categorical = (
         y.dtype == object
         or str((dict_row or {}).get("dtype", "")).lower() in ("category", "categorical", "binary")
         or metric_name is not None  # метрика классификации найдена в тексте
-        or (pd.api.types.is_integer_dtype(y) and n_unique <= MAX_CLASSES_FOR_NUMERIC_TARGET)
+        or (integer_values and n_unique <= MAX_CLASSES_FOR_NUMERIC_TARGET)
     )
     if not is_categorical:
         return TaskType.REGRESSION

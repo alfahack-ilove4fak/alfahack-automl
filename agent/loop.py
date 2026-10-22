@@ -94,6 +94,8 @@ def run_autoresearch(
             on_new_best(hyp, result)
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
+    if hasattr(llm, "summary"):  # в тестах вместо LLMClient бывают подмены без счётчиков
+        log.info("LLM за цикл: %s", llm.summary())
     return best
 
 

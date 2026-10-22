@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -54,6 +55,10 @@ class LLMClient:
         self.rub_spent = 0.0
         self.calls = 0
         self.failures = 0
+        # расход за прогон: при равном балле организаторы сравнивают токены, затем время (вебинар)
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.seconds = 0.0
         self._price_in = float(os.getenv("LLM_PRICE_RUB_PER_1K_INPUT", 0))
         self._price_out = float(os.getenv("LLM_PRICE_RUB_PER_1K_OUTPUT", 0))
         self.reasoning_tokens = int(os.getenv("LLM_REASONING_TOKENS", DEFAULT_REASONING_TOKENS))
@@ -116,6 +121,7 @@ class LLMClient:
             return None
         # мало времени — одна попытка с коротким таймаутом вместо таймаута с повторами
         client = self._client if limit is None else self._client.with_options(timeout=limit, max_retries=0)
+        began = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=self.model,
@@ -124,9 +130,12 @@ class LLMClient:
                 max_tokens=max_tokens + self.reasoning_tokens,
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
+            self.seconds += time.monotonic() - began
             self.failures += 1
             log.warning("LLM ошибка (%d подряд): %s", self.failures, self._describe_error(exc))
             return None
+        elapsed = time.monotonic() - began
+        self.seconds += elapsed
         self.failures = 0
         self.calls += 1
         choice = response.choices[0]
@@ -139,12 +148,22 @@ class LLMClient:
                 "пустой" if not text.strip() else "обрезан",
             )
         if response.usage:
-            self.rub_spent += (
-                response.usage.prompt_tokens * self._price_in + response.usage.completion_tokens * self._price_out
-            ) / 1000
+            prompt, completion = response.usage.prompt_tokens or 0, response.usage.completion_tokens or 0
+            self.prompt_tokens += prompt
+            self.completion_tokens += completion
+            self.rub_spent += (prompt * self._price_in + completion * self._price_out) / 1000
+            log.info("LLM: ответ за %.1f с, токенов %d вход / %d выход", elapsed, prompt, completion)
         if not truncated:  # обрезанный ответ не кэшируем: после увеличения запаса повторный запрос должен уйти в LLM
             self._cache_put(key, text)
         return text
+
+    def summary(self) -> str:
+        """Расход LLM за прогон одной строкой — для лога и сравнения прогонов."""
+        return (
+            f"запросов {self.calls} (ошибок подряд в конце {self.failures}), "
+            f"токенов {self.prompt_tokens} вход / {self.completion_tokens} выход, "
+            f"ожидание {self.seconds:.0f} с, ₽ {self.rub_spent:.2f}"
+        )
 
     def chat_json(self, messages: list[dict], **kwargs) -> dict | list | None:
         """Запрос, ответ которого должен быть JSON. Достаёт JSON даже из ```json ... ``` обёртки."""
