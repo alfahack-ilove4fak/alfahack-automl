@@ -14,6 +14,7 @@
      тривиального ответа (score) и относительно сильного бейзлайна — лучшего из LightGBM по умолчанию и
      тривиального ответа (model_score); второй ближе к бейзлайну организаторов, по нему сверяемся с public.
 Ответы лежат вне папки задачи — агент их не видит. Результаты дописываются в runs/harness/leaderboard.csv.
+Из CLI .env в корне подхватывается сам (ключ для --llm); сравнить «без LLM / с Qwen» — scripts/qwen.py compare.
 """
 
 from __future__ import annotations
@@ -282,6 +283,18 @@ def render(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def load_env_file(path: Path = ROOT / ".env") -> bool:
+    """Подхватить .env из корня репозитория (ключ Qwen и настройки), не перезаписывая заданные переменные.
+
+    Только для локального запуска: на платформе .env нет, ключ задаёт сама платформа.
+    """
+    if not path.exists():
+        return False
+    from dotenv import load_dotenv
+
+    return load_dotenv(path, override=False)
+
+
 def find_tasks() -> list[Path]:
     return sorted(ROOT.glob("tasks/public/*/task.md")) + sorted(ROOT.glob("tasks/practice/*/task.md"))
 
@@ -325,4 +338,5 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → кириллица роняет вывод
         _stream.reconfigure(encoding="utf-8", errors="replace")
+    load_env_file()  # только CLI: тесты зовут main() без .env
     sys.exit(main())

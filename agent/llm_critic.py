@@ -57,7 +57,9 @@ def critique(
     if messages is None:
         return {}
     try:
-        raw = llm.chat_json(messages, temperature=0.1, max_tokens=MAX_TOKENS, seconds_left=budget.seconds_left())
+        raw = llm.chat_json(
+            messages, temperature=0.1, max_tokens=MAX_TOKENS, seconds_left=budget.seconds_left(), purpose="critic"
+        )
     except Exception:  # noqa: BLE001 — сбой критика не должен останавливать цикл
         log.exception("Критик LLM не ответил — гипотезы проходят без проверки")
         return {}
