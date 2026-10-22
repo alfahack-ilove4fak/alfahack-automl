@@ -115,9 +115,21 @@ def canonical_params(params: dict) -> dict:
     return out
 
 
-def params_key(params: dict) -> str:
-    """Ключ для поиска повторов: одинаковые по сути гипотезы с разными id и записью params совпадают."""
+def params_key(params: dict, run_scheme: str | None = None) -> str:
+    """Ключ для поиска повторов: одинаковые по сути гипотезы с разными id и записью params совпадают.
+
+    run_scheme — схема валидации прогона (её задаёт бейзлайн, ADR 0008, D1). validation, равная ей, из ключа
+    убирается: у гипотез из истории схема записана, а у новых кандидатов её ещё нет — иначе LightGBM по
+    умолчанию не опознавался бы как повтор бейзлайна. Другая схема — другая гипотеза (ревью #164).
+    """
+    if run_scheme and _norm(params.get("validation"), "validation") == _norm(run_scheme, "validation"):
+        params = {k: v for k, v in params.items() if k != "validation"}
     return json.dumps(canonical_params(params), sort_keys=True, ensure_ascii=False, default=str)
+
+
+def run_scheme(history: list[tuple[Hypothesis, ExperimentResult]]) -> str | None:
+    """Схема валидации прогона — из params бейзлайна (первая запись истории); None — обычная CV."""
+    return history[0][0].params.get("validation") if history else None
 
 
 def propose_hypotheses(
@@ -140,12 +152,13 @@ def propose_hypotheses(
 
         out = llm_hypotheses(spec, profile, history, k, llm, memory, budget)
     tried = {h.id for h, _ in history} | {h.id for h in out}
-    seen_params = {params_key(h.params) for h, _ in history} | {params_key(h.params) for h in out}
+    scheme = run_scheme(history)
+    seen_params = {params_key(h.params, scheme) for h, _ in history} | {params_key(h.params, scheme) for h in out}
     for item in load_playbook():
         if len(out) >= k:
             break
         params = item.get("params", {})
-        if item["id"] in tried or params_key(params) in seen_params or not _applies(item, spec, profile):
+        if item["id"] in tried or params_key(params, scheme) in seen_params or not _applies(item, spec, profile):
             continue
         out.append(
             Hypothesis(
@@ -157,5 +170,5 @@ def propose_hypotheses(
                 source="playbook",
             )
         )
-        seen_params.add(params_key(params))
+        seen_params.add(params_key(params, scheme))
     return out
