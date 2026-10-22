@@ -518,3 +518,100 @@ def test_reasoning_effort_can_be_disabled(monkeypatch):
     monkeypatch.setenv("LLM_MOCK", "1")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "")
     assert LLMClient().reasoning_effort == ""
+
+
+# ---------------------------------------------------------------- ответ потоком (stream=True)
+# Прокси организаторов рвёт «тихое» соединение через ~10 с: длинный запрос гипотез без потока падал.
+
+
+def _chunk(text=None, finish=None, usage=None):
+    choices = [] if text is None and finish is None else [
+        SimpleNamespace(delta=SimpleNamespace(content=text), finish_reason=finish)
+    ]  # fmt: skip
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+class FakeStreamOpenAI(FakeOpenAI):
+    """Подмена openai.OpenAI, которая на stream=True отдаёт ответ кусками (или рвёт поток посередине)."""
+
+    def __init__(self, streams):
+        super().__init__([])
+        self.streams = list(streams)
+        self.kwargs = []
+
+    def _create(self, **kwargs):
+        self.requests += 1
+        self.kwargs.append(kwargs)
+        stream = self.streams.pop(0)
+        if isinstance(stream, Exception):
+            raise stream
+        return iter(stream)
+
+
+def _stream_usage(prompt=1000, completion=500):
+    return SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion)
+
+
+def test_stream_assembles_answer_and_counts_usage(client):
+    fake = FakeStreamOpenAI([[_chunk('{"ok"'), _chunk(": true}"), _chunk(finish="stop"), _chunk(usage=_stream_usage())]])
+    client._client = fake
+    assert client.chat_json(MESSAGES) == {"ok": True}
+    assert fake.kwargs[0]["stream"] is True and fake.kwargs[0]["stream_options"] == {"include_usage": True}
+    assert (client.prompt_tokens, client.completion_tokens) == (1000, 500)
+    assert client.rub_spent == pytest.approx(2.0)  # 1000 по 1 ₽/1K + 500 по 2 ₽/1K
+
+
+def test_stream_truncated_answer_detected(client, caplog):
+    client._client = FakeStreamOpenAI([[_chunk('{"a": '), _chunk(finish="length")]])
+    client.chat(MESSAGES)
+    assert "упёрлась в лимит" in caplog.text
+
+
+def _broken_stream():
+    import httpx
+
+    yield _chunk('{"ok"')
+    raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+
+
+def test_stream_broken_midway_is_retried(client):
+    fake = FakeStreamOpenAI([_broken_stream(), [_chunk('{"ok": 1}'), _chunk(finish="stop")]])
+    client._client = fake
+    assert client.chat_json(MESSAGES) == {"ok": 1}
+    assert fake.requests == 2
+
+
+def test_stream_respects_overall_deadline(client, monkeypatch):
+    # таймаут клиента меряет паузу между кусками — общий предел ожидания держим сами
+    clock = iter([0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+    monkeypatch.setattr("agent.llm_client.time.monotonic", lambda: next(clock, 100.0))
+    client._client = FakeStreamOpenAI([[_chunk("a"), _chunk("b"), _chunk(finish="stop")]])
+    assert client.chat(MESSAGES, seconds_left=200) is None  # ждать можно 50 с, а поток идёт 100 с
+
+
+def test_stream_off_by_env(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK", "1")
+    monkeypatch.setenv("LLM_STREAM", "0")
+    monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
+    client = LLMClient()
+    fake = FakeOpenAI(['{"ok": true}'])
+    seen = []
+    original = fake._create
+    fake.chat.completions.create = lambda **kw: seen.append(kw) or original(**kw)
+    client._client = fake
+    assert client.chat_json(MESSAGES) == {"ok": True}
+    assert "stream" not in seen[0]
+
+
+def test_server_without_stream_options_falls_back(client):
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "http://test/v1/chat/completions")
+    rejected = openai.BadRequestError(
+        "unknown field stream_options", response=httpx.Response(400, request=request), body=None
+    )
+    fake = FakeStreamOpenAI([rejected, [_chunk('{"ok": 2}'), _chunk(finish="stop")]])
+    client._client = fake
+    assert client.chat_json(MESSAGES) == {"ok": 2}
+    assert "stream_options" not in fake.kwargs[1] and fake.kwargs[1]["stream"] is True

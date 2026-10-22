@@ -14,6 +14,11 @@
     в обоих вариантах и /no_think не действуют), но можно сократить: reasoning_effort=low в extra_body
     (22.10: рассуждения ≈ в 2.5 раза короче). К каждому запросу добавляем запас REASONING_TOKENS.
 
+  * Ответ получаем потоком (stream=True, LLM_STREAM=1 по умолчанию). Прокси организаторов рвёт соединение, по
+    которому ~10 с не идут данные: обычный запрос гипотез (модель 20–35 с молча рассуждает) падал с «Server
+    disconnected without sending a response», а потоковый проходит (22.10 с машины капитана: 10.2 с обрыв против
+    24.2 с успеха, первый кусок через 2.6 с). Поток собираем в обычный ответ — остальной код не меняется.
+
   * Сервер под нагрузкой рвёт соединение без ответа через 10–17 с. Повторяем с паузами (RETRY_BACKOFF) в пределах
     времени, а после серии сбоев делаем паузу COOLDOWN_SECONDS вместо отключения LLM до конца прогона.
 
@@ -24,7 +29,7 @@
 Переменные окружения: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL (как в baseline.py организаторов),
 LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
 LLM_REASONING_EFFORT (low по умолчанию; пусто — не передавать), LLM_COOLDOWN_SEC (пауза после 3 сбоев, 120 с),
-LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 3000).
+LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 3000), LLM_STREAM (1 — ответ потоком, 0 — одним куском).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import os
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from runtime.log import get_logger
@@ -84,6 +90,7 @@ class LLMClient:
         self._price_out = float(os.getenv("LLM_PRICE_RUB_PER_1K_OUTPUT", 0))
         self.reasoning_tokens = int(os.getenv("LLM_REASONING_TOKENS", DEFAULT_REASONING_TOKENS))
         self.reasoning_effort = os.getenv("LLM_REASONING_EFFORT", DEFAULT_REASONING_EFFORT).strip()
+        self.stream = os.getenv("LLM_STREAM", "1").strip() != "0"
         self._paused_until = 0.0  # после серии сбоев LLM «отдыхает» до этого момента (time.monotonic)
         cache = os.getenv("LLM_CACHE_DIR")
         self.cache_dir = Path(cache) if cache else None
@@ -240,6 +247,9 @@ class LLMClient:
         deadline = None if limit is None else time.monotonic() + limit
         if self.reasoning_effort:
             request["extra_body"] = {"reasoning_effort": self.reasoning_effort}
+        if self.stream:
+            # usage приходит последним куском потока — только если попросить
+            request.update(stream=True, stream_options={"include_usage": True})
         attempt = 0
         while True:
             attempt += 1
@@ -247,12 +257,16 @@ class LLMClient:
             if deadline is not None:
                 client = client.with_options(timeout=max(deadline - time.monotonic(), 1.0), max_retries=0)
             try:
-                return client.chat.completions.create(**request)
+                return _collect_stream(client.chat.completions.create(**request), deadline)
             except Exception as exc:  # noqa: BLE001
                 if "extra_body" in request and _rejects_param(exc, "reasoning_effort"):
                     log.warning("Сервер не принимает reasoning_effort — дальше без него")
                     self.reasoning_effort = ""
                     request.pop("extra_body")
+                    continue
+                if "stream_options" in request and _rejects_param(exc, "stream_options"):
+                    log.warning("Сервер не принимает stream_options — поток без usage")
+                    request.pop("stream_options")
                     continue
                 pause = RETRY_BACKOFF[attempt - 1] if attempt <= len(RETRY_BACKOFF) else None
                 out_of_time = deadline is not None and pause is not None and time.monotonic() + pause + 5 > deadline
@@ -353,13 +367,46 @@ def _complete_objects(text: str) -> list[dict]:
         pos = end
 
 
+def _collect_stream(response, deadline: float | None):
+    """Поток кусков → обычный ответ (choices[0].message.content, finish_reason, usage), как без stream.
+
+    Ответ не потоком (сервер или подмена в тестах проигнорировали stream=True) возвращаем как есть.
+    deadline — общий предел ожидания: таймаут клиента меряет паузу между кусками, а не весь ответ.
+    """
+    if not hasattr(response, "__iter__"):
+        return response
+    parts: list[str] = []
+    finish, usage = None, None
+    try:
+        for chunk in response:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            for choice in getattr(chunk, "choices", None) or []:
+                delta = getattr(choice, "delta", None)
+                if delta is not None and getattr(delta, "content", None):
+                    parts.append(delta.content)
+                if getattr(choice, "finish_reason", None):
+                    finish = choice.finish_reason
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("ответ потоком не уложился в отведённое время")
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    message = SimpleNamespace(content="".join(parts))
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)], usage=usage)
+
+
 def _retryable(exc: BaseException) -> bool:
     """Обрыв, таймаут, 429 и 5xx — временные: имеет смысл повторить. Остальное (400/401/404) — нет."""
     try:
+        import httpx
         import openai
     except ImportError:  # pragma: no cover
         return False
     if isinstance(exc, openai.APIConnectionError | openai.RateLimitError):  # таймаут — подкласс обрыва
+        return True
+    if isinstance(exc, httpx.TransportError):  # обрыв посреди потока openai не оборачивает в свои исключения
         return True
     return isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
 
