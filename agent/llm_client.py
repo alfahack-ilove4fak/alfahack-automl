@@ -135,12 +135,14 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 2000,
         seconds_left: float | None = None,
+        max_wait: float | None = None,
         purpose: str = "chat",
     ) -> str | None:
         """Один запрос к модели. Возвращает текст ответа или None, если LLM недоступна, упала или нет времени.
 
         max_tokens — сколько нужно на сам ответ; к нему добавляется запас на рассуждения модели.
         seconds_left — остаток бюджета агента (budget.seconds_left()); None — не ограничивать.
+        max_wait — сколько секунд готовы ждать этот запрос (одна попытка); None — по seconds_left.
         purpose — зачем запрос (hypotheses, critic, reflect…): попадает в журнал llm_calls.jsonl.
         """
         key = hashlib.sha256(json.dumps([self.model, messages, temperature], ensure_ascii=False).encode()).hexdigest()
@@ -152,6 +154,8 @@ class LLMClient:
         if not self.available():
             return None
         limit = self.time_limit(seconds_left)
+        if max_wait is not None and limit != 0:
+            limit = max_wait if limit is None else min(limit, max_wait)
         if limit == 0:
             log.info("До конца бюджета %.0f с — LLM не зовём, гипотезы из playbook", seconds_left)
             return None
