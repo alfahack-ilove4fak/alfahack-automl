@@ -6,7 +6,7 @@
 | Файл | Роль |
 |---|---|
 | `task_parser.py` | `task.md` + файлы → `TaskSpec`. Детерминированный, работает без LLM — не ломать! |
-| `llm_client.py` | Qwen через OpenAI-совместимый API: кэш на диск, учёт ₽, `available()` = False без ключа; по остатку бюджета (`seconds_left`) ждёт не дольше четверти оставшегося времени, при < 2 мин не зовёт LLM |
+| `llm_client.py` | Qwen через OpenAI-совместимый API: кэш на диск, учёт ₽, `available()` = False без ключа; по остатку бюджета (`seconds_left`) ждёт не дольше четверти оставшегося времени, при < 4 мин не зовёт LLM (ответ Qwen ~35 с) |
 | `hypotheses.py` | `propose_hypotheses(spec, profile, history, k, budget)`: сначала LLM (если доступна и хватает времени), недостающие — из `research/playbook.yaml`; повторы id/params отсекаются |
 | `llm_hypotheses.py` | ответ LLM → проверенные `Hypothesis`: схема, допустимые kind и ключи params, без повторов |
 | `prompting.py` | сборка промптов из `agent/prompts/*.md` (string.Template, `$плейсхолдеры`); нет файла → `None` → playbook |

@@ -38,7 +38,7 @@ log = get_logger("llm")
 DEFAULT_REASONING_TOKENS = 3000
 MAX_RETRIES = 2
 LLM_TIME_SHARE = 0.25  # какую долю оставшегося времени можно ждать LLM: остальное — экспериментам
-MIN_CALL_SECONDS = 30.0  # запрос гипотез с рассуждениями идёт 10–20 с; меньше 30 с ждать бессмысленно
+MIN_CALL_SECONDS = 60.0  # Qwen с рассуждениями отвечает ~35 с (замер 22.10): меньше минуты — запрос не успеет
 
 
 def _env(name: str) -> str:
