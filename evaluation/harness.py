@@ -36,7 +36,7 @@ import psutil
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 
 from agent.task_parser import parse_task
-from evaluation.local_score import score_submission
+from evaluation.local_score import organizer_score, score_submission
 from evaluation.submission import validate_submission
 from interfaces.schemas import TaskSpec, TaskType
 
@@ -155,19 +155,65 @@ def make_holdout_task(task_md: Path, out: Path, frac: float = 0.25, rows: int | 
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
 
+    targets = [spec.target, *spec.extra_targets]  # несколько таргетов — колонка ответа на каждый (#174, #220)
     part.to_csv(place(spec.train_path), index=False)
-    test_columns = [c for c in test.columns if c in hold.columns and c != spec.target]
+    test_columns = [c for c in test.columns if c in hold.columns and c not in targets]
     if spec.id_column not in test_columns:
         test_columns.insert(0, spec.id_column)
     hold[test_columns].to_csv(place(spec.test_path), index=False)
     if spec.sample_submission_path:
         sample = pd.read_csv(spec.sample_submission_path, nrows=1)
-        filler = sample[spec.target].iloc[0] if spec.target in sample.columns and len(sample) else 0
-        hold[[spec.id_column]].assign(**{spec.target: filler})[spec.submission_columns].to_csv(
+        fillers = {t: sample[t].iloc[0] if t in sample.columns and len(sample) else 0 for t in targets}
+        hold[[spec.id_column]].assign(**fillers)[spec.submission_columns].to_csv(
             place(spec.sample_submission_path), index=False
         )
-    hold[[spec.id_column, spec.target]].to_csv(out / "answers.csv", index=False)
-    return {"spec": spec, "task_md": task_dir / task_md.name, "split": how, "y_train": part[spec.target]}
+    hold[[spec.id_column, *targets]].to_csv(out / "answers.csv", index=False)
+    return {"spec": spec, "task_md": task_dir / task_md.name, "split": how, "y_train": part[targets]}
+
+
+def score_targets(
+    spec: TaskSpec,
+    merged: pd.DataFrame,
+    y_train: pd.DataFrame,
+    x_train: pd.DataFrame | None = None,
+    x_test: pd.DataFrame | None = None,
+) -> dict:
+    """Баллы по всем таргетам. merged — ответы и сабмит по id (колонки <таргет>_true / <таргет>_pred).
+
+    Несколько таргетов: метрика и бейзлайны — среднее по столбцам (так формулируют задачи «считается по каждому
+    столбцу отдельно и усредняется»), балл — по формуле организаторов от средних.
+    """
+    targets = [spec.target, *spec.extra_targets]
+    per_target = [
+        score_submission(
+            spec.model_copy(update={"target": t}),
+            merged[f"{t}_true"],
+            merged[f"{t}_pred"],
+            y_train[t],
+            x_train=x_train,
+            x_test=x_test,
+        )
+        for t in targets
+    ]
+    if len(per_target) == 1:
+        return per_target[0]
+    scores = {"metric": spec.metric.name}
+    for key in ("value", "baseline", "model_baseline"):
+        values = [s[key] for s in per_target if key in s]
+        if values:
+            scores[key] = float(np.mean(values))  # NaN хотя бы у одного таргета → NaN → балл 0
+    scores["score"] = organizer_score(spec.metric.name, scores["value"], scores["baseline"])
+    if "model_baseline" in scores:  # как в score_submission: сильный бейзлайн не посчитан → NaN, а не 0
+        model_baseline = scores["model_baseline"]
+        scores["model_score"] = (
+            organizer_score(spec.metric.name, scores["value"], model_baseline)
+            if np.isfinite(model_baseline)
+            else float("nan")
+        )
+    errors = [f"{t}: {s['model_error']}" for t, s in zip(targets, per_target, strict=True) if "model_error" in s]
+    if errors:
+        scores["model_error"] = "; ".join(errors)
+    return scores
 
 
 # --- 2. Запуск агента
@@ -241,15 +287,10 @@ def run_task(
         merged = answers.merge(submission, on=spec.id_column, suffixes=("_true", "_pred"))
         features = [c for c in test.columns if c != spec.id_column]
         x_test = merged[[spec.id_column]].merge(test, on=spec.id_column, how="left")[features]
-        x_train = pd.read_csv(new_spec.train_path, low_memory=False).drop(columns=[spec.target], errors="ignore")
-        scores = score_submission(
-            spec,
-            merged[f"{spec.target}_true"],
-            merged[f"{spec.target}_pred"],
-            prepared["y_train"],
-            x_train=x_train.drop(columns=[spec.id_column], errors="ignore"),
-            x_test=x_test,
+        x_train = pd.read_csv(new_spec.train_path, low_memory=False).drop(
+            columns=[spec.id_column, *prepared["y_train"].columns], errors="ignore"
         )
+        scores = score_targets(spec, merged, prepared["y_train"], x_train, x_test)
         if "model_error" in scores:
             print(f"  ⚠️ модельный бейзлайн не посчитан: {scores.pop('model_error')}", flush=True)
         row.update(scores)

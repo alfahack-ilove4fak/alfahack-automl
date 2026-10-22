@@ -5,7 +5,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from evaluation.harness import main, make_holdout_task, time_column
+from agent.task_parser import parse_task
+from evaluation.harness import main, make_holdout_task, score_targets, time_column
+from evaluation.local_score import score_submission
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -106,3 +108,64 @@ def test_agent_root_runs_other_agent(tmp_path):
     # Ответ-копия шаблона валиден, но это константа — балл 0, а не балл настоящего агента
     assert row.status == "OK" and row.score == 0
     assert row.seconds < 30
+
+
+def _multitarget_task(dst, n=300):
+    """Регрессия с двумя таргетами в одном ответе (как ловушка utilities_multitarget_mae, #220)."""
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=n)
+    dst.mkdir(parents=True)
+    pd.DataFrame({"id": range(n), "x": x, "heat": 2 * x + 1, "water": 10 * x}).to_csv(dst / "train.csv", index=False)
+    pd.DataFrame({"id": range(n, n + 50), "x": rng.normal(size=50)}).to_csv(dst / "test.csv", index=False)
+    pd.DataFrame({"id": range(n, n + 50), "heat": 0.0, "water": 0.0}).to_csv(dst / "sample_submission.csv", index=False)
+    (dst / "task.md").write_text(
+        "Предсказать `heat` и `water`. Метрика — MAE, считается по каждому столбцу и усредняется.\n",
+        encoding="utf-8",
+    )
+    return dst / "task.md"
+
+
+def test_holdout_keeps_all_targets(tmp_path):
+    """Шаблон ответа и answers.csv — со всеми таргетами; в «скрытом тесте» таргетов нет (#220: был KeyError)."""
+    prepared = make_holdout_task(_multitarget_task(tmp_path / "src"), tmp_path / "out")
+    task_dir = prepared["task_md"].parent
+    assert list(pd.read_csv(task_dir / "sample_submission.csv").columns) == ["id", "heat", "water"]
+    assert {"heat", "water"}.isdisjoint(pd.read_csv(task_dir / "test.csv").columns)
+    answers = pd.read_csv(tmp_path / "out" / "answers.csv")
+    assert {"heat", "water"} <= set(answers.columns)
+    assert set(prepared["y_train"].columns) == {"water", "heat"}
+
+
+def test_score_is_mean_over_targets(tmp_path):
+    """Метрика и бейзлайн — среднее по таргетам, балл — по формуле организаторов от средних."""
+    spec = parse_task(_multitarget_task(tmp_path / "src"))
+    y_train = pd.DataFrame({"water": [0.0, 10.0, 20.0], "heat": [1.0, 2.0, 3.0]})
+    merged = pd.DataFrame(
+        {"water_true": [5.0, 15.0], "water_pred": [5.0, 15.0], "heat_true": [1.0, 3.0], "heat_pred": [2.0, 2.0]}
+    )
+    scores = score_targets(spec, merged, y_train)
+    per = [
+        score_submission(spec.model_copy(update={"target": t}), merged[f"{t}_true"], merged[f"{t}_pred"], y_train[t])
+        for t in ("water", "heat")
+    ]
+    assert scores["value"] == np.mean([p["value"] for p in per]) == 0.5  # water точно, heat ошибается на 1
+    assert scores["baseline"] == np.mean([p["baseline"] for p in per])
+    assert 0 < scores["score"] <= 100
+
+
+def test_harness_run_on_multitarget_task(tmp_path):
+    """Прогон харнесса до конца: задача с двумя таргетами не FAILED (ответ — копия шаблона, балл 0)."""
+    agent = tmp_path / "copy_agent"
+    agent.mkdir()
+    (agent / "solution.py").write_text(
+        "import shutil, sys\nfrom pathlib import Path\n"
+        "task = Path(sys.argv[1]).parent\n"
+        "shutil.copy(task / 'sample_submission.csv', task / 'submission.csv')\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "leaderboard.csv"
+    task = _multitarget_task(tmp_path / "src")
+    main(["--task", str(task), "--minutes", "0.5", "--agent-root", str(agent), "--out", str(out)])
+    row = pd.read_csv(out).iloc[0]
+    assert row.status == "OK", row.to_dict()
+    assert row.metric == "mae" and row.score == 0
