@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent import loop
-from agent.hypotheses import load_playbook, propose_hypotheses
+from agent.hypotheses import canonical_params, load_playbook, params_key, propose_hypotheses
 from agent.llm_client import LLMClient
 from agent.llm_hypotheses import parse_hypotheses
 from interfaces.schemas import (
@@ -16,6 +16,7 @@ from interfaces.schemas import (
     Hypothesis,
     HypothesisKind,
     RunBudget,
+    TaskType,
 )
 from interfaces.stubs import stub_task_spec
 
@@ -208,3 +209,46 @@ def test_loop_passes_budget(spec, profile, monkeypatch):
     history = baseline_history()
     loop.run_autoresearch(spec, profile, None, budget, history, history[0], lambda h, r: None, llm=FakeLLM(None))
     assert seen == [budget]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"class_weight": "balanced"},
+        {"model": "lightgbm", "class_weight": "balanced"},
+        {"model": "LightGBM ", "class_weight": "Balanced", "n_folds": 5},
+        {"model": "lightgbm", "class_weight": "balanced", "log_target": False, "feature_ops": [], "model_params": {}},
+        {"model": "lightgbm", "class_weight": "balanced", "model_params": {"learning_rate": 0.05, "num_leaves": 63.0}},
+    ],
+)
+def test_same_experiment_written_differently_is_a_repeat(params):
+    # замер 22.10: LLM предложила balanced-веса, а playbook прогнал balanced_classes ещё раз с тем же скором
+    assert params_key(params) == params_key({"model": "lightgbm", "class_weight": "balanced"})
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"model": "lightgbm"},
+        {"model": "catboost", "class_weight": "balanced"},
+        {"class_weight": "balanced", "n_folds": 10},
+        {"class_weight": "balanced", "model_params": {"learning_rate": 0.02}},
+        {"class_weight": "balanced", "proba_weights": True},
+    ],
+)
+def test_really_different_experiments_differ(params):
+    assert params_key(params) != params_key({"model": "lightgbm", "class_weight": "balanced"})
+
+
+def test_baseline_equivalent_is_a_repeat():
+    # «LightGBM с параметрами по умолчанию» = бейзлайн: не тратим на него эксперимент
+    assert canonical_params({"model": "lightgbm", "model_params": {"n_estimators": 3000}}) == {}
+
+
+def test_playbook_skips_llm_repeat_written_differently(spec, profile):
+    spec = spec.model_copy(update={"task_type": TaskType.MULTICLASS})
+    profile = profile.model_copy(update={"target_summary": {"imbalance_ratio": 10}})
+    same = {**GOOD, "id": "llm_balanced", "params": {"model": "lightgbm", "class_weight": "balanced", "n_folds": 5}}
+    out = propose_hypotheses(spec, profile, baseline_history(), k=5, llm=FakeLLM([same]))
+    assert "llm_balanced" in [h.id for h in out]
+    assert "balanced_classes" not in [h.id for h in out]
