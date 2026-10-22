@@ -49,3 +49,17 @@ def test_lost_leading_zero_is_caught(tmp_path):
     spec, test = _task(tmp_path, [f"{i:03d}" for i in range(10)])
     pd.DataFrame({"id": [int(i) for i in test["id"]], "label": "b"}).to_csv(spec.submission_path, index=False)
     assert not validate_submission(spec.submission_path, spec, test).ok  # «007» превратился в «7» — это ошибка
+
+
+def test_write_falls_back_to_direct_write_when_replace_fails(tmp_path, monkeypatch):
+    """Организаторы: os.replace между файловыми системами давал 0 баллов — ответ всё равно должен лечь в path."""
+    from evaluation import submission
+
+    def broken_replace(src, dst):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(submission.os, "replace", broken_replace)
+    path = tmp_path / "submission.csv"
+    submission.write_submission_atomic(pd.DataFrame({"id": [1, 2], "y": [0.5, 0.7]}), path)
+    assert pd.read_csv(path)["y"].tolist() == [0.5, 0.7]
+    assert not (tmp_path / "submission.tmp.csv").exists()
