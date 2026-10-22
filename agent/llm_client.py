@@ -43,6 +43,7 @@ class LLMClient:
         self.rub_spent = 0.0
         self.calls = 0
         self.failures = 0
+        self.last_error = ""  # причина последнего сбоя — для лога и doctor.py
         self._price_in = float(os.getenv("LLM_PRICE_RUB_PER_1K_INPUT", 0))
         self._price_out = float(os.getenv("LLM_PRICE_RUB_PER_1K_OUTPUT", 0))
         self.reasoning_tokens = int(os.getenv("LLM_REASONING_TOKENS", DEFAULT_REASONING_TOKENS))
@@ -103,9 +104,11 @@ class LLMClient:
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
             self.failures += 1
-            log.warning("LLM ошибка (%d подряд): %s", self.failures, exc)
+            self.last_error = describe_error(exc)
+            log.warning("LLM ошибка (%d подряд): %s", self.failures, self.last_error)
             return None
         self.failures = 0
+        self.last_error = ""
         self.calls += 1
         choice = response.choices[0]
         text = choice.message.content or ""
@@ -153,6 +156,19 @@ class LLMClient:
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             (self.cache_dir / f"{key}.txt").write_text(text, encoding="utf-8")
+
+
+def describe_error(exc: BaseException) -> str:
+    """Ошибка с цепочкой причин: openai пишет просто «Connection error.», а настоящая причина
+    (прокси, SSL, DNS, таймаут) лежит в __cause__ — без неё сбой не разобрать."""
+    parts, seen = [], set()
+    while exc is not None and id(exc) not in seen and len(parts) < 4:
+        seen.add(id(exc))
+        text = f"{type(exc).__name__}: {exc}".strip()
+        if not parts or text not in parts[-1]:
+            parts.append(text)
+        exc = exc.__cause__ or exc.__context__
+    return " ← ".join(parts)[:400]
 
 
 def _complete_objects(text: str) -> list[dict]:

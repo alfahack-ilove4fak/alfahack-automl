@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_client import MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
+from agent.llm_client import MAX_RETRIES, MIN_CALL_SECONDS, LLMClient, describe_error
 
 MESSAGES = [{"role": "user", "content": "предложи гипотезы"}]
 
@@ -236,3 +236,24 @@ def test_cache_served_even_without_time(client, tmp_path):
     assert client.chat_json(MESSAGES) == {"ok": True}
     assert client.chat_json(MESSAGES, seconds_left=10) == {"ok": True}  # ответ из кэша бесплатный и мгновенный
     assert fake.requests == 1
+
+
+def test_error_cause_is_logged(client, caplog):
+    # openai.APIConnectionError пишет «Connection error.», причина — в __cause__ (здесь — отказ прокси)
+    try:
+        try:
+            raise OSError("ProxyError 403 Forbidden")
+        except OSError as cause:
+            raise RuntimeError("Connection error.") from cause
+    except RuntimeError as exc:
+        error = exc
+    client._client = FakeOpenAI([error, "{}"])
+    assert client.chat(MESSAGES) is None
+    assert "Connection error." in client.last_error and "ProxyError 403 Forbidden" in client.last_error
+    assert "ProxyError 403 Forbidden" in caplog.text
+    assert client.chat([{"role": "user", "content": "ещё"}]) == "{}"
+    assert client.last_error == ""  # успешный ответ сбрасывает причину
+
+
+def test_describe_error_without_cause():
+    assert describe_error(TimeoutError("нет сети")) == "TimeoutError: нет сети"
