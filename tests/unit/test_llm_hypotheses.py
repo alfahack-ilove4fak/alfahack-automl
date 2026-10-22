@@ -257,12 +257,22 @@ def test_playbook_skips_llm_repeat_written_differently(spec, profile):
     assert "balanced_classes" not in [h.id for h in out]
 
 
-def test_zero_is_not_an_off_switch():
-    # 0 == False в Python: наивное `v not in (None, False, ...)` теряло seed=0 и считало гипотезу повтором бейзлайна
+def test_zero_is_not_switched_off():
+    # ревью #164: 0 == False в Python — числовой ноль не должен пропадать как «выключенный ключ»
     assert params_key({"seed": 0}) != params_key({})
+    assert canonical_params({"min_child_samples": 0.0, "x": 1}) == {"min_child_samples": 0, "x": 1}
+
+
+def test_column_names_keep_case():
+    # ревью #164: в validation и feature_ops — имена колонок, «Year» и «year» могут быть разными
+    assert params_key({"validation": "time:Year"}) != params_key({"validation": "time:year"})
+    assert params_key({"model": "CatBoost"}) == params_key({"model": "catboost"})
+
+
+def test_zero_seed_survives_with_off_keys():
+    # #169: 0 остаётся, а выключенный log_target=False пропадает
     assert canonical_params({"seed": 0, "log_target": False}) == {"seed": 0}
 
 
-def test_validation_column_name_keeps_case():
-    assert params_key({"validation": "time:Year"}) != params_key({"validation": "time:year"})
+def test_validation_column_name_is_stripped_not_lowered():
     assert params_key({"validation": " time:Year "}) == params_key({"validation": "time:Year"})

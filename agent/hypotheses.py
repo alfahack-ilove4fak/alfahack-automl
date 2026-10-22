@@ -68,23 +68,29 @@ def _model_defaults() -> dict[str, dict]:
     return {"lightgbm": BASE_PARAMS, "catboost": CATBOOST_PARAMS, "xgboost": XGBOOST_PARAMS}
 
 
-def _is_off(value) -> bool:
-    """Ключ «выключен»: None, False, пустой словарь, список или строка. Число 0 — не выключен (0 == False в Python)."""
-    return value is None or value is False or (isinstance(value, dict | list | str) and not value)
+CASE_INSENSITIVE_KEYS = ("model", "class_weight")  # значения-названия; в остальных строках бывают имена колонок
 
 
-def _norm(value):
-    """5.0 → 5, «Balanced » → «balanced»: одно значение, записанное по-разному. Имя колонки в схеме валидации — как есть."""
+def _norm(value, key: str = ""):
+    """5.0 → 5, « Balanced » → «balanced»: одно значение, записанное по-разному.
+
+    Регистр приводим только у CASE_INSENSITIVE_KEYS: в validation, feature_ops и т. п. — имена колонок,
+    а «Year» и «year» могут быть разными колонками.
+    """
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str):
-        value = value.strip()
-        return value if value.lower().startswith(("time:", "group:")) else value.lower()
+        return value.strip().lower() if key in CASE_INSENSITIVE_KEYS else value.strip()
     if isinstance(value, dict):
-        return {k: _norm(v) for k, v in value.items()}
+        return {k: _norm(v, k) for k, v in value.items()}
     if isinstance(value, list):
         return [_norm(v) for v in value]
     return value
+
+
+def _is_off(value) -> bool:
+    """Ключ «выключен»: None, False, пустая строка/словарь/список. Число 0 — не выключено (0 == False в Python)."""
+    return value is None or value is False or (isinstance(value, dict | list | str) and not value)
 
 
 def canonical_params(params: dict) -> dict:
@@ -93,7 +99,7 @@ def canonical_params(params: dict) -> dict:
     {model: lightgbm, class_weight: balanced, n_folds: 5, log_target: false, model_params: {learning_rate: 0.05}}
     и {class_weight: balanced} — один и тот же эксперимент.
     """
-    out = {k: _norm(v) for k, v in params.items() if not _is_off(v)}
+    out = {k: _norm(v, k) for k, v in params.items() if not _is_off(v)}
     model = out.get("model", DEFAULT_MODEL)
     if model == DEFAULT_MODEL:
         out.pop("model", None)
