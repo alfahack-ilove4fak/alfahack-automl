@@ -678,3 +678,34 @@ def test_unseen_category_reaches_model_as_missing(monkeypatch):
     assert sum(int(valid_c.isna().sum()) for _, valid_c in cv) == 1  # "solo" в своём фолде — пропуск
     final = [c for kind, _, c in seen if kind == "final"][-1]  # последний _predict — test в fit_predict_final
     assert final.isna().tolist() == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("task_type", "metric", "params", "expected"),
+    [
+        (TaskType.REGRESSION, "rmsle", {}, True),  # метрика на лог-шкале — учимся сразу под неё (#206)
+        (TaskType.REGRESSION, "msle", {}, True),
+        (TaskType.REGRESSION, "rmsle", {"log_target": False}, False),  # явный выбор гипотезы важнее умолчания
+        (TaskType.REGRESSION, "rmse", {}, False),
+        (TaskType.REGRESSION, "rmse", {"log_target": True}, True),
+        (TaskType.BINARY, "rmsle", {"log_target": True}, False),  # на классификации log_target не действует
+    ],
+)
+def test_log_target_default_follows_metric(task_type, metric, params, expected):
+    from ml.experiment import _use_log_target
+
+    assert _use_log_target(_spec(task_type, metric, greater=False), params) is expected
+
+
+def test_rmsle_default_log_target_gives_non_negative_answer():
+    # без log_target прогноз регрессии бывает < 0 (на practice/sales — до −0.5), а RMSLE ждёт y ≥ 0
+    spec = _spec(TaskType.REGRESSION, "rmsle", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    train["y"] = np.exp(train["y"]) * 0.1  # положительный скошенный target, часть значений около нуля
+    hyp = _hyp(model_params={"n_estimators": 50})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert (answer["y"] >= 0).all()
