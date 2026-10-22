@@ -35,3 +35,5 @@
 | 19:00 | сабмит №2, строка в `docs/submissions.md`, ретро |
 
 Файлы участников: [vasya](vasya.md) · [artem](artem.md) · [danil](danil.md) · [roma](roma.md) · [egor](egor.md)
+
+**Новое:** разбор вебинара организаторов — [docs/resources/webinar-qa.md](../../resources/webinar-qa.md); в личных файлах есть раздел «Из вебинара».
