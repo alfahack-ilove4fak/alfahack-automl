@@ -100,6 +100,9 @@ class FakeLLM:
     def chat(self, messages, **kwargs):
         return None
 
+    def log_summary(self):
+        pass
+
 
 FEATURE_ANSWER = {"id": "ratio_ab", "title": "Отношение a к b", "rationale": "форма зависимости", "code": RATIO}
 
