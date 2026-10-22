@@ -61,12 +61,6 @@ def test_hypotheses_run_in_baseline_scheme(spec, profile, monkeypatch):
     assert history[1][1].validation == "time:Year-5"
 
 
-def test_own_scheme_of_hypothesis_not_replaced(spec, profile, monkeypatch):
-    base = (hyp("baseline", validation="time:Year"), result("baseline", 42.0, "time:Year-5"))
-    seen, _ = run(spec, profile, monkeypatch, base, [hyp("g", validation="group:duplicates")])
-    assert seen[0].params["validation"] == "group:duplicates"
-
-
 def test_no_scheme_keeps_hypothesis_unchanged(spec, profile, monkeypatch):
     base = (hyp("baseline"), result("baseline", 42.0))
     seen, _ = run(spec, profile, monkeypatch, base, [hyp("a")])
@@ -85,3 +79,22 @@ def test_with_validation_helper():
     assert loop.with_validation(h, None) is h
     assert loop.with_validation(h, "time:Year").params["validation"] == "time:Year"
     assert "validation" not in h.params  # исходная гипотеза не меняется
+
+
+@pytest.mark.parametrize(
+    "run_scheme, own, skipped",
+    [
+        ("time:Year", "group:duplicates", True),  # чужая схема — несравнима, не запускаем
+        ("time:Year", "time:Year", False),  # та же — запускаем
+        (None, "time:Year", True),  # прогон в обычной CV, гипотеза во времени — несравнима
+        (None, "kfold", False),  # kfold = обычная CV
+    ],
+)
+def test_foreign_scheme_skipped_before_run(spec, profile, monkeypatch, run_scheme, own, skipped):
+    # ревью #175: гипотеза со своей схемой отрабатывала целый эксперимент и только потом отклонялась
+    base_params = {"validation": run_scheme} if run_scheme else {}
+    base = (hyp("baseline", **base_params), result("baseline", 42.0, f"{run_scheme or 'kfold'}-5"))
+    seen, history = run(spec, profile, monkeypatch, base, [hyp("g", validation=own)])
+    assert (seen == []) is skipped
+    if skipped:
+        assert history[1][1].status == ExperimentStatus.SKIPPED and "несравнимы" in history[1][1].error

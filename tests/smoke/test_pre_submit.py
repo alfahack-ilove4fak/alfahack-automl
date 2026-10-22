@@ -10,6 +10,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -128,3 +130,31 @@ def test_missing_baseline_in_log_is_a_problem(tmp_path, monkeypatch):
     task = ROOT / "tasks" / "public" / "multiclass" / "task.md"
     result = pre_submit.run_task(task, build(tmp_path / "s.zip"), tmp_path / "work", 0.5, 50, False)
     assert not result.ok and any("baseline" in p for p in result.problems)
+
+
+@pytest.mark.parametrize(
+    ("log_line", "baseline", "warning"),
+    [
+        ("Сохранён ответ «baseline» (CV f1_macro=0.64200), проверка: OK", "baseline (CV f1_macro=0.64200)", None),
+        (
+            "Сохранён ответ «baseline_light» (CV f1_macro=0.61000), проверка: OK",
+            "baseline_light (CV f1_macro=0.61000)",
+            "облегчённый",
+        ),
+        ("Сохранён ответ «baseline» (без CV), проверка: OK", "baseline (без CV)", "без CV"),
+    ],
+    ids=["full", "light", "no-cv"],
+)
+def test_baseline_ladder_rung_is_reported(tmp_path, monkeypatch, log_line, baseline, warning):
+    """Любая ступень лестницы бейзлайна (#176) — ответ модели: не ❌, но отчёт говорит, какая сработала."""
+    import pre_submit
+
+    monkeypatch.setattr(pre_submit, "run_with_limits", lambda *a, **k: (0, 1.0, 10.0, log_line))
+    task = ROOT / "tasks" / "public" / "multiclass" / "task.md"
+    result = pre_submit.run_task(task, build(tmp_path / "s.zip"), tmp_path / "work", 0.5, 50, False)
+    assert not any("baseline" in p for p in result.problems)
+    assert result.baseline == baseline
+    if warning is None:
+        assert result.warnings == []
+    else:
+        assert any(warning in w for w in result.warnings)

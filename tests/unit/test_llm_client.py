@@ -518,3 +518,73 @@ def test_reasoning_effort_can_be_disabled(monkeypatch):
     monkeypatch.setenv("LLM_MOCK", "1")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "")
     assert LLMClient().reasoning_effort == ""
+
+
+# ---------------------------------------------------------------- потоковый ответ (прокси рвёт обычный через ~10 с)
+
+
+def _chunk(content=None, finish=None, usage=None):
+    choices = [] if content is None and finish is None else [
+        SimpleNamespace(delta=SimpleNamespace(content=content), finish_reason=finish)
+    ]  # fmt: skip
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+class StreamOpenAI(FakeOpenAI):
+    """Отдаёт ответы чанками, как OpenAI при stream=True; элемент-исключение — обрыв посреди потока."""
+
+    def __init__(self, streams):
+        super().__init__([])
+        self.streams = list(streams)
+        self.kwargs = []
+
+    def _create(self, **kwargs):
+        self.requests += 1
+        self.kwargs.append(kwargs)
+        stream = self.streams.pop(0)
+        if isinstance(stream, Exception):
+            raise stream
+
+        def gen():
+            for item in stream:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+
+        return gen()
+
+
+def test_stream_is_requested_and_collected(client):
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, cost=0.02)
+    fake = client._client = StreamOpenAI([[_chunk('{"ok"'), _chunk(": true}", "stop"), _chunk(usage=usage)]])
+    assert client.chat_json(MESSAGES) == {"ok": True}
+    assert fake.kwargs[0]["stream"] is True and fake.kwargs[0]["stream_options"] == {"include_usage": True}
+    assert client.rub_spent == pytest.approx(0.02) and client.prompt_tokens == 10
+
+
+def test_stream_cut_midway_is_retried(client):
+    disconnect, _ = _openai_errors()
+    fake = client._client = StreamOpenAI([[_chunk("{"), disconnect], [_chunk("{}", "stop")]])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 2
+
+
+def test_stream_length_finish_is_reported_as_truncated(client, caplog):
+    client._client = StreamOpenAI([[_chunk("", "length")]])
+    assert client.chat(MESSAGES) == ""
+    assert "упёрлась в лимит" in caplog.text
+
+
+def test_stream_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK", "1")
+    monkeypatch.setenv("LLM_STREAM", "0")
+    assert LLMClient().stream is False
+
+
+def test_raw_httpx_cut_midstream_is_retried(client):
+    import httpx
+
+    cut = httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+    fake = client._client = StreamOpenAI([[_chunk("{"), cut], [_chunk("{}", "stop")]])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 2

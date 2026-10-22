@@ -12,6 +12,7 @@ import pandas as pd
 
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
+from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
 from agent.llm_critic import critique
@@ -45,6 +46,7 @@ def run_autoresearch(
     if memory.best_id is None:
         memory.best_id = best[0].id  # на входе лучший — бейзлайн
     queue: list[Hypothesis] = []
+    feature_tries = 0  # сколько раз просили у LLM код признаков
     batch_start = len(history)  # с какого места истории начинается текущая пачка гипотез
     baseline_seconds = best[1].fit_seconds  # на входе best — бейзлайн: от него считаем цену гипотез
     # Схему валидации выбрали один раз до цикла и посчитали в ней бейзлайн (#151, ADR 0008 D1, ADR 0013):
@@ -60,6 +62,12 @@ def run_autoresearch(
             if batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch):
                 reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
             queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
+            if batch and feature_tries < MAX_FEATURE_TRIES:
+                # после первой пачки, когда лучший известен: LLM пишет код признаков (A-L3-1), он идёт в песочнице
+                feature_tries += 1
+                feature_hyp = propose_feature_hypothesis(spec, profile, history, llm, best[0], budget)
+                if feature_hyp is not None:
+                    queue.append(feature_hyp)
             batch_start = len(history)
             rejected = critique(spec, profile, history, queue, llm, budget, memory)  # выключен без AGENT_LLM_CRITIC=1
             for hyp in [h for h in queue if h.id in rejected]:
@@ -73,7 +81,7 @@ def run_autoresearch(
             break
         hyp = queue.pop(0)
         log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
-        reason = review(hyp, spec)
+        reason = review(hyp, spec) or foreign_validation(hyp, validation)
         needed = estimated_seconds(hyp, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
             reason = f"не успеет: оценка {needed:.0f} с, осталось {budget.seconds_left():.0f} с"
@@ -112,3 +120,17 @@ def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:
     if validation is None or "validation" in hyp.params:
         return hyp  # своя схема гипотезы — acceptance отклонит её как несравнимую, но не подменяем молча
     return hyp.model_copy(update={"params": {**hyp.params, "validation": validation}})
+
+
+PLAIN_VALIDATION = ("kfold", "stratified")  # обычная CV — то же, что без validation
+
+
+def foreign_validation(hyp: Hypothesis, validation: str | None) -> str | None:
+    """Причина пропустить гипотезу со своей схемой валидации: результат несравним с бейзлайном (ADR 0008 D1).
+
+    Без проверки она отработала бы целый эксперимент и только потом была бы отклонена правилом принятия.
+    """
+    own = hyp.params.get("validation")
+    if own is None or own == validation or (validation is None and own in PLAIN_VALIDATION):
+        return None
+    return f"своя схема валидации {own} ≠ схемы прогона {validation or 'обычная CV'} — результаты несравнимы"
