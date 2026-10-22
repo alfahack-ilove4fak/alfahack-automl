@@ -12,6 +12,11 @@ feature_ops, proba_weights, optuna…):
             ни в ранней остановке.
 Гипотеза, которая выигрывает на cv, но проигрывает на honest, скорее всего запоминает данные.
 
+Как агент (#151, ADR 0013): схема CV выбирается один раз на задачу (ml.validation.choose_validation по train-части и
+отложенной части в роли test) и одна у бейзлайна и всех гипотез; accepted — примет ли агент гипотезу против бейзлайна
+по своему правилу (agent.acceptance.accept). Итог по гипотезам — сводка в конце: на скольких задачах выиграла честно,
+сколько раз агент принял бы её зря (cv выиграла, honest — нет).
+
 Запуск (задачи — tasks/public/* и tasks/practice/*):
     uv run python research/bench_playbook.py
     uv run python research/bench_playbook.py --tasks tasks/public/regression --only log_target lgbm_slow_lr
@@ -33,12 +38,14 @@ from sklearn.model_selection import StratifiedGroupKFold
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from agent.acceptance import accept  # noqa: E402
 from agent.hypotheses import _applies, baseline_hypothesis, load_playbook  # noqa: E402
 from agent.task_parser import parse_task  # noqa: E402
 from evaluation.local_score import score_submission  # noqa: E402
 from interfaces.schemas import ExperimentStatus, Hypothesis, HypothesisKind, RunBudget, TaskType  # noqa: E402
 from ml.experiment import SEED, fit_predict_final, run_experiment  # noqa: E402
 from ml.profiling import load_data, profile_data  # noqa: E402
+from ml.validation import choose_validation  # noqa: E402
 
 DATE_SHARE = 0.95  # колонку считаем датой, если так разбирается не меньше этой доли значений
 LAST_PERIOD = 0.2  # для дат: в честную часть уходят последние 20% train по времени
@@ -93,6 +100,17 @@ def honest_split(spec, profile, train: pd.DataFrame, test: pd.DataFrame) -> tupl
     return tr, va, "группы дубликатов"
 
 
+PLAIN_SCHEMES = (None, "kfold", "stratified")  # обычная CV — как без validation (solution.py)
+
+
+def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:
+    """Схема прогона в params гипотезы — как agent.loop.with_validation (своя схема гипотезы не трогается)."""
+    params = copy.deepcopy(hyp.params)  # run_experiment дописывает в params
+    if validation not in PLAIN_SCHEMES:
+        params.setdefault("validation", validation)
+    return hyp.model_copy(update={"params": params})
+
+
 def evaluate(spec, hyp: Hypothesis, part: pd.DataFrame, hold: pd.DataFrame) -> tuple[object, float | None]:
     """cv агента на train-части и честная метрика на отложенной части — только публичными функциями ml."""
     profile = profile_data(spec, part, hold.drop(columns=[spec.target]))
@@ -110,9 +128,11 @@ def bench_task(task_md: Path, only: set[str] | None) -> list[dict]:
     profile = profile_data(spec, train, test)
     tr, va, how = honest_split(spec, profile, train, test)
     part, hold = train.iloc[tr].reset_index(drop=True), train.iloc[va].reset_index(drop=True)
+    hold_x = hold.drop(columns=[spec.target])
+    validation = choose_validation(spec, profile_data(spec, part, hold_x), part, hold_x)
     print(
         f"\n== {task_md.parent.name}: {spec.task_type.value}, {spec.metric.name}, честная часть — {how} "
-        f"({len(part)} / {len(hold)} строк)"
+        f"({len(part)} / {len(hold)} строк), схема CV — {validation}"
     )
     hyps = [baseline_hypothesis()]
     for item in load_playbook():
@@ -128,20 +148,28 @@ def bench_task(task_md: Path, only: set[str] | None) -> list[dict]:
             )
         )
     rows = []
+    base_res = None
     for hyp in hyps:
         started = time.time()
-        hyp = hyp.model_copy(update={"params": copy.deepcopy(hyp.params)})  # run_experiment дописывает в params
+        hyp = with_validation(hyp, validation)
+        res = None
         try:
             res, honest = evaluate(spec, hyp, part, hold)
             row = {"status": res.status.value, "cv_mean": res.mean_score, "cv_std": res.std_score, "error": res.error}
         except Exception as exc:  # noqa: BLE001 — стенд не должен падать из-за одной гипотезы
             honest, row = None, {"status": "failed", "cv_mean": None, "cv_std": None, "error": f"{exc!r}"[:200]}
+        if hyp.id == "baseline":
+            base_res = res
+        elif res is not None and base_res is not None:
+            row["accepted"], row["accept_reason"] = accept(res, base_res, spec.metric.greater_is_better)
         row = {"task": task_md.parent.name, "id": hyp.id, "metric": spec.metric.name, "split": how, **row}
+        row["validation"] = validation
         row["honest"] = honest
         row["seconds"] = round(time.time() - started, 1)
         rows.append(row)
+        mark = {True: "✓", False: "·"}.get(row.get("accepted"), " ")
         print(
-            f"  {hyp.id:28s} cv {row['cv_mean'] or float('nan'):.5f} ± {row['cv_std'] or 0:.5f}"
+            f"  {mark} {hyp.id:28s} cv {row['cv_mean'] or float('nan'):.5f} ± {row['cv_std'] or 0:.5f}"
             f"  honest {row['honest'] or float('nan'):.5f}  {row['seconds']:.0f} с  {row['error'] or ''}",
             flush=True,
         )
@@ -155,6 +183,31 @@ def bench_task(task_md: Path, only: set[str] | None) -> list[dict]:
     return rows
 
 
+def summarize(rows: list[dict]) -> pd.DataFrame:
+    """Сводка по гипотезам: выигрыш на честной части и решения агента (порядок playbook — по wins, потом gain)."""
+    df = pd.DataFrame(rows)
+    df = df[df["id"] != "baseline"]
+    if df.empty or "honest_gain" not in df:
+        return pd.DataFrame()
+    df["honest_win"] = df["honest_gain"] > 0
+    df["accepted"] = df.get("accepted", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+    # выигрыш в долях бейзлайна — чтобы складывать задачи с разными метриками
+    base = pd.DataFrame(rows).query("id == 'baseline'").set_index("task")["honest"]
+    df["honest_rel"] = df["honest_gain"] / df["task"].map(base).abs()
+    return (
+        df.groupby("id", sort=False)
+        .agg(
+            tasks=("task", "size"),
+            wins=("honest_win", "sum"),
+            mean_rel_gain=("honest_rel", "mean"),
+            accepted=("accepted", "sum"),
+            accepted_and_win=("honest_win", lambda w: int((w & df.loc[w.index, "accepted"]).sum())),
+            seconds=("seconds", "mean"),
+        )
+        .sort_values(["wins", "mean_rel_gain"], ascending=False)
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка гипотез playbook на задачах")
     parser.add_argument("--tasks", nargs="*", type=Path, help="папки задач (по умолчанию все public и practice)")
@@ -166,6 +219,12 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"playbook-{time.strftime('%Y%m%d-%H%M%S')}.csv"
     pd.DataFrame(rows).to_csv(out, index=False)
+    summary = summarize(rows)
+    if not summary.empty:
+        print(
+            "\nСводка (wins — честно лучше бейзлайна; accepted — агент принял бы; accepted_and_win — принял по делу):"
+        )
+        print(summary.to_string(float_format=lambda v: f"{v:.4f}"))
     print(f"\nСохранено: {out}")
     return 0
 

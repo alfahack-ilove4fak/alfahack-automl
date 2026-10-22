@@ -115,3 +115,21 @@ hypotheses:
     title: LightGBM с сильной L1/L2-регуляризацией листьев
     rationale: Штраф на значения листьев сглаживает предсказания и снижает переобучение без смены структуры деревьев
     params: {model: lightgbm, model_params: {reg_alpha: 1.0, reg_lambda: 10.0}}
+
+  - id: lgbm_default
+    kind: model
+    title: LightGBM с параметрами библиотеки по умолчанию
+    rationale: Страховка от «хуже простейшей модели» (#206) — 100 деревьев, шаг 0.1, все строки и признаки; на малых данных умолчания бывают лучше нашей настройки
+    params: {model: lightgbm, model_params: {n_estimators: 100, learning_rate: 0.1, num_leaves: 31, subsample: 1.0, subsample_freq: 0, colsample_bytree: 1.0}}
+
+  - id: xgboost
+    kind: model
+    title: XGBoost (гистограммы, категории one-hot до 64 значений)
+    rationale: Другой бустинг — другие ошибки; растит деревья по уровням, а не по листьям, что устойчивее на малых и шумных данных
+    params: {model: xgboost}
+
+  - id: catboost
+    kind: model
+    title: CatBoost (симметричные деревья, кодирование категорий по порядку)
+    rationale: Сильнее всего там, где много категорий; симметричные деревья меньше переобучаются
+    params: {model: catboost}
