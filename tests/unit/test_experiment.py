@@ -616,18 +616,6 @@ def test_optuna_tunes_on_the_same_validation_scheme(monkeypatch):
         assert train["year"].iloc[tr].max() < train["year"].iloc[va].min()
 
 
-def test_optuna_hidden_from_agent_until_honest_validation():
-    """Ревью #115: подбор на KFold честно хуже бейзлайна — LLM и playbook не должны видеть ключ optuna (до #29)."""
-    import re
-    import textwrap
-
-    import ml.experiment
-
-    section = ml.experiment.__doc__.split("Поддерживаемые params", 1)[1].split("\n", 1)[-1]
-    keys = set(re.findall(r"^(\w+)\s+—", textwrap.dedent(section), re.MULTILINE))
-    assert "optuna" not in keys
-
-
 def test_unseen_category_becomes_missing_but_catboost_keeps_it():
     """#145: категория без строк в обучающей части → пропуск; известные значения и пропуски не трогаем."""
     from ml.experiment import _hide_unseen
@@ -709,3 +697,123 @@ def test_rmsle_default_log_target_gives_non_negative_answer():
     assert result.status == ExperimentStatus.OK, result.error
     answer = fit_predict_final(spec, profile, hyp, train, test)
     assert (answer["y"] >= 0).all()
+
+
+def test_ensemble_averages_members_and_keeps_their_tree_counts():
+    """params.ensemble: прогноз — среднее участников, число деревьев из CV — своё у каждого."""
+    from ml.experiment import _fit_ensemble
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(ensemble=["lightgbm", {"model": "linear"}])
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+    iters = hyp.params["_best_iteration"]
+    assert isinstance(iters, list) and len(iters) == 2 and iters[1] == 0  # у линейной модели деревьев нет
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert answer["y"].notna().all()
+
+    from ml.profiling import make_matrix
+
+    x, x_test = make_matrix(profile, train, test)
+    model, _ = _fit_ensemble(spec, hyp, x, train["y"].to_numpy(), n_estimators=[30, 0])
+    members = [m.predict(x_test) for m in model.models]
+    np.testing.assert_allclose(model.predict(x_test), np.mean(members, axis=0))
+
+
+def test_ensemble_classification_with_catboost_and_unseen_category():
+    """CatBoost в ансамбле получает новую категорию как отдельное значение, а не NaN (иначе CatBoost падает)."""
+    pytest.importorskip("catboost")
+    pytest.importorskip("xgboost")
+    spec = _spec(TaskType.BINARY, "roc_auc", greater=True, labels=["neg", "pos"])
+    train, test, profile = _data(TaskType.BINARY)
+    test = test.copy()
+    test.loc[test.index[:3], "c"] = "new"  # категории нет в train
+    hyp = _hyp(ensemble=["lightgbm", "xgboost", {"model": "catboost", "model_params": {"iterations": 30}}])
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+    assert result.status == ExperimentStatus.OK, result.error
+    answer = fit_predict_final(spec, profile, hyp, train, test)
+    assert len(answer) == len(test)
+
+
+@pytest.mark.parametrize(
+    "params, message",
+    [
+        ({"ensemble": ["lightgbm"]}, "хотя бы из 2"),
+        ({"ensemble": ["lightgbm", "magic"]}, "magic"),
+        ({"ensemble": ["lightgbm", "linear"], "optuna": {"trials": 2}}, "optuna"),
+    ],
+)
+def test_bad_ensemble_is_failed_not_exception(params, message):
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    result = run_experiment(spec, profile, _hyp(**params), train, RunBudget())
+    assert result.status == ExperimentStatus.FAILED and message in result.error
+
+
+def test_optuna_true_uses_defaults(monkeypatch):
+    # LLM и playbook пишут optuna: true — подбор со значениями по умолчанию, а не тихий пропуск (#200)
+    import ml.tuning as tuning
+
+    seen = {}
+
+    def fake_tune(spec, hypothesis, *args, **kwargs):
+        seen["cfg"] = hypothesis.params["optuna"]
+        return {"num_leaves": 15}
+
+    monkeypatch.setattr(tuning, "tune", fake_tune)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    hyp = _hyp(model_params={"n_estimators": 20}, optuna=True)
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert seen["cfg"] is True and hyp.params["model_params"]["num_leaves"] == 15
+
+
+def test_agent_sees_optuna_and_ensemble_keys():
+    # агент берёт допустимые ключи params из docstring ml/experiment.py — открытые для #200 ключи должны быть там
+    from agent.prompting import allowed_param_keys
+
+    assert {"optuna", "ensemble"} <= allowed_param_keys()
+
+
+@pytest.mark.parametrize(
+    ("fraction", "expected"),
+    [(None, 1.0), (0.8, 1.0), (0.9, 1.0), (0.5, 1.6), (0.1, 3.0)],  # 0.1 — упор в MAX_TREES_SCALE
+)
+def test_trees_scale_by_train_fraction(fraction, expected):
+    from ml.experiment import _trees_scale
+
+    params = {} if fraction is None else {"_train_fraction": fraction}
+    assert _trees_scale(params) == pytest.approx(expected)
+
+
+def test_time_scheme_gives_more_final_trees(monkeypatch):
+    # #218: в time-схеме фолды учатся в среднем на половине train — финалу нужно больше деревьев, чем ×1.1
+    import ml.experiment as experiment
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    train["day"] = np.repeat(np.arange(30), 10)
+    test["day"] = 31
+    profile = profile.model_copy(update={"numeric_features": ["a", "day"]})
+    hyp = _hyp(validation="time:day", model_params={"n_estimators": 200})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert hyp.params["_train_fraction"] < 0.7
+    seen = {}
+    real_fit = experiment._fit_model
+
+    def spy_fit(*args, n_estimators=None, **kwargs):
+        seen["n"] = n_estimators
+        return real_fit(*args, n_estimators=n_estimators, **kwargs)
+
+    monkeypatch.setattr(experiment, "_fit_model", spy_fit)
+    fit_predict_final(spec, profile, hyp, train, test)
+    assert seen["n"] > int(hyp.params["_best_iteration"] * 1.1)

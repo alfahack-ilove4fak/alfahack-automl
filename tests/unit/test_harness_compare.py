@@ -53,6 +53,27 @@ def test_new_task_only_in_head():
     assert "| new |" in text and "0.0 → 5.0" in text
 
 
+def test_llm_tokens_line_and_setup_say_llm_was_used():
+    # тай-брейк: токены «было → стало» видны в комментарии PR, а подпись не врёт «без LLM»
+    base = _board([_row("a", 10, 50) | {"llm_calls": 3, "llm_tokens": 9000, "llm_rub": 1.5}], "b")
+    head = _board([_row("a", 10, 50) | {"llm_calls": 2, "llm_tokens": 6000, "llm_rub": 1.0}], "h")
+    text = render(base, head)
+    assert "Токены LLM: 9000 → 6000 (-3000), 1.50 → 1.00 ₽" in text
+    assert "с LLM" in text and "без LLM" not in text
+
+
+def test_base_without_llm_columns_shows_dash():
+    # ревью #217: старая база без llm_* — «0 → 6000» было бы неправдой
+    head = _board([_row("a", 10, 50) | {"llm_calls": 2, "llm_tokens": 6000, "llm_rub": 1.0}], "h")
+    text = render(_board([_row("a", 10, 50)], "b"), head)
+    assert "Токены LLM: — → 6000" in text
+
+
+def test_old_board_without_llm_columns_has_no_tokens_line():
+    text = render(_board([_row("a", 10, 50)], "b"), _board([_row("a", 12, 48)], "h"))
+    assert "Токены LLM" not in text and "без LLM" in text
+
+
 def test_main_takes_last_row_per_task(tmp_path):
     base, head, out = tmp_path / "base.csv", tmp_path / "head.csv", tmp_path / "comment.md"
     pd.DataFrame([_row("a", 1, 9) | {"commit": "old"}, _row("a", 10, 50) | {"commit": "b"}]).to_csv(base, index=False)

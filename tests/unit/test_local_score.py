@@ -142,3 +142,37 @@ def test_strong_baseline_is_never_weaker_than_trivial():
     result = score_submission(spec, y_test, y_test + 1.0, y[:200], x_train=x[:200], x_test=x[200:])
     assert result["model_baseline"] == result["baseline"]  # тривиальный ответ здесь идеален и сильнее LightGBM
     assert result["model_score"] == result["score"] == 0
+
+
+def test_strong_baseline_fixes_histogram_mode(monkeypatch):
+    """#219: без force_row_wise LightGBM сам выбирает row/col-wise по замеру скорости — бейзлайн плавал между прогонами."""
+    import lightgbm as lgb
+
+    from evaluation import local_score
+
+    seen = []
+
+    class Spy(lgb.LGBMClassifier):
+        def fit(self, X, y, **kwargs):
+            seen.append(self.get_params())
+            return super().fit(X, y, **kwargs)
+
+    monkeypatch.setattr(lgb, "LGBMClassifier", Spy)
+    spec = _spec(TaskType.MULTICLASS, "f1_macro", True, labels=["p", "q", "r"])
+    x, value = _xy()
+    y = pd.Series(np.array(["p", "q", "r"])[pd.qcut(value, 3, labels=False)])
+    local_score.model_prediction(spec, x[:200], y[:200], x[200:])
+    assert seen and seen[0]["deterministic"] is True and seen[0]["force_row_wise"] is True
+
+
+def test_strong_baseline_same_for_any_thread_count(monkeypatch):
+    from evaluation import local_score
+
+    spec = _spec(TaskType.MULTICLASS, "logloss", False, labels=["p", "q", "r"])
+    x, value = _xy(n=2000)
+    y = pd.Series(np.array(["p", "q", "r"])[pd.qcut(value, 3, labels=False)])
+    runs = []
+    for threads in (1, 4):
+        monkeypatch.setattr(local_score, "MODEL_THREADS", threads)
+        runs.append(local_score.model_prediction(spec, x[:1500], y[:1500], x[1500:]))
+    np.testing.assert_array_equal(runs[0], runs[1])
