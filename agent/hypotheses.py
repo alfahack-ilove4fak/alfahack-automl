@@ -2,7 +2,8 @@
 
 Если LLM доступна — она смотрит на DataProfile и историю экспериментов и предлагает новые гипотезы
 (agent/llm_hypotheses.py). Недостающие и все гипотезы без LLM — из research/playbook.yaml по порядку.
-Повторы (тот же id или те же params, что уже проверялись) отсекаются.
+Повторы (тот же id или те же params, что уже проверялись) отсекаются. params сравниваются в каноническом виде
+(canonical_params): значения по умолчанию и «выключенные» ключи не делают гипотезу новой.
 """
 
 from __future__ import annotations
@@ -54,9 +55,69 @@ def _applies(item: dict, spec: TaskSpec, profile: DataProfile) -> bool:
     return item.get("requires") != "imbalance"
 
 
+DEFAULT_MODEL = "lightgbm"  # как ml/experiment.py: без model — LightGBM
+DEFAULT_N_FOLDS = 5
+
+
+def _model_defaults() -> dict[str, dict]:
+    """Гиперпараметры моделей по умолчанию из ml/experiment.py: такой же model_params — это не новая гипотеза."""
+    try:
+        from ml.experiment import BASE_PARAMS, CATBOOST_PARAMS, XGBOOST_PARAMS
+    except Exception:  # noqa: BLE001 — без ml сравниваем без учёта умолчаний модели
+        return {}
+    return {"lightgbm": BASE_PARAMS, "catboost": CATBOOST_PARAMS, "xgboost": XGBOOST_PARAMS}
+
+
+CASE_INSENSITIVE_KEYS = ("model", "class_weight")  # значения-названия; в остальных строках бывают имена колонок
+
+
+def _norm(value, key: str = ""):
+    """5.0 → 5, « Balanced » → «balanced»: одно значение, записанное по-разному.
+
+    Регистр приводим только у CASE_INSENSITIVE_KEYS: в validation, feature_ops и т. п. — имена колонок,
+    а «Year» и «year» могут быть разными колонками.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        return value.strip().lower() if key in CASE_INSENSITIVE_KEYS else value.strip()
+    if isinstance(value, dict):
+        return {k: _norm(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_norm(v) for v in value]
+    return value
+
+
+def _is_off(value) -> bool:
+    """Ключ «выключен»: None, False, пустая строка/словарь/список. Число 0 — не выключено (0 == False в Python)."""
+    return value is None or value is False or (isinstance(value, dict | list | str) and not value)
+
+
+def canonical_params(params: dict) -> dict:
+    """params без того, что не меняет эксперимент: пустые и выключенные ключи, значения по умолчанию.
+
+    {model: lightgbm, class_weight: balanced, n_folds: 5, log_target: false, model_params: {learning_rate: 0.05}}
+    и {class_weight: balanced} — один и тот же эксперимент.
+    """
+    out = {k: _norm(v, k) for k, v in params.items() if not _is_off(v)}
+    model = out.get("model", DEFAULT_MODEL)
+    if model == DEFAULT_MODEL:
+        out.pop("model", None)
+    if out.get("n_folds") == DEFAULT_N_FOLDS:
+        out.pop("n_folds")
+    defaults = _model_defaults().get(model, {})
+    if isinstance(out.get("model_params"), dict):
+        changed = {k: v for k, v in out["model_params"].items() if k not in defaults or _norm(defaults[k]) != v}
+        if changed:
+            out["model_params"] = changed
+        else:
+            out.pop("model_params")
+    return out
+
+
 def params_key(params: dict) -> str:
-    """Канонический вид params: одинаковые гипотезы с разными id считаем повтором."""
-    return json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
+    """Ключ для поиска повторов: одинаковые по сути гипотезы с разными id и записью params совпадают."""
+    return json.dumps(canonical_params(params), sort_keys=True, ensure_ascii=False, default=str)
 
 
 def propose_hypotheses(
