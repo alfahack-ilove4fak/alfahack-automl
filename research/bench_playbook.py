@@ -183,16 +183,16 @@ def bench_task(task_md: Path, only: set[str] | None) -> list[dict]:
     return rows
 
 
-def summarize(rows: list[dict]) -> pd.DataFrame:
+def summarize(rows: pd.DataFrame) -> pd.DataFrame:
     """Сводка по гипотезам: выигрыш на честной части и решения агента (порядок playbook — по wins, потом gain)."""
-    df = pd.DataFrame(rows)
-    df = df[df["id"] != "baseline"]
+    rows = rows.drop_duplicates(["task", "id"], keep="last")  # несколько CSV: бейзлайн задачи считается в каждом
+    df = rows[rows["id"] != "baseline"].copy()
     if df.empty or "honest_gain" not in df:
         return pd.DataFrame()
     df["honest_win"] = df["honest_gain"] > 0
-    df["accepted"] = df.get("accepted", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+    df["accepted"] = df["accepted"].eq(True) if "accepted" in df else False
     # выигрыш в долях бейзлайна — чтобы складывать задачи с разными метриками
-    base = pd.DataFrame(rows).query("id == 'baseline'").set_index("task")["honest"]
+    base = rows[rows["id"] == "baseline"].set_index("task")["honest"]
     df["honest_rel"] = df["honest_gain"] / df["task"].map(base).abs()
     return (
         df.groupby("id", sort=False)
@@ -212,20 +212,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка гипотез playbook на задачах")
     parser.add_argument("--tasks", nargs="*", type=Path, help="папки задач (по умолчанию все public и practice)")
     parser.add_argument("--only", nargs="*", help="id гипотез (бейзлайн считается всегда)")
+    parser.add_argument("--from-csv", nargs="*", type=Path, help="не считать, а свести сохранённые прогоны стенда")
     args = parser.parse_args()
-    tasks = [t / "task.md" for t in args.tasks] if args.tasks else find_tasks()
-    rows = [r for t in tasks for r in bench_task(t, set(args.only) if args.only else None)]
-    out_dir = ROOT / "runs" / "bench"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"playbook-{time.strftime('%Y%m%d-%H%M%S')}.csv"
-    pd.DataFrame(rows).to_csv(out, index=False)
+    if args.from_csv:
+        rows = pd.concat([pd.read_csv(path) for path in args.from_csv], ignore_index=True)
+        out = None
+    else:
+        tasks = [t / "task.md" for t in args.tasks] if args.tasks else find_tasks()
+        rows = pd.DataFrame([r for t in tasks for r in bench_task(t, set(args.only) if args.only else None)])
+        out_dir = ROOT / "runs" / "bench"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"playbook-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+        rows.to_csv(out, index=False)
     summary = summarize(rows)
     if not summary.empty:
         print(
             "\nСводка (wins — честно лучше бейзлайна; accepted — агент принял бы; accepted_and_win — принял по делу):"
         )
         print(summary.to_string(float_format=lambda v: f"{v:.4f}"))
-    print(f"\nСохранено: {out}")
+    if out is not None:
+        print(f"\nСохранено: {out}")
     return 0
 
 
