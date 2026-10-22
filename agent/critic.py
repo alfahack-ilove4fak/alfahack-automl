@@ -87,4 +87,13 @@ def lightgbm_slowdown(lr: float, leaves: float, base_lr: float, base_leaves: flo
 
 def estimated_seconds(hyp: Hypothesis, baseline_seconds: float) -> float:
     """Оценка длительности эксперимента с запасом: ей сравниваем с оставшимся бюджетом."""
-    return baseline_seconds * slowdown(hyp) * TIME_SAFETY
+    seconds = baseline_seconds * slowdown(hyp) * TIME_SAFETY
+    optuna = hyp.params.get("optuna")
+    if optuna is True:
+        optuna = {}  # optuna: true — подбор со значениями по умолчанию (ml/tuning.py: timeout 600 с)
+    if isinstance(optuna, dict):  # подбор идёт до CV и длится до своего timeout
+        try:
+            seconds += float(optuna.get("timeout", 600))
+        except (TypeError, ValueError):
+            pass
+    return seconds
