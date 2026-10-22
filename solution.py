@@ -29,7 +29,7 @@ import pandas as pd
 
 from agent.hypotheses import baseline_hypothesis
 from agent.loop import run_autoresearch
-from agent.task_parser import find_task_files, parse_task
+from agent.task_parser import find_task_files, parse_task, spec_for_target
 from evaluation.metrics import METRICS
 from evaluation.submission import per_class_columns, validate_submission, write_submission_atomic
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
@@ -55,8 +55,42 @@ def _class_share_answer(spec: TaskSpec, y, test, class_columns: list[str]):
     return test[[spec.id_column]].assign(**dict(zip(class_columns, probs, strict=True)))[spec.submission_columns]
 
 
+def all_targets(spec: TaskSpec) -> list[str]:
+    return [spec.target, *spec.extra_targets]
+
+
+def join_targets(spec: TaskSpec, test, parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """Склеить ответы по отдельным таргетам (id, таргет) в один по колонкам шаблона. Строки — в порядке test."""
+    out = test[[spec.id_column]].copy()
+    for part in parts:
+        column = part.columns[-1]
+        out[column] = part[column].to_numpy()
+    return out[spec.submission_columns]
+
+
+def fit_extra_targets(spec: TaskSpec, train, test) -> list[pd.DataFrame]:
+    """Ответы по дополнительным таргетам (#174): LightGBM по умолчанию на каждый, без CV.
+
+    Цикл AutoResearch улучшает только основной таргет; сбой по дополнительному — его тривиальный ответ.
+    """
+    log = setup_logging()
+    parts = []
+    for target in spec.extra_targets:
+        sub = spec_for_target(spec, target, train[target])
+        try:
+            parts.append(fit_predict_final(sub, profile_data(sub, train, test), baseline_hypothesis(), train, test))
+            log.info("Таргет %s (%s): модель обучена", target, sub.task_type.value)
+        except Exception:  # noqa: BLE001 — один таргет не должен стоить ответа по остальным
+            log.exception("Таргет %s: модель не обучилась — тривиальный ответ", target)
+            parts.append(trivial_answer(sub, train, test))
+    return parts
+
+
 def trivial_answer(spec: TaskSpec, train, test):
     """Ответ без модели: страховка на случай, если всё остальное упадёт."""
+    if spec.extra_targets:  # несколько таргетов (#174): тривиальный ответ по каждому
+        parts = [trivial_answer(spec_for_target(spec, t, train[t]), train, test) for t in all_targets(spec)]
+        return join_targets(spec, test, parts)
     y = train[spec.target]
     class_columns = per_class_columns(spec)
     if class_columns and spec.task_type != TaskType.REGRESSION:
@@ -174,6 +208,8 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
         began = time.time()
         try:
             answer = fit_predict_final(spec, profile, hyp, train, test)
+            if spec.extra_targets:
+                answer = join_targets(spec, test, [answer[[spec.id_column, spec.target]], *extra_answers])
             problems = keeper.write(answer[spec.submission_columns])
             score = "без CV" if res.mean_score is None else f"CV {res.metric_name}={res.mean_score:.5f}"
             log.info("Сохранён ответ «%s» (%s), проверка: %s", hyp.id, score, "OK" if not problems else problems)
@@ -182,6 +218,8 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
         return time.time() - began
 
     profile = profile_data(spec, train, test)
+    # Дополнительные таргеты — один раз до бейзлайна: их ответ нужен в каждой записи модели
+    extra_answers = fit_extra_targets(spec, train, test) if spec.extra_targets else []
     parsed_at = time.time()
     base, base_result = baseline_ladder(spec, profile, train, test, budget)
     log.info("Шаг 1: бейзлайн %s=%s ± %s", base_result.metric_name, base_result.mean_score, base_result.std_score)

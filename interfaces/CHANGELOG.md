@@ -9,3 +9,4 @@
 |---|---|---|---|---|
 | 1.0.0 | 2026-10-20 | @thenlaooo | Первая версия: TaskSpec, DataProfile, Hypothesis, ExperimentResult, RunBudget, ValidationReport | все |
 | 1.1.0 | 2026-10-21 | @thenlaooo | ADR 0008: `ExperimentResult.validation` (схема CV, `beats()` не сравнивает разные схемы) и `refit_params` (вместо скрытой правки `hypothesis.params`); `budget` в `ProposeHypotheses`; новый `CodeResult` и протокол `RunCode`; задокументированы `Hypothesis.code`, ключи `DataProfile.target_summary`, формат `oof_path`/`test_pred_path` | ml, agent, captain |
+| 1.1.1 | 2026-10-22 | @n0h4ndy (по добру @thenlaooo, #174) | `TaskSpec.extra_targets: list[str] = []` — остальные таргеты задачи с несколькими колонками ответа; `target` по-прежнему основной | agent (заполняет), captain (`solution.py`: ответ по всем таргетам) |
