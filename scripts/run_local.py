@@ -3,7 +3,7 @@
     uv run python scripts/run_local.py tasks/public/regression/task.md --minutes 10
     uv run python scripts/run_local.py --all --minutes 5        # все задачи из tasks/public и tasks/practice
 
-Печатает время, итог проверки submission.csv и путь к логу.
+Печатает время, итог проверки submission.csv и путь к логу. .env из корня подхватывается сам (заданное не трогаем).
 Баллы на отложенной части train — харнесс: uv run python -m evaluation.harness --all --minutes 5
 """
 
@@ -19,6 +19,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+
+def load_env_file(path: Path = ROOT / ".env") -> bool:
+    """Подхватить .env из корня репозитория (ключ Qwen и настройки), не перезаписывая заданные переменные.
+
+    Только для локального запуска: на платформе .env нет, ключ задаёт сама платформа.
+    """
+    if not path.exists():
+        return False
+    from dotenv import load_dotenv
+
+    return load_dotenv(path, override=False)
 
 
 def run_one(task_md: Path, minutes: float, mock_llm: bool) -> bool:
@@ -67,4 +79,5 @@ def main() -> int:
 if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → ✅ и кириллица роняют вывод
         _stream.reconfigure(encoding="utf-8", errors="replace")
+    load_env_file()
     sys.exit(main())
