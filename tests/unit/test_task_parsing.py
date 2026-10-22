@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from agent.task_parser import parse_task
@@ -117,6 +118,50 @@ def test_find_metric_in_text(text, expected):
 def test_metric_directions():
     assert compute_metric("rmse", [1, 2], [1, 2]) == 0.0
     assert compute_metric("f1_macro", [0, 1], [0, 1]) == 1.0
+
+
+def _task(tmp_path, train, test, text="Метрика — RMSE.", sample=None, dictionary=None) -> Path:
+    train.to_csv(tmp_path / "train.csv", index=False)
+    test.to_csv(tmp_path / "test.csv", index=False)
+    if sample is not None:
+        sample.to_csv(tmp_path / "sample_submission.csv", index=False)
+    if dictionary is not None:
+        dictionary.to_csv(tmp_path / "data_dictionary.csv", index=False)
+    (tmp_path / "task.md").write_text(text, encoding="utf-8")
+    return tmp_path / "task.md"
+
+
+def test_dictionary_columns_case_insensitive(tmp_path):
+    # формат словаря не гарантирован (вебинар): «Feature, Role» вместо «feature, role»
+    train = pd.DataFrame({"id": [1, 2, 3], "x": [1.0, 2.0, 3.0], "y": [0.1, 0.2, 0.3], "info": ["a", "b", "c"]})
+    test = pd.DataFrame({"id": [4, 5], "x": [4.0, 5.0]})
+    dictionary = pd.DataFrame({"Feature": ["id", "x", "y", "info"], "Role": ["ID", "feature", "Target", "info"]})
+    spec = parse_task(_task(tmp_path, train, test, dictionary=dictionary))
+    assert spec.target == "y" and spec.id_column == "id"
+
+
+def test_empty_target_column_in_test(tmp_path):
+    # target есть и в test, но пустой — заготовка под ответ; sample_submission нет
+    train = pd.DataFrame({"id": [1, 2, 3], "x": [1.0, 2.0, 3.0], "y": [0.1, 0.2, 0.3]})
+    test = pd.DataFrame({"id": [4, 5], "x": [4.0, 5.0], "y": [None, None]})
+    spec = parse_task(_task(tmp_path, train, test))
+    assert spec.target == "y"
+
+
+def test_float_zero_one_target_is_binary(tmp_path):
+    # метки 0.0/1.0 (целые, записанные как float) — классификация, а не регрессия
+    n = 40
+    train = pd.DataFrame({"id": range(n), "x": range(n), "churn": [float(i % 2) for i in range(n)]})
+    test = pd.DataFrame({"id": range(n, n + 5), "x": range(5)})
+    spec = parse_task(_task(tmp_path, train, test, text="Предскажите, уйдёт ли клиент."))
+    assert spec.task_type == TaskType.BINARY
+
+
+def test_float_continuous_target_stays_regression(tmp_path):
+    train = pd.DataFrame({"id": range(30), "x": range(30), "y": [i * 0.37 for i in range(30)]})
+    test = pd.DataFrame({"id": range(30, 33), "x": range(3)})
+    spec = parse_task(_task(tmp_path, train, test, text="Предскажите y."))
+    assert spec.task_type == TaskType.REGRESSION
 
 
 def _write_task(folder: Path, text: str, target_values: list) -> Path:
