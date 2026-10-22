@@ -252,3 +252,15 @@ def test_playbook_skips_llm_repeat_written_differently(spec, profile):
     out = propose_hypotheses(spec, profile, baseline_history(), k=5, llm=FakeLLM([same]))
     assert "llm_balanced" in [h.id for h in out]
     assert "balanced_classes" not in [h.id for h in out]
+
+
+def test_zero_is_not_switched_off():
+    # ревью #164: 0 == False в Python — числовой ноль не должен пропадать как «выключенный ключ»
+    assert params_key({"seed": 0}) != params_key({})
+    assert canonical_params({"min_child_samples": 0.0, "x": 1}) == {"min_child_samples": 0, "x": 1}
+
+
+def test_column_names_keep_case():
+    # ревью #164: в validation и feature_ops — имена колонок, «Year» и «year» могут быть разными
+    assert params_key({"validation": "time:Year"}) != params_key({"validation": "time:year"})
+    assert params_key({"model": "CatBoost"}) == params_key({"model": "catboost"})
