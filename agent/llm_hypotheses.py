@@ -87,6 +87,9 @@ def llm_hypotheses(
         return []
     try:
         raw = llm.chat_json(messages, temperature=TEMPERATURE, max_tokens=MAX_TOKENS, seconds_left=_left(budget))
+        if raw is None:  # не звали (мало времени), сбой или пустой/невалидный ответ — причина уже в логе клиента
+            log.info("LLM гипотез не дала — гипотезы из playbook")
+            return []
         out = parse_hypotheses(raw, history, k)
     except Exception:  # noqa: BLE001 — сбой LLM-части не должен останавливать цикл
         log.exception("Гипотезы от LLM не получены")

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_client import MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
+from agent.llm_client import DEFAULT_REASONING_TOKENS, MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
 
 MESSAGES = [{"role": "user", "content": "предложи гипотезы"}]
 
@@ -152,7 +152,7 @@ def test_reasoning_reserve_added_to_max_tokens(client, monkeypatch):
     client._client = fake
     client.chat(MESSAGES, max_tokens=800)
     assert sent["max_tokens"] == 800 + client.reasoning_tokens
-    assert client.reasoning_tokens == 3000
+    assert client.reasoning_tokens == DEFAULT_REASONING_TOKENS == 6000
 
 
 def test_reasoning_reserve_from_env(monkeypatch):
