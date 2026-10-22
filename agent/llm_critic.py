@@ -25,6 +25,7 @@ log = get_logger("llm_critic")
 CRITIC_ENV = "AGENT_LLM_CRITIC"
 MAX_TOKENS = 400  # ответ — короткий список вердиктов; рассуждения модели сверху (LLM_REASONING_TOKENS)
 MIN_SECONDS_LEFT = 300  # запрос стоит 10–20 с: под конец бюджета время нужнее экспериментам
+# сколько ждать ответа, решает LLMClient по seconds_left — то же правило, что у генератора (D3)
 MAX_REASON_CHARS = 200
 
 
@@ -56,7 +57,7 @@ def critique(
     if messages is None:
         return {}
     try:
-        raw = llm.chat_json(messages, temperature=0.1, max_tokens=MAX_TOKENS)
+        raw = llm.chat_json(messages, temperature=0.1, max_tokens=MAX_TOKENS, seconds_left=budget.seconds_left())
     except Exception:  # noqa: BLE001 — сбой критика не должен останавливать цикл
         log.exception("Критик LLM не ответил — гипотезы проходят без проверки")
         return {}
