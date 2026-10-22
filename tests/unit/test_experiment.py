@@ -709,3 +709,41 @@ def test_rmsle_default_log_target_gives_non_negative_answer():
     assert result.status == ExperimentStatus.OK, result.error
     answer = fit_predict_final(spec, profile, hyp, train, test)
     assert (answer["y"] >= 0).all()
+
+
+@pytest.mark.parametrize(
+    ("fraction", "expected"),
+    [(None, 1.0), (0.8, 1.0), (0.9, 1.0), (0.5, 1.6), (0.1, 3.0)],  # 0.1 — упор в MAX_TREES_SCALE
+)
+def test_trees_scale_by_train_fraction(fraction, expected):
+    from ml.experiment import _trees_scale
+
+    params = {} if fraction is None else {"_train_fraction": fraction}
+    assert _trees_scale(params) == pytest.approx(expected)
+
+
+def test_time_scheme_gives_more_final_trees(monkeypatch):
+    # #218: в time-схеме фолды учатся в среднем на половине train — финалу нужно больше деревьев, чем ×1.1
+    import ml.experiment as experiment
+
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, test, profile = _data(TaskType.REGRESSION)
+    train["day"] = np.repeat(np.arange(30), 10)
+    test["day"] = 31
+    profile = profile.model_copy(update={"numeric_features": ["a", "day"]})
+    hyp = _hyp(validation="time:day", model_params={"n_estimators": 200})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert hyp.params["_train_fraction"] < 0.7
+    seen = {}
+    real_fit = experiment._fit_model
+
+    def spy_fit(*args, n_estimators=None, **kwargs):
+        seen["n"] = n_estimators
+        return real_fit(*args, n_estimators=n_estimators, **kwargs)
+
+    monkeypatch.setattr(experiment, "_fit_model", spy_fit)
+    fit_predict_final(spec, profile, hyp, train, test)
+    assert seen["n"] > int(hyp.params["_best_iteration"] * 1.1)
