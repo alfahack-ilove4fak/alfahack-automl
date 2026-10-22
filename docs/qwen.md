@@ -30,7 +30,8 @@ GitHub → **Actions → qwen → Run workflow**:
 
 ## Путь 2. Локально (если ключ есть в твоём `.env`)
 ```
-uv run python scripts/qwen.py check                     # связь, ✅/❌ и подсказка, что чинить
+uv run python scripts/qwen.py check                     # связь + длинный ответ (≈ 30 с, ≈ 1 ₽), ✅/❌ и подсказка
+uv run python scripts/qwen.py check --quick             # только короткий запрос (копейки)
 uv run python scripts/qwen.py budget                    # потрачено / осталось / когда сброс
 uv run python scripts/qwen.py run tasks/public/multiclass/task.md --minutes 8
 uv run python scripts/qwen.py compare --minutes 5       # без LLM против Qwen на всех задачах харнесса
@@ -53,12 +54,13 @@ uv run python scripts/qwen.py compare --minutes 5       # без LLM проти�
 | Симптом | Что проверить |
 |---|---|
 | `Connection error` | `scripts/qwen.py check` покажет причину целиком (DNS / TCP / TLS / таймаут); URL с `https://` и `/v1` |
+| `Server disconnected without sending a response` через ≈ 10 с | сеть рвёт долгие ответы: короткий запрос проходит, запрос гипотез (≈ 35 с) — нет. `check` покажет ❌ «длинный ответ». Прогоны с Qwen — с другой сети или в Actions (#193) |
 | `401` | ключ: без кавычек, пробелов и `Bearer`; не перекрыт ли переменной в оболочке |
 | пустой ответ, `упёрлась в лимит` | рассуждения съели `max_tokens` — увеличить `LLM_REASONING_TOKENS` |
 | `budget exceeded` / отказ | дневные 600 ₽ кончились — ждать 03:00 МСК |
 | `LLM выключена` | `LLM_MOCK=1` в `.env` или нет ключа |
 
-21.10 весь прогон шёл с `Connection error` при живом сервере, 22.10 тот же ключ работал — причина не установлена; теперь в логе пишется вся цепочка ошибки (PR #159). Увидишь снова — `scripts/qwen.py check` и в чат.
+21.10 весь прогон шёл с `Connection error` при живом сервере. Причина найдена 22.10 (#136, #193): сеть на машине капитана рвёт любой HTTPS-ответ дольше ≈ 10–12 с — короткие запросы проходят, запросы гипотез нет. Оборванные запросы, похоже, всё равно списываются с бюджета. Увидишь снова — `scripts/qwen.py check` (без `--quick`) и в чат.
 
 ## Кто за что
 - Артём — `agent/llm_client.py`, промпты, сколько и когда звать LLM.
