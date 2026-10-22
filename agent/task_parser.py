@@ -1,7 +1,8 @@
 """Разбор задачи: task.md + файлы рядом → TaskSpec. Владелец — LLM/agent-инженер.
 
-Сейчас разбор детерминированный (без LLM) — он должен работать ВСЕГДА, даже если LLM недоступна.
-LLM-уточнение (agent/llm_client.py) добавляется поверх и может только дополнить notes/метрику.
+Детерминированный разбор работает ВСЕГДА, даже если LLM недоступна. Поверх него — LLM-аналитик
+(agent/task_analyst.py): Qwen читает task.md, агент сверяет её ответ с данными. LLM заменяет только то,
+что эвристика угадала (нет sample_submission, метрика не найдена), остальное попадает в notes.
 
 Важно: пути в тексте task.md не обязаны совпадать с реальной раскладкой
 (в публичных задачах так и есть), поэтому файлы ищем сами.
@@ -27,6 +28,7 @@ FILE_PATTERNS = {
     "data_dictionary": re.compile(r"^(data_)?dictionary.*\.csv$", re.I),
 }
 DEFAULT_METRIC = {TaskType.REGRESSION: "rmse", TaskType.BINARY: "roc_auc", TaskType.MULTICLASS: "f1_macro"}
+LABEL_METRIC = {TaskType.BINARY: "accuracy", TaskType.MULTICLASS: "f1_macro"}  # когда в шаблоне метки
 MAX_CLASSES_FOR_NUMERIC_TARGET = 20
 
 
@@ -52,7 +54,8 @@ def find_task_files(task_md: Path) -> dict[str, Path]:
     return found
 
 
-def parse_task(task_md: Path) -> TaskSpec:
+def parse_task(task_md: Path, llm=None) -> TaskSpec:
+    """task.md → TaskSpec. llm — LLMClient для аналитика; None — создать свой (без ключа он сразу недоступен)."""
     task_md = task_md.resolve()
     text = task_md.read_text(encoding="utf-8")
     files = find_task_files(task_md)
@@ -66,23 +69,43 @@ def parse_task(task_md: Path) -> TaskSpec:
     dictionary = _read_dictionary(files.get("data_dictionary"))
 
     # id и target: надёжнее всего — заголовок sample_submission
+    guessed: set[str] = set()  # что эвристика лишь угадала — это может уточнить LLM-аналитик
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
         if target not in train_cols:
             # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
-            target = _guess_target(train_cols, test_cols, dictionary, files["test"])
+            target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
+            guessed.add("target")
             notes.append(
                 f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
             )
     else:
-        target = _guess_target(train_cols, test_cols, dictionary, files["test"])
+        target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
         id_column = _guess_id(test_cols, dictionary)
-        submission_columns = [id_column, target]
+        guessed |= {"target", "id_column"}
         notes.append("Нет sample_submission: id и target определены по train/test/словарю")
+    metric_name = find_metric_in_text(text)
+    if metric_name is None:
+        guessed.add("metric")
+
+    target, id_column, metric_name = _ask_analyst(
+        text, files, train_cols, test_cols, target, id_column, metric_name, guessed, notes, llm
+    )
+    if target is None:
+        raise ValueError(f"Не удалось определить target: колонки только в train = {_train_only(train_cols, test_cols)}")
+    if "sample_submission" not in files:
+        submission_columns = [id_column, target]
+
+    # Несколько таргетов (#174): другие колонки ответа, которые есть только в train, — тоже таргеты.
+    # Основной (по нему CV и цикл) — тот, к которому подходит метрика из текста
+    targets = [target] + [c for c in submission_columns[1:] if c != target and c in train_cols and c not in test_cols]
+    if len(targets) > 1:
+        target = _primary_target(files["train"], targets, metric_name)
+        notes.append(f"Несколько таргетов: {targets} — модель на каждый, цикл — по {target}")
+    extra_targets = [t for t in targets if t != target]
 
     y = pd.read_csv(files["train"], usecols=[target])[target]
-    metric_name = find_metric_in_text(text)
     task_type = _guess_task_type(y, metric_name, dictionary.get(target))
     metric_name = _check_needs_proba(metric_name, task_type, text, files.get("sample_submission"), target, notes)
     if metric_name is None:
@@ -94,7 +117,7 @@ def parse_task(task_md: Path) -> TaskSpec:
     if task_type in (TaskType.BINARY, TaskType.MULTICLASS):
         class_labels = sorted(map(str, y.dropna().unique()))
         answer_columns = submission_columns[1:]
-        if len(answer_columns) > 1 and set(answer_columns) != set(class_labels):
+        if len(answer_columns) > 1 and not extra_targets and set(answer_columns) != set(class_labels):
             notes.append(f"Колонки ответа {answer_columns} не совпадают с классами train {class_labels}")
 
     spec = TaskSpec(
@@ -110,6 +133,7 @@ def parse_task(task_md: Path) -> TaskSpec:
         id_column=id_column,
         metric=MetricSpec(name=metric.name, greater_is_better=metric.greater_is_better),
         submission_columns=submission_columns,
+        extra_targets=extra_targets,
         class_labels=class_labels,
         description=text,
         notes=notes,
@@ -122,6 +146,31 @@ def parse_task(task_md: Path) -> TaskSpec:
         len(class_labels) if class_labels else "-",
     )
     return spec
+
+
+def _ask_analyst(text, files, train_cols, test_cols, target, id_column, metric_name, guessed, notes, llm):
+    """LLM-аналитик (agent/task_analyst.py): уточняет угаданные поля, пишет расхождения в notes. Никогда не падает."""
+    try:
+        from agent import task_analyst  # здесь: разбор без LLM не должен зависеть от промптов и клиента
+
+        if not task_analyst.enabled():
+            return target, id_column, metric_name
+        if llm is None:
+            from agent.llm_client import LLMClient
+
+            llm = LLMClient()
+        view = task_analyst.ask_llm(text, train_cols, test_cols, files.get("sample_submission"), llm)
+        heuristic = {"target": target, "id_column": id_column, "metric": metric_name}
+        accepted, extra = task_analyst.reconcile(view, heuristic, guessed, train_cols, test_cols)
+    except Exception:  # noqa: BLE001 — разбор по данным важнее
+        log.exception("LLM-аналитик задачи упал — остаёмся на разборе по данным")
+        return target, id_column, metric_name
+    notes += extra
+    return accepted.get("target", target), accepted.get("id_column", id_column), accepted.get("metric", metric_name)
+
+
+def _train_only(train_cols, test_cols) -> list[str]:
+    return [c for c in train_cols if c not in test_cols]
 
 
 def _check_needs_proba(
@@ -188,11 +237,12 @@ def _read_dictionary(path: Path | None) -> dict[str, dict]:
         return {}
 
 
-def _guess_target(train_cols, test_cols, dictionary, test_path: Path | None = None) -> str:
+def _guess_target(train_cols, test_cols, dictionary, test_path: Path | None = None, strict: bool = True) -> str | None:
+    """target по словарю, единственной колонке «только в train» или пустой колонке test. strict=False — None вместо ошибки (решит LLM)."""
     for name, row in dictionary.items():
         if str(row.get("role", "")).strip().lower() == "target" and name in train_cols:
             return name
-    extra = [c for c in train_cols if c not in test_cols]
+    extra = _train_only(train_cols, test_cols)
     if len(extra) == 1:
         return extra[0]
     if not extra and test_path is not None:
@@ -200,6 +250,8 @@ def _guess_target(train_cols, test_cols, dictionary, test_path: Path | None = No
         empty = _empty_test_columns(test_path, [c for c in train_cols if c in test_cols])
         if len(empty) == 1:
             return empty[0]
+    if not strict:
+        return None
     raise ValueError(f"Не удалось определить target: колонки только в train = {extra}")
 
 
@@ -218,9 +270,22 @@ def _guess_id(test_cols, dictionary) -> str:
     return "id" if "id" in test_cols else test_cols[0]
 
 
+def _primary_target(train_path: Path, targets: list[str], metric_name: str | None) -> str:
+    """Основной таргет из нескольких: первый, тип которого подходит метрике (число — для регрессионной)."""
+    if metric_name is None:
+        return targets[0]
+    ys = pd.read_csv(train_path, usecols=targets)
+    wants_value = METRICS[metric_name].prediction == "value"
+    for t in targets:
+        if (_guess_task_type(ys[t], None, None) == TaskType.REGRESSION) == wants_value:
+            return t
+    return targets[0]
+
+
 def _guess_task_type(y: pd.Series, metric_name: str | None, dict_row: dict | None) -> TaskType:
-    if metric_name is not None and METRICS[metric_name].prediction == "value":
-        return TaskType.REGRESSION
+    numeric = pd.api.types.is_numeric_dtype(y)
+    if metric_name is not None and METRICS[metric_name].prediction == "value" and numeric:
+        return TaskType.REGRESSION  # текстовый таргет регрессией не бывает, даже при метрике вроде MAE
     n_unique = y.nunique(dropna=True)
     # 0.0/1.0 (так читаются целые метки с пропусками или записанные как float) — те же целые метки
     integer_values = pd.api.types.is_integer_dtype(y) or (
@@ -235,3 +300,28 @@ def _guess_task_type(y: pd.Series, metric_name: str | None, dict_row: dict | Non
     if not is_categorical:
         return TaskType.REGRESSION
     return TaskType.BINARY if n_unique == 2 else TaskType.MULTICLASS
+
+
+def spec_for_target(spec: TaskSpec, target: str, y: pd.Series) -> TaskSpec:
+    """TaskSpec одного таргета задачи с несколькими (#174): тип и классы — по его значениям; метрика — общая,
+    если подходит к типу, иначе метрика по умолчанию для типа."""
+    task_type = _guess_task_type(y, spec.metric.name, None)
+    labels = sorted(map(str, y.dropna().unique())) if task_type != TaskType.REGRESSION else None
+    metric = spec.metric
+    if (METRICS[metric.name].prediction == "value") != (task_type == TaskType.REGRESSION):
+        # метрика задачи — для другого таргета (MAE для класса): берём метрику по типу этого таргета,
+        # а для классов — по шаблону ответа: дробные значения → вероятности, иначе метки
+        name = DEFAULT_METRIC[task_type]
+        if task_type != TaskType.REGRESSION and not _sample_has_probabilities(spec.sample_submission_path, target):
+            name = LABEL_METRIC[task_type]
+        metric = MetricSpec(name=name, greater_is_better=METRICS[name].greater_is_better)
+    return spec.model_copy(
+        update={
+            "metric": metric,
+            "target": target,
+            "extra_targets": [],
+            "task_type": task_type,
+            "class_labels": labels,
+            "submission_columns": [spec.id_column, target],
+        }
+    )

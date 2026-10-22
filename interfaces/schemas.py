@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.1.1"
 
 
 class _Contract(BaseModel):
@@ -49,7 +49,8 @@ class TaskSpec(_Contract):
     data_dictionary_path: Path | None = None
     submission_path: Path  # куда писать ответ: рядом с task.md
     task_type: TaskType
-    target: str
+    target: str  # основной таргет; по нему идут CV и цикл AutoResearch
+    extra_targets: list[str] = Field(default_factory=list)  # остальные таргеты, если их несколько (#174, 1.1.1)
     id_column: str
     metric: MetricSpec
     submission_columns: list[str]

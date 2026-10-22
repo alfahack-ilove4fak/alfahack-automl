@@ -121,3 +121,11 @@ def test_stubs_accept_budget_and_run_code():
     hyps = stubs.stub_propose_hypotheses(spec, None, [], k=1, budget=RunBudget())
     assert len(hyps) == 1
     assert stubs.stub_run_code("print(1)", Path("."), timeout=1.0, mem_mb=64).exit_code == 0
+
+
+def test_extra_targets_optional_and_roundtrip():
+    # 1.1.1 (#174): поле необязательное — старые TaskSpec без него остаются валидными
+    spec = stubs.stub_task_spec(Path("tasks/demo"))
+    assert spec.extra_targets == []
+    multi = spec.model_copy(update={"extra_targets": ["y2", "y3"]})
+    assert TaskSpec.model_validate_json(multi.model_dump_json()).extra_targets == ["y2", "y3"]
