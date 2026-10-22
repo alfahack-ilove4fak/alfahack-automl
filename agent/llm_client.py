@@ -12,7 +12,8 @@
   * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (2–2.5 тыс. токенов
     на промпт гипотез) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
     в обоих вариантах и /no_think не действуют), но можно сократить: reasoning_effort=low в extra_body
-    (22.10: рассуждения ≈ в 2.5 раза короче). К каждому запросу добавляем запас REASONING_TOKENS.
+    (22.10: рассуждения ≈ в 2.5 раза короче). К каждому запросу добавляем запас REASONING_TOKENS — с запасом
+    на случай, когда сервер не принял reasoning_effort и рассуждения длинные (22.10: > 3 тыс. токенов).
 
   * Сервер под нагрузкой рвёт соединение без ответа через 10–17 с. Повторяем с паузами (RETRY_BACKOFF) в пределах
     времени, а после серии сбоев делаем паузу COOLDOWN_SECONDS вместо отключения LLM до конца прогона.
@@ -25,7 +26,7 @@
 LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
 LLM_REASONING_EFFORT (low по умолчанию; пусто — не передавать), LLM_COOLDOWN_SEC (пауза после 3 сбоев, 120 с),
 LLM_STREAM (1 по умолчанию: потоковый ответ — прокси рвёт обычный запрос через ~10 с),
-LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 3000).
+LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 6000).
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from runtime.log import get_logger
 
 log = get_logger("llm")
 
-DEFAULT_REASONING_TOKENS = 3000
+DEFAULT_REASONING_TOKENS = 6000  # 22.10 без reasoning_effort 3000 не хватило: ответ пустой, ≈ 1 ₽ впустую
 MAX_RETRIES = 2
 LLM_TIME_SHARE = 0.25  # какую долю оставшегося времени можно ждать LLM: остальное — экспериментам
 LEDGER_ANSWER_CHARS = 4000
