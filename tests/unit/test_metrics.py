@@ -66,3 +66,25 @@ def test_binary_metrics_do_not_crash_on_multiclass():
     assert compute_metric("f1", y, p) == pytest.approx(compute_metric("f1_macro", y, p))
     assert 0 < compute_metric("precision", y, p) < 1
     assert 0 < compute_metric("recall", y, p) < 1
+
+
+def test_new_metrics_known_values():
+    """Метрики #186: значения на простых примерах."""
+    assert compute_metric("huber", [0, 0], [0.5, 3]) == pytest.approx((0.5 * 0.25 + (3 - 0.5)) / 2)
+    assert compute_metric("pinball", [10], [8]) == pytest.approx(0.5 * 2)
+    # квантиль 0.9: недопрогноз штрафуется в 9 раз сильнее перепрогноза
+    assert compute_metric("pinball@0.9", [10], [8]) == pytest.approx(0.9 * 2)
+    assert compute_metric("pinball@0.9", [10], [12]) == pytest.approx(0.1 * 2)
+    assert compute_metric("ndcg", [3, 2, 1, 0], [4, 3, 2, 1]) == pytest.approx(1.0)
+    assert compute_metric("ndcg", [3, 2, 1, 0], [1, 2, 3, 4]) < 1
+    assert compute_metric("map", [1, 0, 1, 0], [0.9, 0.1, 0.8, 0.2]) == pytest.approx(1.0)
+    # отрицательный прогноз регрессии не роняет девианс
+    assert np.isfinite(compute_metric("poisson_deviance", [1, 2], [-1, 2]))
+
+
+def test_parametric_pinball_is_resolved_on_demand():
+    assert METRICS["pinball@0.9"].name == "pinball@0.9" and not METRICS["pinball@0.9"].greater_is_better
+    assert "pinball@0.9" not in METRICS  # в реестр не записывается — SEARCH_ORDER совпадает с METRICS
+    for bad in ("pinball@1.5", "pinball@abc", "huber@0.9"):
+        with pytest.raises(KeyError):
+            compute_metric(bad, [1], [1])
