@@ -73,7 +73,7 @@ def run_autoresearch(
             break
         hyp = queue.pop(0)
         log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
-        reason = review(hyp, spec)
+        reason = review(hyp, spec) or foreign_validation(hyp, validation)
         needed = estimated_seconds(hyp, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
             reason = f"не успеет: оценка {needed:.0f} с, осталось {budget.seconds_left():.0f} с"
@@ -112,3 +112,17 @@ def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:
     if validation is None or "validation" in hyp.params:
         return hyp  # своя схема гипотезы — acceptance отклонит её как несравнимую, но не подменяем молча
     return hyp.model_copy(update={"params": {**hyp.params, "validation": validation}})
+
+
+PLAIN_VALIDATION = ("kfold", "stratified")  # обычная CV — то же, что без validation
+
+
+def foreign_validation(hyp: Hypothesis, validation: str | None) -> str | None:
+    """Причина пропустить гипотезу со своей схемой валидации: результат несравним с бейзлайном (ADR 0008 D1).
+
+    Без проверки она отработала бы целый эксперимент и только потом была бы отклонена правилом принятия.
+    """
+    own = hyp.params.get("validation")
+    if own is None or own == validation or (validation is None and own in PLAIN_VALIDATION):
+        return None
+    return f"своя схема валидации {own} ≠ схемы прогона {validation or 'обычная CV'} — результаты несравнимы"
