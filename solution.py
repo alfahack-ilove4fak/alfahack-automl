@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import threading
@@ -107,6 +108,30 @@ def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: R
     return light, result
 
 
+def blind_answer(task_md: Path) -> pd.DataFrame | None:
+    """Ответ без TaskSpec (#187): разбор задачи упал, образца ответа нет — лучше любой ответ, чем никакого.
+
+    id — колонка `id` test, иначе первая. Ответ — колонки, которые есть только в train: упомянутые в task.md,
+    иначе последняя. Значение — среднее (число) или самое частое (остальное). None — не из чего собрать.
+    """
+    files = find_task_files(task_md)
+    if "train" not in files or "test" not in files:
+        return None
+    test = pd.read_csv(files["test"])
+    extra = [c for c in pd.read_csv(files["train"], nrows=0).columns if c not in test.columns]
+    if not extra or test.empty:
+        return None
+    text = task_md.read_text(encoding="utf-8", errors="replace")
+    targets = [c for c in extra if re.search(rf"(?<!\w){re.escape(c)}(?!\w)", text)] or extra[-1:]
+    y = pd.read_csv(files["train"], usecols=targets)
+    out = test[["id" if "id" in test.columns else test.columns[0]]].copy()
+    for col in targets:
+        values = y[col].dropna()
+        numeric = pd.api.types.is_numeric_dtype(values) and not values.empty
+        out[col] = float(values.mean()) if numeric else (str(values.astype(str).mode()[0]) if len(values) else "")
+    return out
+
+
 class AnswerKeeper:
     """Хранит последний валидный ответ и в любой момент (в том числе из сторожа) восстанавливает submission.csv."""
 
@@ -153,6 +178,9 @@ class AnswerKeeper:
                 if sample is not None:
                     shutil.copyfile(sample, self.path)
                     log.error("Финал (%s): ответа не было — скопирован %s", reason, sample.name)
+                elif (blind := blind_answer(self.task_md)) is not None:
+                    write_submission_atomic(blind, self.path)
+                    log.error("Финал (%s): ответа и образца нет — ответ без разбора задачи: %s", reason, list(blind))
                 else:
                     log.error("Финал (%s): ответа нет, и образца sample_submission тоже", reason)
         except Exception:  # noqa: BLE001 — финализация не должна ронять процесс
