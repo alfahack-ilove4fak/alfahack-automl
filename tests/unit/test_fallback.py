@@ -122,6 +122,7 @@ def test_base_params_strips_service_keys():
 def test_optuna_cost_in_estimate():
     assert estimated_seconds(hyp("o", optuna={"timeout": 100}), 10) == pytest.approx(10 * 1.5 + 100)
     assert estimated_seconds(hyp("o", optuna={"timeout": "долго"}), 10) == pytest.approx(15)
+    assert estimated_seconds(hyp("o", optuna=True), 10) == pytest.approx(15 + 600)  # #222: optuna: true от LLM
 
 
 def test_loop_uses_fallback_instead_of_exit(spec, monkeypatch):
