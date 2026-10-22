@@ -9,8 +9,10 @@
 B организаторов неизвестен, поэтому считаем два балла:
   score       — относительно тривиального ответа (среднее / частый класс / доли классов). Сильно завышен:
                 годится только для сравнения версий агента между собой;
-  model_score — относительно LightGBM по умолчанию без подбора и признаков. Ближе к бейзлайну организаторов
-                (он заведомо сильнее тривиального ответа) — по нему сверяем локальную оценку с public.
+  model_score — относительно сильного бейзлайна: лучшего из LightGBM по умолчанию (без подбора и признаков)
+                и тривиального ответа. Организаторы описали свой бейзлайн как «простейшую модель, которую DS
+                обучил руками за 5 минут» — человек не сдал бы модель хуже среднего. Так на public/regression
+                (отложены последние годы, LightGBM хуже среднего) средний балл двух задач 18.0 при public 17.46.
 """
 
 from __future__ import annotations
@@ -118,8 +120,9 @@ def score_submission(
 ) -> dict:
     """Метрика агента, метрики бейзлайнов и баллы. answers, submission и x_test — в одном порядке строк.
 
-    Модельный бейзлайн считаем, только если переданы признаки x_train/x_test. Его ошибка не роняет оценку:
-    model_baseline и model_score = NaN, причина — в model_error.
+    Сильный бейзлайн считаем, только если переданы признаки x_train/x_test: model_baseline — лучший из LightGBM
+    и тривиального ответа. Ошибка LightGBM не роняет оценку: model_baseline и model_score = NaN, причина —
+    в model_error.
     """
     y = target_for_metric(spec, answers)
     value = compute_metric(spec.metric.name, y, prediction_for_metric(spec, submission))
@@ -132,9 +135,9 @@ def score_submission(
     }
     if x_train is not None and x_test is not None:
         try:
-            model_baseline = float(
-                compute_metric(spec.metric.name, y, model_prediction(spec, x_train, y_train, x_test))
-            )
+            lgbm = float(compute_metric(spec.metric.name, y, model_prediction(spec, x_train, y_train, x_test)))
+            better = max if METRICS[spec.metric.name].greater_is_better else min
+            model_baseline = better(lgbm, float(baseline)) if np.isfinite(lgbm) else float(baseline)
             result["model_baseline"] = model_baseline
             result["model_score"] = organizer_score(spec.metric.name, value, model_baseline)
         except Exception as exc:  # noqa: BLE001 — бейзлайн вспомогательный, без него оценка агента остаётся
