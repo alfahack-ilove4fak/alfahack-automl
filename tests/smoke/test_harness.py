@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from evaluation.harness import main, make_holdout_task
+from evaluation.harness import main, make_holdout_task, time_column
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -51,6 +51,31 @@ def test_time_column_gives_last_periods(tmp_path):
     test = pd.read_csv(tmp_path / "out" / "task" / "data" / "test.csv")
     assert prepared["split"].startswith("time:year")
     assert test.year.min() > train.year.max()
+
+
+def test_date_strings_give_last_dates(tmp_path):
+    """Дата строкой, test — следующий месяц (как payments и sales): отложенная часть — последние даты, а не случайная."""
+    src = tmp_path / "src"
+    _task(src)
+    data = src / "data"
+    train, test = pd.read_csv(data / "train.csv"), pd.read_csv(data / "test.csv")
+    train["date"] = pd.date_range("2024-01-01", periods=len(train), freq="h").strftime("%Y-%m-%d")
+    test["date"] = "2024-03-01"
+    train.to_csv(data / "train.csv", index=False)
+    test.to_csv(data / "test.csv", index=False)
+    prepared = make_holdout_task(src / "task.md", tmp_path / "out")
+    part = pd.read_csv(tmp_path / "out" / "task" / "data" / "train.csv")
+    hold = pd.read_csv(tmp_path / "out" / "task" / "data" / "test.csv")
+    assert prepared["split"].startswith("time:date>=2024-")
+    assert pd.to_datetime(hold.date).min() > pd.to_datetime(part.date).max()
+    assert 0.1 < len(hold) / (len(hold) + len(part)) < 0.4
+
+
+def test_time_column_rejects_overlap_text_and_row_numbers():
+    dates = pd.Series(pd.date_range("2024-01-01", periods=60, freq="D").strftime("%Y-%m-%d"))
+    train = pd.DataFrame({"date": dates, "city": ["moscow", "kazan"] * 30, "record_no": range(60)})
+    test = pd.DataFrame({"date": dates[:5], "city": ["moscow"] * 5, "record_no": range(60, 65)})
+    assert time_column(train, test, ["date", "city", "record_no"]) is None  # даты пересекаются, номер записи — не время
 
 
 def test_harness_run_on_public_task(tmp_path):
