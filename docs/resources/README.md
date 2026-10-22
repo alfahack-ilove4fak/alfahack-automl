@@ -28,4 +28,5 @@
 | [Claude Code: сабагенты](https://code.claude.com/docs/en/sub-agents) и [скиллы](https://code.claude.com/docs/en/skills) | как устроены наши `.claude/agents` и `.claude/skills` |
 | [Kaggle Learn: Intermediate ML](https://www.kaggle.com/learn/intermediate-machine-learning) | быстрый практический курс табличного ML: пропуски, категории, утечки, кросс-валидация |
 | [mlcourse.ai](https://mlcourse.ai/) | открытый курс ML (автор — Юрий Кашницкий), есть материалы на русском |
+| [Вебинар организаторов — разбор](webinar-qa.md) | ответы авторов кейса: что считается агентом, какие бывают скрытые задачи, ресурсы, тай-брейки, финал; расшифровка — `reference/webinar_transcript.md` |
 | PDF кейса — `reference/case_alfahack_automl.pdf` | условия, ограничения, формулы баллов — первоисточник |
