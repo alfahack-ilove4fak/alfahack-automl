@@ -60,32 +60,57 @@ COLUMNS = [
     "error",
 ]
 SEED = 42
+DATE_SHARE = 0.95  # колонку считаем датой, если так разбирается не меньше этой доли значений (как в стенде research)
 GRACE_SEC = 60  # сколько ждём сверх бюджета, прежде чем считать, что агент «завис»
 
 
 # --- 1. Отложенная часть
 
 
-def time_column(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> str | None:
-    """Целочисленная колонка с небольшим числом значений, где весь test лежит после train, — «период»."""
+def as_dates(series: pd.Series) -> pd.Series | None:
+    """Строки-даты → datetime, если разбирается почти всё (≥ DATE_SHARE непустых); иначе None."""
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return None
+    values = series.dropna()
+    if values.empty:
+        return None
+    with warnings.catch_warnings():  # pandas предупреждает, что формат угадывается по строкам
+        warnings.simplefilter("ignore")
+        parsed = pd.to_datetime(values.astype(str), errors="coerce", format="mixed")
+        if parsed.notna().mean() < DATE_SHARE:
+            return None
+        return pd.to_datetime(series.astype(str), errors="coerce", format="mixed")
+
+
+def time_column(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> tuple[str, pd.Series] | None:
+    """Колонка, по которой весь test лежит после train, и её значения в train для упорядочивания.
+
+    Как в стенде research (research/bench_playbook.py): целочисленный код периода (2–50 значений, «год 1–6»)
+    или дата строкой. Номер записи и прочие «растущие» числа периодом не считаем.
+    """
     for col in features:
-        if not (pd.api.types.is_integer_dtype(train[col]) and pd.api.types.is_integer_dtype(test[col])):
+        if pd.api.types.is_integer_dtype(train[col]) and pd.api.types.is_integer_dtype(test[col]):
+            if 1 < train[col].nunique() <= 50 and test[col].min() > train[col].max():
+                return col, train[col]
             continue
-        if 1 < train[col].nunique() <= 50 and test[col].min() > train[col].max():
-            return col
+        tr_dates, te_dates = as_dates(train[col]), as_dates(test[col])
+        if tr_dates is not None and te_dates is not None and te_dates.min() > tr_dates.max():
+            return col, tr_dates
     return None
 
 
 def holdout_mask(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame, frac: float) -> tuple[np.ndarray, str]:
     """Какие строки train уйдут в «скрытый тест» и как выбраны (для отчёта)."""
     features = [c for c in train.columns if c not in (spec.target, spec.id_column) and c in test.columns]
-    col = time_column(train, test, features)
-    if col:
-        counts = train[col].value_counts().sort_index(ascending=False)
+    found = time_column(train, test, features)
+    if found:
+        col, values = found
+        counts = values.value_counts().sort_index(ascending=False)  # последние периоды / даты — первыми
         last = counts.index[(counts.cumsum() >= frac * len(train)).argmax()]
-        mask = (train[col] >= last).to_numpy()
+        mask = (values >= last).to_numpy()
         if 0 < mask.mean() < 0.6:
-            return mask, f"time:{col}>={last}"
+            label = last.date() if isinstance(last, pd.Timestamp) else last
+            return mask, f"time:{col}>={label}"
 
     groups = pd.util.hash_pandas_object(train[features], index=False).to_numpy()
     rows = np.arange(len(train))
