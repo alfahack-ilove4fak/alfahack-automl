@@ -29,6 +29,11 @@ OPTUNA_BUDGET_SHARE = 0.3  # как BUDGET_SHARE в ml/tuning.py: подбор �
 OPTUNA_MIN_SECONDS = 30.0  # меньше — подбор не успеет ни одного осмысленного испытания
 OWN_KEYS = ("model", "model_params", "optuna")  # то, что запасная гипотеза задаёт сама
 FALLBACK_ENV = "AGENT_FALLBACK"  # "0" — без запасных направлений
+PREFIX = "fb-"  # id запасных гипотез
+
+
+def is_fallback(hyp: Hypothesis) -> bool:
+    return hyp.id.startswith(PREFIX)
 
 
 def base_params(params: dict) -> dict:
@@ -43,7 +48,7 @@ def _key(params: dict) -> str:
 def _hyp(kind: HypothesisKind, title: str, rationale: str, params: dict, parent: Hypothesis) -> Hypothesis:
     digest = hashlib.sha1(_key(params).encode()).hexdigest()[:8]
     return Hypothesis(
-        id=f"fb-{digest}",
+        id=f"{PREFIX}{digest}",
         kind=kind,
         title=f"запасное: {title}",
         rationale=rationale,
