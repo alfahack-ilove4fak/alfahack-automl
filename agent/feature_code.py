@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -24,7 +25,7 @@ import pandas as pd
 from pydantic import ValidationError
 
 from agent.prompting import describe_profile, describe_task, load_prompt
-from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, TaskSpec
+from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, RunBudget, TaskSpec
 from runtime.log import get_logger
 from runtime.sandbox import run_code
 
@@ -56,6 +57,10 @@ ORDER_ATTRS = {
 MAX_NEW_COLUMNS = 10  # промпт просит ≤ 5; запас на случай, когда LLM разворачивает идею шире
 SANDBOX_TIMEOUT = 120.0  # сек: векторный код на 100–500 тыс. строк укладывается в секунды
 SANDBOX_MEM_MB = 8192  # ≥ 2048 только на импорт pandas (runtime/sandbox.py); таблица ×2–3 на копии
+FEATURE_ENV = "AGENT_FEATURE_CODE"  # "0" — не просить у LLM код признаков
+MAX_FEATURE_TRIES = 2  # запросов кода за прогон: каждый ≈ 1 ₽ и ~35 с, плюс песочница — токены и время тай-брейки
+FEATURE_MAX_TOKENS = 1500  # ответ — код до MAX_CODE_CHARS; рассуждения модели сверху (LLM_REASONING_TOKENS)
+FEATURE_TEMPERATURE = 0.3
 LLM_FIELDS = ("id", "title", "rationale", "code")
 MAX_ID_LEN = 40
 
@@ -136,6 +141,37 @@ def feature_params(best: Hypothesis | None) -> dict:
     if best is None:
         return {"model": "lightgbm"}
     return copy.deepcopy({k: v for k, v in best.params.items() if not str(k).startswith("_")})
+
+
+def propose_feature_hypothesis(
+    spec: TaskSpec,
+    profile: DataProfile,
+    history: list[tuple[Hypothesis, ExperimentResult]],
+    llm,
+    best: Hypothesis | None,
+    budget: RunBudget | None = None,
+) -> Hypothesis | None:
+    """Один запрос к LLM за гипотезой-признаками с кодом. None — выключено, LLM недоступна, мусор или сбой."""
+    if os.getenv(FEATURE_ENV, "1") == "0" or llm is None or not llm.available():
+        return None
+    tried = [h.title for h, _ in history if h.kind == HypothesisKind.FEATURES]
+    messages = build_feature_messages(spec, profile, tried)
+    if messages is None:
+        return None
+    try:
+        raw = llm.chat_json(
+            messages,
+            temperature=FEATURE_TEMPERATURE,
+            max_tokens=FEATURE_MAX_TOKENS,
+            seconds_left=None if budget is None else budget.seconds_left(),
+        )
+    except Exception:  # noqa: BLE001 — без кода признаков цикл идёт дальше
+        log.exception("Код признаков от LLM не получен")
+        return None
+    hyp = parse_feature_hypothesis(raw, spec, history, best)
+    if hyp is not None:
+        log.info("LLM предложила код признаков «%s»: %s", hyp.id, hyp.title)
+    return hyp
 
 
 def parse_feature_hypothesis(

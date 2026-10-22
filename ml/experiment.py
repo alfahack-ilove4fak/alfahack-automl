@@ -467,6 +467,7 @@ def run_experiment(
         rows = _cv_rows(spec, profile, y, budget)
         if rows is not None:
             train, y = train.iloc[rows], y[rows]
+        profile, train, _ = with_feature_code(spec, profile, hypothesis, train)
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scheme, column = parse_validation(params.get("validation"), spec)
@@ -575,12 +576,50 @@ def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.nd
     return {col: proba[:, i] for i, col in enumerate(columns)}
 
 
+def with_feature_code(
+    spec: TaskSpec,
+    profile: DataProfile,
+    hypothesis: Hypothesis,
+    train: pd.DataFrame,
+    test: pd.DataFrame | None = None,
+) -> tuple[DataProfile, pd.DataFrame, pd.DataFrame | None]:
+    """Код признаков от LLM (`Hypothesis.code`, ADR 0008 D4) → новые числовые колонки в train/test и профиле.
+
+    Код исполняется в песочнице (agent/feature_code.apply_feature_code) на признаках train+test вместе,
+    **без target и id**; новые колонки берутся только числовые. Ошибка кода → исключение → FAILED гипотезы
+    (в run_experiment) или прежний ответ (в fit_predict_final). Без кода — всё как было.
+    """
+    if not hypothesis.code:
+        return profile, train, test
+    from agent.feature_code import apply_feature_code  # здесь: agent сам импортирует ml — без цикла импортов
+
+    features = profile.numeric_features + profile.categorical_features
+    parts = [train[features]] + ([test[features]] if test is not None else [])
+    table = pd.concat(parts, ignore_index=True)
+    out, note = apply_feature_code(hypothesis.code, table, target=spec.target)
+    if out is None:
+        raise ValueError(f"код признаков отклонён: {note}")
+    new = [c for c in out.columns if c not in features]
+    clash = [c for c in new if c in train.columns or (test is not None and c in test.columns)]
+    if clash:
+        raise ValueError(f"код признаков перезаписал бы колонки {clash}")
+    values = out[new].to_numpy()
+    train = train.copy()
+    train[new] = values[: len(train)]
+    if test is not None:
+        test = test.copy()
+        test[new] = values[len(train) :]
+    log.info("Код признаков «%s»: +%d колонок %s%s", hypothesis.id, len(new), new, f" ({note})" if note else "")
+    return profile.model_copy(update={"numeric_features": profile.numeric_features + new}), train, test
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
     """Обучение на всём train с числом деревьев из CV и предсказание test в формате сабмита."""
     params = hypothesis.params
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
+    profile, train, test = with_feature_code(spec, profile, hypothesis, train, test)
     x, x_test = make_matrix(profile, train, test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y

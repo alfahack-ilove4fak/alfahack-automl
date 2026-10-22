@@ -12,6 +12,7 @@ import pandas as pd
 
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
+from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
 from agent.llm_critic import critique
@@ -45,6 +46,7 @@ def run_autoresearch(
     if memory.best_id is None:
         memory.best_id = best[0].id  # на входе лучший — бейзлайн
     queue: list[Hypothesis] = []
+    feature_tries = 0  # сколько раз просили у LLM код признаков
     batch_start = len(history)  # с какого места истории начинается текущая пачка гипотез
     baseline_seconds = best[1].fit_seconds  # на входе best — бейзлайн: от него считаем цену гипотез
     for iteration in range(1, max_iterations + 1):
@@ -57,6 +59,12 @@ def run_autoresearch(
             if batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch):
                 reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
             queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
+            if batch and feature_tries < MAX_FEATURE_TRIES:
+                # после первой пачки, когда лучший известен: LLM пишет код признаков (A-L3-1), он идёт в песочнице
+                feature_tries += 1
+                feature_hyp = propose_feature_hypothesis(spec, profile, history, llm, best[0], budget)
+                if feature_hyp is not None:
+                    queue.append(feature_hyp)
             batch_start = len(history)
             rejected = critique(spec, profile, history, queue, llm, budget, memory)  # выключен без AGENT_LLM_CRITIC=1
             for hyp in [h for h in queue if h.id in rejected]:
