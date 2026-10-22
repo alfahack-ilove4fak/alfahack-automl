@@ -5,7 +5,9 @@
 
 ORG = "alfahack-ilove4fak"  # организация GitHub, владелец репозитория и доски
 REPO = f"{ORG}/alfahack-automl"
-CAPTAIN = "thenlaooo"  # ник капитана: сливает в main, запасной ревьюер
+CAPTAIN = (
+    "thenlaooo"  # ник капитана: администратор организации и аккаунт на платформе; в процессах не особый (ADR 0009)
+)
 PROJECT_NUMBER = 1  # номер доски задач в организации
 PROJECT_TITLE = "Альфа Хак — AutoML-агент"
 

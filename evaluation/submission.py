@@ -31,7 +31,8 @@ def validate_submission(path: Path, spec: TaskSpec, test: pd.DataFrame) -> Valid
     if not path.exists():
         return ValidationReport(ok=False, problems=[f"Файл {path} не найден"])
     try:
-        sub = pd.read_csv(path)
+        # id — строкой, как в ml.profiling.load_data: иначе int из CSV ≠ str из test, и любой ответ «невалиден»
+        sub = pd.read_csv(path, dtype={spec.id_column: str})
     except Exception as exc:  # noqa: BLE001 — любая ошибка чтения = невалидный файл
         return ValidationReport(ok=False, problems=[f"Не читается как CSV: {exc}"])
 
@@ -43,7 +44,9 @@ def validate_submission(path: Path, spec: TaskSpec, test: pd.DataFrame) -> Valid
         ids = sub[spec.id_column]
         if ids.duplicated().any():
             problems.append(f"Повторяющиеся {spec.id_column}: {int(ids.duplicated().sum())} шт.")
-        if len(sub) == len(test) and not np.array_equal(ids.to_numpy(), test[spec.id_column].to_numpy()):
+        if len(sub) == len(test) and not np.array_equal(
+            ids.astype(str).to_numpy(), test[spec.id_column].astype(str).to_numpy()
+        ):
             problems.append("Порядок или состав id не совпадает с test.csv")
     class_columns = per_class_columns(spec)
     if class_columns and set(class_columns) <= set(sub.columns):
@@ -86,7 +89,15 @@ def _check_class_probabilities(probs: pd.DataFrame) -> list[str]:
 
 
 def write_submission_atomic(df: pd.DataFrame, path: Path) -> None:
-    """Пишем во временный файл и подменяем: если упадём посередине, старый ответ останется целым."""
+    """Пишем во временный файл рядом и подменяем: если упадём посередине, старый ответ останется целым.
+
+    Временный файл — в том же каталоге, что и task.md (одна файловая система). Если подмена всё же не удалась
+    (организаторы: os.replace между файловыми системами давал 0 баллов) — пишем ответ прямо в path.
+    """
     tmp = path.with_suffix(".tmp.csv")
-    df.to_csv(tmp, index=False, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        df.to_csv(tmp, index=False, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        df.to_csv(path, index=False, encoding="utf-8")
+        tmp.unlink(missing_ok=True)

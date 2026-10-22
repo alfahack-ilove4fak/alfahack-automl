@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_client import LLMClient
+from agent.llm_client import MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
 
 MESSAGES = [{"role": "user", "content": "предложи гипотезы"}]
 
@@ -25,7 +25,12 @@ class FakeOpenAI:
     def __init__(self, answers):
         self.answers = list(answers)
         self.requests = 0
+        self.options = None
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def with_options(self, **kwargs):
+        self.options = kwargs
+        return self
 
     def _create(self, **kwargs):
         self.requests += 1
@@ -190,3 +195,44 @@ def test_truncated_answer_not_cached(client, tmp_path):
     assert not list(tmp_path.iterdir())  # обрезанный ответ в кэш не попал
     assert client.chat_json(MESSAGES) == [{"id": "a"}, {"id": "b"}]  # повтор ушёл в LLM
     assert fake.requests == 2
+
+
+@pytest.mark.parametrize(
+    "seconds_left, expected",
+    [
+        (None, None),  # бюджет не передан — как раньше
+        (3600, None),  # четверть остатка больше полного таймаута с повторами — не ограничиваем
+        (400, 100.0),  # ждём не дольше четверти остатка
+        (4 * MIN_CALL_SECONDS - 1, 0.0),  # меньше MIN_CALL_SECONDS на ответ — не зовём
+    ],
+)
+def test_time_limit(client, seconds_left, expected):
+    assert client.timeout * (1 + MAX_RETRIES) < 0.25 * 3600
+    assert client.time_limit(seconds_left) == expected
+
+
+def test_no_time_no_request(client):
+    fake = client._client = FakeOpenAI(["{}"])
+    assert client.chat(MESSAGES, seconds_left=60) is None
+    assert fake.requests == 0
+    assert client.failures == 0  # нехватка времени — не сбой LLM
+
+
+def test_short_time_single_attempt_with_short_timeout(client):
+    fake = client._client = FakeOpenAI(["{}"])
+    assert client.chat(MESSAGES, seconds_left=400) == "{}"
+    assert fake.options == {"timeout": 100.0, "max_retries": 0}
+
+
+def test_plenty_of_time_default_timeout(client):
+    fake = client._client = FakeOpenAI(["{}"])
+    assert client.chat(MESSAGES, seconds_left=3600) == "{}"
+    assert fake.options is None
+
+
+def test_cache_served_even_without_time(client, tmp_path):
+    client.cache_dir = tmp_path
+    fake = client._client = FakeOpenAI(['{"ok": true}'])
+    assert client.chat_json(MESSAGES) == {"ok": True}
+    assert client.chat_json(MESSAGES, seconds_left=10) == {"ok": True}  # ответ из кэша бесплатный и мгновенный
+    assert fake.requests == 1

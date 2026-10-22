@@ -27,7 +27,12 @@ BUDGET_SHARE = 0.3
 
 
 def _space(model: str, trial: optuna.Trial, classification: bool) -> dict:
-    """Пространство поиска model_params для каждой модели реестра."""
+    """Пространство поиска model_params для каждой модели реестра — только в сторону регуляризации.
+
+    Широкий поиск (num_leaves до 255, min_child_samples от 5) на KFold находит параметры, которые лучше всех
+    используют утечку через повторы объектов: на public/regression CV −1.9%, а честно (следующий год) +6.9% RMSE
+    (ревью #115). Поэтому листьев не больше 127, в листе не меньше 20 объектов, L2 не слабее 0.1.
+    """
     if model == "linear":  # шага обучения нет — подбираем только силу регуляризации
         key = "C" if classification else "alpha"
         return {key: trial.suggest_float(key, 1e-3, 100.0, log=True)}
@@ -35,18 +40,18 @@ def _space(model: str, trial: optuna.Trial, classification: bool) -> dict:
     if model == "lightgbm":
         return {
             "learning_rate": lr,
-            "num_leaves": trial.suggest_int("num_leaves", 15, 255, log=True),
-            "min_child_samples": trial.suggest_int("min_child_samples", 5, 200, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 127, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 20, 200, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 10.0, log=True),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
         }
     if model == "xgboost":
         return {
             "learning_rate": lr,
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "min_child_weight": trial.suggest_float("min_child_weight", 1.0, 50.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "min_child_weight": trial.suggest_float("min_child_weight", 3.0, 50.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 10.0, log=True),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
         }
@@ -54,14 +59,14 @@ def _space(model: str, trial: optuna.Trial, classification: bool) -> dict:
         return {
             "learning_rate": lr,
             "depth": trial.suggest_int("depth", 4, 8),
-            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 30.0, log=True),
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 3.0, 30.0, log=True),
         }
     if model == "hist_gb":
         return {
             "learning_rate": lr,
-            "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 15, 255, log=True),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 5, 200, log=True),
-            "l2_regularization": trial.suggest_float("l2_regularization", 1e-3, 10.0, log=True),
+            "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 15, 127, log=True),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 20, 200, log=True),
+            "l2_regularization": trial.suggest_float("l2_regularization", 0.1, 10.0, log=True),
         }
     raise ValueError(f"для модели {model!r} нет пространства поиска Optuna")
 
@@ -97,7 +102,7 @@ def tune(
         for step, (tr, va) in enumerate(folds):
             if time.time() > deadline:
                 raise optuna.TrialPruned()
-            score, _ = _fold_score(spec, hyp, x, y, y_fit, tr, va, ops, log_target)
+            score, _, _ = _fold_score(spec, hyp, x, y, y_fit, tr, va, ops, log_target)
             scores.append(score)
             trial.report(float(np.mean(scores)), step)
             if trial.should_prune():

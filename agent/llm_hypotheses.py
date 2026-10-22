@@ -15,7 +15,7 @@ from agent.hypotheses import params_key
 from agent.llm_client import LLMClient
 from agent.memory import ResearchMemory
 from agent.prompting import allowed_param_keys, build_hypothesis_messages, build_reflection_messages
-from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, TaskSpec
+from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, RunBudget, TaskSpec
 from runtime.log import get_logger
 
 log = get_logger("llm_hypotheses")
@@ -78,6 +78,7 @@ def llm_hypotheses(
     k: int,
     llm: LLMClient,
     memory: ResearchMemory | None = None,
+    budget: RunBudget | None = None,
 ) -> list[Hypothesis]:
     if not llm.available():
         return []
@@ -85,7 +86,7 @@ def llm_hypotheses(
     if messages is None:
         return []
     try:
-        raw = llm.chat_json(messages, temperature=TEMPERATURE, max_tokens=MAX_TOKENS)
+        raw = llm.chat_json(messages, temperature=TEMPERATURE, max_tokens=MAX_TOKENS, seconds_left=_left(budget))
         out = parse_hypotheses(raw, history, k)
     except Exception:  # noqa: BLE001 — сбой LLM-части не должен останавливать цикл
         log.exception("Гипотезы от LLM не получены")
@@ -97,12 +98,17 @@ def llm_hypotheses(
 REFLECTION_MAX_TOKENS = 150
 
 
+def _left(budget: RunBudget | None) -> float | None:
+    return None if budget is None else budget.seconds_left()
+
+
 def reflect(
     spec: TaskSpec,
     best: tuple[Hypothesis, ExperimentResult],
     batch: list[tuple[Hypothesis, ExperimentResult]],
     llm: LLMClient,
     memory: ResearchMemory,
+    budget: RunBudget | None = None,
 ) -> None:
     """Короткий вывод LLM «почему пачка не сработала» → memory.lessons. Без LLM — ничего не делаем."""
     if not batch or not llm.available():
@@ -111,6 +117,8 @@ def reflect(
     if messages is None:
         return
     try:
-        memory.add_lesson(llm.chat(messages, temperature=0.2, max_tokens=REFLECTION_MAX_TOKENS))
+        memory.add_lesson(
+            llm.chat(messages, temperature=0.2, max_tokens=REFLECTION_MAX_TOKENS, seconds_left=_left(budget))
+        )
     except Exception:  # noqa: BLE001 — рефлексия необязательна
         log.exception("Рефлексия LLM не получена")
