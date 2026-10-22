@@ -32,8 +32,11 @@ DUPLICATE_SHARE = 0.10  # от этой доли дубликатов в train �
 TIME_PARSE_SHARE = 0.9  # колонка — время, если столько значений читается как число или дата
 TIME_MIN_PERIODS = 3
 TIME_MAX_PERIODS = 50  # больше различных значений — режем на равные по числу строк периоды
-# Имя «про время»: слово в начале имени или после не-буквы (Year_Factor, sale_date), но не update_count
-TIME_NAME_HINT = re.compile(r"(?<![a-zа-я])(year|date|time|month|week|day|period|год|дата|время|месяц)", re.IGNORECASE)
+# Имя «про время»: слово в начале имени, после не-буквы или с заглавной после строчной (Year_Factor, sale_date,
+# SaleDate), но не update_count
+TIME_NAME_HINT = re.compile(
+    r"(?:(?<![^\W\d_])|(?<=[a-zа-я])(?=[A-ZА-Я]))(?i:year|date|time|month|week|day|period|год|дата|время|месяц)"
+)
 
 
 def _is_classification(spec: TaskSpec) -> bool:

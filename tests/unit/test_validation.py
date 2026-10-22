@@ -173,8 +173,19 @@ def test_choose_validation_row_number_is_not_time():
 def test_time_name_hint_needs_word_start():
     from ml.validation import TIME_NAME_HINT
 
-    assert TIME_NAME_HINT.search("Year_Factor") and TIME_NAME_HINT.search("sale_date")
-    assert not TIME_NAME_HINT.search("update_count")
+    for name in ["Year_Factor", "sale_date", "SaleDate", "EventTime", "orderYear", "DATE", "датаПродажи"]:
+        assert TIME_NAME_HINT.search(name), name
+    for name in ["update_count", "UPDATE_COUNT", "holiday_flag"]:
+        assert not TIME_NAME_HINT.search(name), name
+
+
+def test_choose_validation_camel_case_time_name():
+    """SaleDate в unix-секундах: значений больше 50, так что время узнаётся только по имени (ревью #150)."""
+    rng = np.random.default_rng(6)
+    seconds = 1_600_000_000 + np.arange(500) * 3600
+    train = pd.DataFrame({"SaleDate": seconds[:400], "x": rng.normal(size=400)})
+    test = pd.DataFrame({"SaleDate": seconds[400:], "x": rng.normal(size=100)})
+    assert choose_validation(_spec(), _profile(["SaleDate", "x"]), train, test) == "time:SaleDate"
 
 
 def test_duplicate_groups_without_text_conversion_of_numbers():
