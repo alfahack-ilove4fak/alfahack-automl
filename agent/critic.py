@@ -78,4 +78,11 @@ def slowdown(hyp: Hypothesis) -> float:
 
 def estimated_seconds(hyp: Hypothesis, baseline_seconds: float) -> float:
     """Оценка длительности эксперимента с запасом: ей сравниваем с оставшимся бюджетом."""
-    return baseline_seconds * slowdown(hyp) * TIME_SAFETY
+    seconds = baseline_seconds * slowdown(hyp) * TIME_SAFETY
+    optuna = hyp.params.get("optuna")
+    if isinstance(optuna, dict):  # подбор (ml/tuning.py) идёт до CV и длится до своего timeout
+        try:
+            seconds += float(optuna.get("timeout", 600))
+        except (TypeError, ValueError):
+            pass
+    return seconds
