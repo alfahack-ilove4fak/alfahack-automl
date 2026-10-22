@@ -153,7 +153,14 @@ def reconcile(
     raw_metric = view.get("metric")
     metric = metric_key(raw_metric)
     if raw_metric and metric is None:
-        notes.append(f"метрика по тексту — «{str(raw_metric)[:40]}», её нет в реестре: считаем {heuristic['metric']}")
+        # метрики нет в реестре (#186): оптимизируем ближайшую из реестра, которую назвала LLM, если поиск
+        # по тексту ничего не нашёл; иначе — найденную поиском. Настоящая метрика остаётся в notes
+        closest = metric_key(view.get("closest_metric"))
+        if closest and "metric" in guessed:
+            accepted["metric"] = closest
+            checks.append(f"метрика={closest} (ближайшая к «{str(raw_metric)[:40]}»)")
+        chosen = accepted.get("metric", heuristic["metric"])
+        notes.append(f"метрика по тексту — «{str(raw_metric)[:40]}», её нет в реестре: оптимизируем {chosen}")
     elif metric == heuristic["metric"]:
         checks.append(f"метрика={metric} ✓")
     elif metric and "metric" in guessed:

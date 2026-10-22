@@ -199,6 +199,24 @@ def test_reconcile_metric_not_in_registry():
     assert "нет в реестре" in notes[0] and "ndcg@10" in notes[0]
 
 
+def test_reconcile_unknown_metric_takes_closest_from_registry():
+    """#186: метрики нет в реестре (Huber), поиск по тексту ничего не нашёл — оптимизируем ближайшую из реестра."""
+    accepted, notes = run({"metric": "Huber loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed={"metric"})
+    assert accepted == {"metric": "mae"}
+    assert "Huber loss" in notes[0] and "оптимизируем mae" in notes[0]
+
+
+def test_reconcile_closest_ignored_when_text_search_found_metric():
+    accepted, notes = run({"metric": "Huber loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed=set())
+    assert accepted == {} and "оптимизируем rmse" in notes[0]
+
+
+@pytest.mark.parametrize("closest", [None, "", "ndcg@5", 42])
+def test_reconcile_bad_closest_ignored(closest):
+    accepted, _ = run({"metric": "ndcg@10", "closest_metric": closest}, heur(metric="rmse"), guessed={"metric"})
+    assert accepted == {}
+
+
 # ---------- reconcile: прочие поля ----------
 
 
@@ -444,3 +462,12 @@ def test_parse_task_analyst_notes_go_to_spec(tmp_path):
     assert len(analyst_notes) == 4
     assert any("колонка времени" in n for n in analyst_notes)
     assert any("округлить" in n for n in analyst_notes)
+
+
+def test_parse_task_unknown_metric_uses_closest(tmp_path):
+    """#186: «Метрика — Huber loss» раньше молча становилась rmse; теперь — ближайшая из реестра от LLM."""
+    task_md = write_task(tmp_path, text="Предскажи значение y. Метрика — Huber loss.")
+    llm = FakeLLM({"target": "y", "metric": "Huber loss", "closest_metric": "mae"})
+    spec = parse_task(task_md, llm=llm)
+    assert spec.metric.name == "mae"
+    assert any("Huber loss" in n for n in spec.notes)
