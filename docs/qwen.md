@@ -30,7 +30,8 @@ GitHub → **Actions → qwen → Run workflow**:
 
 ## Путь 2. Локально (если ключ есть в твоём `.env`)
 ```
-uv run python scripts/qwen.py check                     # связь, ✅/❌ и подсказка, что чинить
+uv run python scripts/qwen.py check                     # связь + длинный ответ (≈ 30 с, ≈ 1 ₽), ✅/❌ и подсказка
+uv run python scripts/qwen.py check --quick             # только короткий запрос (копейки)
 uv run python scripts/qwen.py budget                    # потрачено / осталось / когда сброс
 uv run python scripts/qwen.py run tasks/public/multiclass/task.md --minutes 8
 uv run python scripts/qwen.py compare --minutes 5       # без LLM против Qwen на всех задачах харнесса
@@ -52,7 +53,7 @@ uv run python scripts/qwen.py compare --minutes 5       # без LLM проти�
 ## Если не работает
 | Симптом | Что проверить |
 |---|---|
-| `Connection error ← Server disconnected without sending a response` через 10–17 с | **сервер организаторов перегружен** (22.10 днём падало до 5 запросов из 6). Клиент сам повторяет запрос (паузы 2, 5, 10 с) и после 3 сбоев подряд делает паузу 2 мин, а не выключает LLM. Если массово — писать организаторам (текст ниже) |
+| `Connection error ← Server disconnected without sending a response` через 10–17 с | **сервер организаторов перегружен** (22.10 днём падало до 5 запросов из 6). Клиент сам повторяет запрос (паузы 2, 5, 10 с) и после 3 сбоев подряд делает паузу 2 мин, а не выключает LLM. Если массово — писать организаторам (текст ниже). `scripts/qwen.py check` (без `--quick`) покажет ❌ «длинный ответ», если сеть рвёт долгие запросы (#193) |
 | `Connection error` с другой причиной | `scripts/qwen.py check` покажет цепочку целиком (DNS / TCP / TLS); URL с `https://` и `/v1` |
 | `401` | ключ: без кавычек, пробелов и `Bearer`; не перекрыт ли переменной в оболочке |
 | пустой ответ, `упёрлась в лимит` | рассуждения съели `max_tokens` — увеличить `LLM_REASONING_TOKENS` |
