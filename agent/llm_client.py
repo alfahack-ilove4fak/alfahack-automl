@@ -9,9 +9,14 @@
   * Запрос знает остаток бюджета (ADR 0008, D3): ждём ответа не дольше LLM_TIME_SHARE оставшегося времени,
     а если это меньше MIN_CALL_SECONDS — не зовём LLM совсем (полный таймаут с повторами — до 6 минут).
 
-  * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (на промпт гипотез
-    2–2.5 тыс. токенов, на длинном — больше 3 тыс.) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
-    в обоих вариантах и /no_think не действуют), поэтому к каждому запросу добавляем запас REASONING_TOKENS.
+  * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (2–2.5 тыс. токенов
+    на промпт гипотез) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
+    в обоих вариантах и /no_think не действуют), но можно сократить: reasoning_effort=low в extra_body
+    (22.10: рассуждения ≈ в 2.5 раза короче). К каждому запросу добавляем запас REASONING_TOKENS — с запасом
+    на случай, когда сервер не принял reasoning_effort и рассуждения длинные (22.10: > 3 тыс. токенов).
+
+  * Сервер под нагрузкой рвёт соединение без ответа через 10–17 с. Повторяем с паузами (RETRY_BACKOFF) в пределах
+    времени, а после серии сбоев делаем паузу COOLDOWN_SECONDS вместо отключения LLM до конца прогона.
 
   * openai любую ошибку отправки (кривой ключ, URL без схемы, отказ сервера, прокси) показывает одинаково —
     «Connection error.». Поэтому в лог пишем всю цепочку причин (ключ в ней скрываем), а ключ и URL из
@@ -19,6 +24,7 @@
 
 Переменные окружения: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL (как в baseline.py организаторов),
 LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
+LLM_REASONING_EFFORT (low по умолчанию; пусто — не передавать), LLM_COOLDOWN_SEC (пауза после 3 сбоев, 120 с),
 LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 6000).
 """
 
@@ -36,10 +42,20 @@ from runtime.log import get_logger
 
 log = get_logger("llm")
 
-DEFAULT_REASONING_TOKENS = 6000  # замер 22.10: 3000 не хватило — ответ пустой, запрос ≈ 1 ₽ впустую
+DEFAULT_REASONING_TOKENS = 6000  # 22.10 без reasoning_effort 3000 не хватило: ответ пустой, ≈ 1 ₽ впустую
 MAX_RETRIES = 2
 LLM_TIME_SHARE = 0.25  # какую долю оставшегося времени можно ждать LLM: остальное — экспериментам
-LEDGER_ANSWER_CHARS = 4000  # сколько символов ответа модели хранить в журнале
+LEDGER_ANSWER_CHARS = 4000
+# Сервер организаторов под нагрузкой рвёт соединение через 10–17 с («Server disconnected without sending a
+# response», проверено 22.10: 5 запросов из 6). Поэтому повторяем сами — с паузами и в пределах времени, а после
+# FAILURES_TO_PAUSE сбоев подряд не выключаем LLM навсегда, а делаем паузу COOLDOWN_SECONDS и пробуем снова.
+RETRY_BACKOFF = (2.0, 5.0, 10.0)  # паузы между попытками одного запроса, с
+FAILURES_TO_PAUSE = 3
+COOLDOWN_SECONDS = float(os.getenv("LLM_COOLDOWN_SEC", 120))
+# Короткие рассуждения: reasoning_effort=low через extra_body режет рассуждения ≈ в 2.5 раза (22.10: 672–856
+# токенов против 2–3.8 тыс., 0.33 ₽ против 1.02 ₽ за запрос гипотез) — дешевле, быстрее и реже попадаем под обрыв.
+# Пустая строка — не передавать параметр.
+DEFAULT_REASONING_EFFORT = "low"  # сколько символов ответа модели хранить в журнале
 MIN_CALL_SECONDS = 30.0  # запрос гипотез с рассуждениями идёт 10–20 с; меньше 30 с ждать бессмысленно
 
 
@@ -68,6 +84,8 @@ class LLMClient:
         self._price_in = float(os.getenv("LLM_PRICE_RUB_PER_1K_INPUT", 0))
         self._price_out = float(os.getenv("LLM_PRICE_RUB_PER_1K_OUTPUT", 0))
         self.reasoning_tokens = int(os.getenv("LLM_REASONING_TOKENS", DEFAULT_REASONING_TOKENS))
+        self.reasoning_effort = os.getenv("LLM_REASONING_EFFORT", DEFAULT_REASONING_EFFORT).strip()
+        self._paused_until = 0.0  # после серии сбоев LLM «отдыхает» до этого момента (time.monotonic)
         cache = os.getenv("LLM_CACHE_DIR")
         self.cache_dir = Path(cache) if cache else None
         self._client = None
@@ -87,11 +105,14 @@ class LLMClient:
             urlsplit(base_url).netloc or base_url if base_url else "по умолчанию",
             ", через прокси из окружения" if proxy else "",
         )
-        self._client = OpenAI(api_key=self._api_key, base_url=base_url, timeout=timeout, max_retries=MAX_RETRIES)
+        # повторы делаем сами (_create_with_retries): с паузами, в пределах времени и с понятным логом
+        self._client = OpenAI(api_key=self._api_key, base_url=base_url, timeout=timeout, max_retries=0)
 
     def available(self) -> bool:
-        if self._client is None or self.failures >= 3:
+        if self._client is None:
             return False
+        if self.failures >= FAILURES_TO_PAUSE and time.monotonic() < self._paused_until:
+            return False  # серия сбоев — пауза; после неё пробуем снова (сервер часто оживает через минуту-две)
         return not (self.rub_limit and self.rub_spent >= self.rub_limit)
 
     def time_limit(self, seconds_left: float | None) -> float | None:
@@ -129,11 +150,10 @@ class LLMClient:
         if limit == 0:
             log.info("До конца бюджета %.0f с — LLM не зовём, гипотезы из playbook", seconds_left)
             return None
-        # мало времени — одна попытка с коротким таймаутом вместо таймаута с повторами
-        client = self._client if limit is None else self._client.with_options(timeout=limit, max_retries=0)
         started = time.monotonic()
         try:
-            response = client.chat.completions.create(
+            response = self._create_with_retries(
+                limit,
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
@@ -141,6 +161,9 @@ class LLMClient:
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
             self.failures += 1
+            if self.failures >= FAILURES_TO_PAUSE:
+                self._paused_until = time.monotonic() + COOLDOWN_SECONDS
+                log.warning("LLM: %d сбоев подряд — пауза %.0f с, потом пробуем снова", self.failures, COOLDOWN_SECONDS)
             self.errors += 1
             self.seconds += time.monotonic() - started
             error = self._describe_error(exc)
@@ -208,6 +231,36 @@ class LLMClient:
             return objects
         log.warning("LLM вернула невалидный JSON")
         return None
+
+    def _create_with_retries(self, limit: float | None, **request):
+        """Запрос с повторами при обрыве/таймауте/перегрузке сервера; всё — в пределах limit секунд (None — без).
+
+        Ошибки запроса (400/401/404) не повторяем: повтор их не исправит. Если сервер не понял reasoning_effort,
+        один раз повторяем без него и дальше его не шлём.
+        """
+        deadline = None if limit is None else time.monotonic() + limit
+        if self.reasoning_effort:
+            request["extra_body"] = {"reasoning_effort": self.reasoning_effort}
+        attempt = 0
+        while True:
+            attempt += 1
+            client = self._client
+            if deadline is not None:
+                client = client.with_options(timeout=max(deadline - time.monotonic(), 1.0), max_retries=0)
+            try:
+                return client.chat.completions.create(**request)
+            except Exception as exc:  # noqa: BLE001
+                if "extra_body" in request and _rejects_param(exc, "reasoning_effort"):
+                    log.warning("Сервер не принимает reasoning_effort — дальше без него")
+                    self.reasoning_effort = ""
+                    request.pop("extra_body")
+                    continue
+                pause = RETRY_BACKOFF[attempt - 1] if attempt <= len(RETRY_BACKOFF) else None
+                out_of_time = deadline is not None and pause is not None and time.monotonic() + pause + 5 > deadline
+                if not _retryable(exc) or pause is None or out_of_time:
+                    raise
+                log.info("LLM: попытка %d не удалась (%s) — повтор через %.0f с", attempt, _short(exc), pause)
+                time.sleep(pause)
 
     def summary(self) -> dict:
         """Итог по клиенту: для лога прогона, харнесса и тай-брейка (токены, время)."""
@@ -299,3 +352,26 @@ def _complete_objects(text: str) -> list[dict]:
         if isinstance(obj, dict):
             out.append(obj)
         pos = end
+
+
+def _retryable(exc: BaseException) -> bool:
+    """Обрыв, таймаут, 429 и 5xx — временные: имеет смысл повторить. Остальное (400/401/404) — нет."""
+    try:
+        import openai
+    except ImportError:  # pragma: no cover
+        return False
+    if isinstance(exc, openai.APIConnectionError | openai.RateLimitError):  # таймаут — подкласс обрыва
+        return True
+    return isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
+
+
+def _rejects_param(exc: BaseException, param: str) -> bool:
+    """400 от сервера, где в тексте упомянут параметр, — сервер его не поддерживает."""
+    return getattr(exc, "status_code", None) == 400 and param in str(exc)
+
+
+def _short(exc: BaseException) -> str:
+    root = exc
+    while root.__cause__ is not None:
+        root = root.__cause__
+    return f"{type(root).__name__}: {str(root)[:120]}"
