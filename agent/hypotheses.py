@@ -68,12 +68,18 @@ def _model_defaults() -> dict[str, dict]:
     return {"lightgbm": BASE_PARAMS, "catboost": CATBOOST_PARAMS, "xgboost": XGBOOST_PARAMS}
 
 
+def _is_off(value) -> bool:
+    """Ключ «выключен»: None, False, пустой словарь, список или строка. Число 0 — не выключен (0 == False в Python)."""
+    return value is None or value is False or (isinstance(value, dict | list | str) and not value)
+
+
 def _norm(value):
-    """5.0 → 5, «Balanced » → «balanced»: одно значение, записанное по-разному."""
+    """5.0 → 5, «Balanced » → «balanced»: одно значение, записанное по-разному. Имя колонки в схеме валидации — как есть."""
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str):
-        return value.strip().lower()
+        value = value.strip()
+        return value if value.lower().startswith(("time:", "group:")) else value.lower()
     if isinstance(value, dict):
         return {k: _norm(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -87,7 +93,7 @@ def canonical_params(params: dict) -> dict:
     {model: lightgbm, class_weight: balanced, n_folds: 5, log_target: false, model_params: {learning_rate: 0.05}}
     и {class_weight: balanced} — один и тот же эксперимент.
     """
-    out = {k: _norm(v) for k, v in params.items() if v not in (None, False, {}, [], "")}
+    out = {k: _norm(v) for k, v in params.items() if not _is_off(v)}
     model = out.get("model", DEFAULT_MODEL)
     if model == DEFAULT_MODEL:
         out.pop("model", None)
