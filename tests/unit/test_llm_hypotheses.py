@@ -237,6 +237,9 @@ def test_same_experiment_written_differently_is_a_repeat(params):
         {"class_weight": "balanced", "n_folds": 10},
         {"class_weight": "balanced", "model_params": {"learning_rate": 0.02}},
         {"class_weight": "balanced", "proba_weights": True},
+        {"class_weight": "balanced", "seed": 0},  # число 0 — не «выключенный» ключ
+        {"class_weight": "balanced", "min_child_samples": 0.0},
+        {"class_weight": "balanced", "validation": "time:Year"},
     ],
 )
 def test_really_different_experiments_differ(params):
@@ -267,3 +270,12 @@ def test_column_names_keep_case():
     # ревью #164: в validation и feature_ops — имена колонок, «Year» и «year» могут быть разными
     assert params_key({"validation": "time:Year"}) != params_key({"validation": "time:year"})
     assert params_key({"model": "CatBoost"}) == params_key({"model": "catboost"})
+
+
+def test_zero_seed_survives_with_off_keys():
+    # #169: 0 остаётся, а выключенный log_target=False пропадает
+    assert canonical_params({"seed": 0, "log_target": False}) == {"seed": 0}
+
+
+def test_validation_column_name_is_stripped_not_lowered():
+    assert params_key({"validation": " time:Year "}) == params_key({"validation": "time:Year"})
