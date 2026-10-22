@@ -13,6 +13,7 @@
 #
 # v1.2 (21.10): порядок — по честной отложенной части на 7 задачах (2 public + 5 tasks/practice), стенд v2:
 # сначала доля задач, где гипотеза выиграла, потом средний выигрыш (цифры и что выброшено — docs/research/playbook-v1.md).
+# Исключение: balanced_proba_weights (№1) на стенде v2 не гонялась — проверена честно на public multiclass (#122), перепроверить в v1.3.
 # Цикл проверяет гипотезы по отдельности и не складывает выигрыши (issue #87), поэтому есть комбинации.
 # Проверка: uv run pytest tests/unit/test_playbook.py; стенд: uv run python research/bench_playbook.py
 
@@ -20,7 +21,7 @@ hypotheses:
   - id: balanced_proba_weights
     kind: hyperparams
     title: Веса классов + множители вероятностей под метрику по меткам
-    rationale: Macro F1 зависит от редких классов; множители подбираются на OOF и проверяются кросс-подгонкой — честно лучше и balanced, и бейзлайна
+    rationale: Macro F1 зависит от редких классов; множители подбираются на OOF и проверяются кросс-подгонкой. Действует только для метрик по меткам (на ROC-AUC/logloss — как balanced_classes). Честно проверено на 1 задаче (#122)
     task_types: [binary, multiclass]
     requires: imbalance
     params: {model: lightgbm, class_weight: balanced, proba_weights: true}
