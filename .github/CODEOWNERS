@@ -14,16 +14,16 @@
 /.claude/           @thenlaooo
 
 # role:agent
-/agent/             @thenlaooo
+/agent/             @thenlaooo @n0h4ndy
 
 # role:ml
-/ml/                @thenlaooo
+/ml/                @thenlaooo @marenkov17
 
 # role:research
-/research/          @thenlaooo
-/tasks/practice/    @thenlaooo
+/research/          @thenlaooo @Richi-Marqez
+/tasks/practice/    @thenlaooo @Richi-Marqez
 
 # role:qa
-/evaluation/        @thenlaooo
-/scripts/           @thenlaooo
-/tests/             @thenlaooo
+/evaluation/        @thenlaooo @dzigoku-ku
+/scripts/           @thenlaooo @dzigoku-ku
+/tests/             @thenlaooo @dzigoku-ku

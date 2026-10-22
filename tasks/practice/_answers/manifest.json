@@ -1,0 +1,50 @@
+{
+  "batches_ordinal_qwk": {
+    "greater_is_better": true,
+    "id_column": "id",
+    "metric": "qwk",
+    "target": "grade"
+  },
+  "cancer_binary_auc": {
+    "greater_is_better": true,
+    "id_column": "id",
+    "metric": "roc_auc",
+    "target": "is_malignant"
+  },
+  "claims_regression_mape_rowno": {
+    "greater_is_better": false,
+    "id_column": "id",
+    "metric": "mape",
+    "target": "claim_amount"
+  },
+  "diabetes_regression_mae": {
+    "greater_is_better": false,
+    "id_column": "id",
+    "metric": "mae",
+    "target": "progression"
+  },
+  "digits_multiclass_accuracy": {
+    "greater_is_better": true,
+    "id_column": "id",
+    "metric": "accuracy",
+    "target": "digit"
+  },
+  "network_binary_logloss_crooked": {
+    "greater_is_better": false,
+    "id_column": "flow_id",
+    "metric": "logloss",
+    "target": "is_attack"
+  },
+  "payments_binary_f1_rare": {
+    "greater_is_better": true,
+    "id_column": "id",
+    "metric": "f1",
+    "target": "is_fraud"
+  },
+  "sales_regression_dates_rmsle": {
+    "greater_is_better": false,
+    "id_column": "id",
+    "metric": "rmsle",
+    "target": "units_sold"
+  }
+}

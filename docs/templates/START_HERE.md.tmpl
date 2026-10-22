@@ -1,0 +1,42 @@
+# START_HERE — {name}
+
+👋 Привет! Ты в команде Альфа Хак. Это твоя личная инструкция — она лежит в твоей ветке `team/{name}`.
+
+| | |
+|---|---|
+| **Кто ты** | {role_title} (`{role}`), GitHub @{github} |
+| **Твоя зона** | {zone} |
+| **Твой пакет роли** | [docs/roles/{role}.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/docs/roles/{role}.md) — что установить, инструменты, задачи L0–L3, Claude Code |
+| **Проверенные материалы** | [docs/resources/{role}.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/docs/resources/{role}.md) |
+| **Тебя ревьюит** | {reviewer} |
+
+## 1. Что скачать и как проверить готовность (≈ 1 час)
+
+Иди по [ONBOARDING.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/ONBOARDING.md) — 5 шагов. Сверх общей установки для твоей роли — раздел 3.1 пакета роли.
+Финиш — команда:
+```
+uv run python scripts/doctor.py --role {role}
+```
+→ должно быть `✅ ГОТОВ К РАБОТЕ`. При ❌ под пунктом написано, что выполнить. Застрял на 15+ минут — в чат команды.
+
+**Правило:** к задачам кейса — только после зелёного doctor. Отметься в issue «CP0» на [доске](https://github.com/orgs/alfahack-ilove4fak/projects/1).
+
+## 2. Твоя первая задача
+
+**{first_task}** — подробные шаги в пакете роли (раздел 3.4) и в issue на доске.
+В Claude Code просто набери `/next-task`.
+
+## 3. С кем стыкуешься
+
+{partners}
+
+Ритм дня: стендап 10:00 · синки 13:00 и 18:30 · ретро 19:00 ([docs/team-process.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/docs/team-process.md)).
+
+## 4. Как работаем с кодом
+
+Ветка `{role}/<задача>` от `dev` → PR в `dev` → метка `ready` → слияние ботом (на метке и в окна интеграции 13:00, 18:30, 19:00 МСК). Шпаргалка: [docs/git-guide.md](https://github.com/alfahack-ilove4fak/alfahack-automl/blob/dev/docs/git-guide.md).
+⚠️ Эта ветка (`team/{name}`) — только для тебя: заметки можно, PR из неё в `dev` — нельзя.
+
+## 5. Мои заметки
+
+_(пиши сюда что угодно: вопросы, идеи, что узнал)_

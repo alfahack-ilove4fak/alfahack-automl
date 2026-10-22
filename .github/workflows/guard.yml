@@ -23,7 +23,7 @@ jobs:
           SHA: ${{ github.sha }}
           BRANCH: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
-          OWNER: ${{ github.repository_owner }}
+          OWNER: thenlaooo   # ник капитана (= CAPTAIN в scripts/team_config.py); владелец репо теперь организация
           MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           problems=""

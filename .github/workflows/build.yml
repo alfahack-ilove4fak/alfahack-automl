@@ -1,0 +1,91 @@
+# Автосборка: дважды в день (перед окнами интеграции 13:00 и 18:30 МСК) собирает ZIP из свежего dev и кладёт артефактом.
+# Тиммейтам не нужно просить сборку: `uv run python scripts/get_build.py` скачивает последнюю в папку dist/.
+# Если dev с прошлой сборки не менялся, шаг сборки пропускается (минуты Actions: 2000 в месяц на всех).
+# Слияния ботом (токен Actions) не запускают push-workflow, поэтому сборка идёт по расписанию, а не по push.
+# Раньше было каждые 45 минут; 22.10 бесплатные минуты Actions кончились — оставили 2 запуска (время UTC):
+#   :05 → :50 → 1:35 → 2:20 → снова 3:05 и так далее.
+name: build
+
+on:
+  schedule:  # экономим минуты Actions (Free кончился 22.10): перед окнами интеграции 13:00 и 18:30 МСК
+    - cron: "40 9 * * *"
+    - cron: "10 15 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Собрать, даже если dev не менялся"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Нужна ли новая сборка
+        id: need
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          sha7=$(git rev-parse --short=7 HEAD)
+          echo "sha7=$sha7" >> "$GITHUB_OUTPUT"
+          have=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=submission-dev-$sha7" \
+            --jq '[.artifacts[] | select(.expired == false)] | length')
+          if [ "$have" != "0" ] && [ "$FORCE" != "true" ]; then
+            echo "build=no" >> "$GITHUB_OUTPUT"
+            echo "dev не менялся: сборка submission-dev-$sha7 уже есть." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Установить uv и Python 3.12
+        if: steps.need.outputs.build == 'yes'
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Установить зависимости
+        if: steps.need.outputs.build == 'yes'
+        run: uv sync
+
+      - name: Собрать ZIP для платформы
+        if: steps.need.outputs.build == 'yes'
+        run: uv run python scripts/package_submission.py
+
+      - name: Проверить, что архив работает так, как его запустит платформа
+        if: steps.need.outputs.build == 'yes'
+        run: uv run pytest tests/smoke/test_package.py -q
+
+      - name: Выложить артефакт
+        if: steps.need.outputs.build == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: submission-dev-${{ steps.need.outputs.sha7 }}
+          path: dist/submission-*.zip
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Итог
+        if: steps.need.outputs.build == 'yes'
+        run: |
+          {
+            echo "### Сборка dev готова"
+            echo ""
+            echo "Коммит \`$(git log -1 --format='%h %s')\`"
+            echo ""
+            echo "Скачать: \`uv run python scripts/get_build.py\` или раздел Artifacts ниже."
+          } >> "$GITHUB_STEP_SUMMARY"

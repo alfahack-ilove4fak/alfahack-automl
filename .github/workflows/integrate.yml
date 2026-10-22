@@ -1,0 +1,68 @@
+# Бот слияний (ADR 0009, CONTRIBUTING.md раздел 2). Логика — scripts/integrate.py, тесты — tests/unit/test_integrate.py.
+#   • раз в 30 минут: сливает PR с меткой `ready`/`hotfix`, у которых есть одобрение(я) и зелёный CI;
+#     отставшие ветки подтягивает и перезапускает CI; причину задержки пишет комментарием в PR;
+#   • на открытие PR и смену меток: просит ревьюеров, ставит метки, обновляет комментарий;
+#   • метка `hotfix` на PR запускает слияние сразу.
+# Код бота всегда берётся из dev (checkout ref: dev), а не из PR. GitHub Free не умеет защищать ветки,
+# поэтому слияние делает этот workflow: токен Actions не запускает CI после своих действий — бот запускает ci.yml сам.
+name: integrate
+
+on:
+  schedule:  # было каждые 30 мин (48 запусков/сутки); теперь — окна интеграции 13:00, 18:30, 19:00 МСК + события PR
+    - cron: "0 10 * * *"
+    - cron: "30 15 * * *"
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Только показать решения, ничего не менять"
+        type: boolean
+        default: false
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: write # слияние PR и обновление ветки
+  pull-requests: write # ревьюеры, метки, комментарии
+  issues: write # комментарии бота
+  actions: write # запуск ci.yml после слияния и обновления ветки
+  checks: read
+  statuses: read
+
+concurrency:
+  group: integrate
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet pyyaml
+
+      - name: Запуск бота
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(sync)
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$EVENT" = "pull_request_target" ]; then
+            args+=(--pr "$PR_NUMBER")
+            # слияние сразу — только по метке hotfix; в остальных случаях обновляем комментарий и ревьюеров
+            if [ "$ACTION" != "labeled" ] || [ "$LABEL" != "hotfix" ]; then args+=(--comment-only); fi
+          fi
+          python scripts/integrate.py "${args[@]}"

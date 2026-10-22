@@ -1,0 +1,32 @@
+name: Ошибка
+description: Что-то сломалось или работает не так
+title: "[bug] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что делал, что ожидал, что получил
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Как повторить
+      placeholder: |
+        git switch <ветка>
+        uv run python solution.py tasks/public/regression/task.md
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Лог / ошибка
+      description: Хвост лога или трейсбек. Без ключей и содержимого .env!
+      render: text
+  - type: dropdown
+    id: area
+    attributes:
+      label: Модуль
+      options: [solution.py / runtime, agent, ml, evaluation, research, scripts / CI, не знаю]

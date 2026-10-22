@@ -1,0 +1,123 @@
+"""Паспорт данных (DataProfile) и подготовка признаков для моделей. Владелец — ML-pipeline инженер."""
+
+from __future__ import annotations
+
+import re
+
+import numpy as np
+import pandas as pd
+
+from interfaces.schemas import DataProfile, TaskSpec, TaskType
+from runtime.log import get_logger
+
+log = get_logger("profiling")
+
+
+def load_data(spec: TaskSpec) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """train и test. id читается строкой («001300» не превращается в 1300), строки с пустым target выкидываются."""
+    dtype = {spec.id_column: str}
+    train = pd.read_csv(spec.train_path, low_memory=False, dtype=dtype)
+    test = pd.read_csv(spec.test_path, low_memory=False, dtype=dtype)
+    missing = train[spec.target].isna()
+    if missing.any():
+        log.warning("В train %d строк с пустым target — выкидываем, учиться на них нельзя", int(missing.sum()))
+        train = train.loc[~missing].reset_index(drop=True)
+    return train, test
+
+
+LOG_SCALE_METRICS = {"rmsle", "msle"}  # ошибка считается на log1p(y): обучение на log1p(target) совпадает с метрикой
+
+
+def _skew_warning(skew: float, metric: str, non_negative: bool) -> str:
+    """Факт о скошенности и что он значит для метрики задачи. Это читает LLM — совет должен быть верным.
+
+    Для RMSLE/MSLE обучение на log1p(target) совпадает с метрикой. Для метрик в исходной шкале это смена цели:
+    на public/regression CV показывает проигрыш, а честная отложенная часть — выигрыш (docs/research/playbook-v1.md),
+    поэтому не советуем и не отговариваем — это гипотеза для проверки.
+    """
+    if metric in LOG_SCALE_METRICS and non_negative:
+        return f"Скошенный target (skew={skew:.1f}); метрика {metric} считается в логарифмах — log1p(target) совпадает с ней"
+    return (
+        f"Скошенный target (skew={skew:.1f}); метрика {metric} — в исходной шкале: log1p(target) меняет "
+        "оптимизируемую цель — это одна гипотеза для проверки, а не правило"
+    )
+
+
+def profile_data(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> DataProfile:
+    features = [c for c in train.columns if c not in (spec.target, spec.id_column) and c in test.columns]
+    numeric, categorical, dropped, warnings = [], [], [], []
+    for col in features:
+        series = train[col]
+        if series.nunique(dropna=False) <= 1:
+            dropped.append(col)
+            continue
+        if series.dtype == object or str(series.dtype) in ("category", "bool", "string"):
+            categorical.append(col)
+        else:
+            numeric.append(col)
+
+    missing = {c: round(float(train[c].isna().mean()), 4) for c in features if train[c].isna().any()}
+    y = train[spec.target]
+    if spec.task_type == TaskType.REGRESSION:
+        target_summary = {k: float(v) for k, v in y.describe().items()}
+        target_summary["skew"] = float(y.skew())
+        if y.skew() > 2:
+            warnings.append(_skew_warning(float(y.skew()), spec.metric.name, bool((y >= 0).all())))
+    else:
+        counts = y.astype(str).value_counts()
+        target_summary = {"class_counts": counts.to_dict(), "imbalance_ratio": float(counts.max() / counts.min())}
+        if counts.max() / counts.min() > 10:
+            warnings.append("Сильный дисбаланс классов — стоит попробовать class_weight='balanced'")
+
+    profile = DataProfile(
+        n_train=len(train),
+        n_test=len(test),
+        numeric_features=numeric,
+        categorical_features=categorical,
+        dropped_features=dropped,
+        missing_share=missing,
+        target_summary=target_summary,
+        memory_mb=float((train.memory_usage(deep=True).sum() + test.memory_usage(deep=True).sum()) / 2**20),
+        warnings=warnings,
+    )
+    log.info(
+        "Данные: train=%d, test=%d, числовых=%d, категориальных=%d, выброшено=%d",
+        len(train),
+        len(test),
+        len(numeric),
+        len(categorical),
+        len(dropped),
+    )
+    return profile
+
+
+def make_matrix(profile: DataProfile, train: pd.DataFrame, test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Признаки для бустинга: числа как есть, категории → pandas category с общим словарём train+test."""
+    cols = profile.numeric_features + profile.categorical_features
+    x_train, x_test = train[cols].copy(), test[cols].copy()
+    for col in profile.categorical_features:
+        cats = pd.Index(pd.concat([x_train[col], x_test[col]]).astype(str).unique())
+        x_train[col] = pd.Categorical(x_train[col].astype(str), categories=cats)
+        x_test[col] = pd.Categorical(x_test[col].astype(str), categories=cats)
+    for col in profile.numeric_features:
+        x_train[col] = pd.to_numeric(x_train[col], errors="coerce").astype(np.float32)
+        x_test[col] = pd.to_numeric(x_test[col], errors="coerce").astype(np.float32)
+    names = _safe_names(cols)
+    x_train.columns, x_test.columns = names, names
+    return x_train, x_test
+
+
+def _safe_names(cols: list[str]) -> list[str]:
+    """Имена признаков, которые примут все модели: LightGBM падает на спецсимволах JSON, XGBoost — на [ ] <.
+
+    Всё, кроме букв, цифр и _, заменяется на _; совпавшие после замены имена получают суффикс _1, _2…
+    """
+    names, seen = [], set()
+    for col in cols:
+        base = re.sub(r"\W+", "_", str(col)).strip("_") or "feature"
+        name, k = base, 1
+        while name in seen:
+            name, k = f"{base}_{k}", k + 1
+        seen.add(name)
+        names.append(name)
+    return names
