@@ -102,7 +102,9 @@ XGBOOST_PARAMS = {
     "colsample_bytree": 0.8,
     "tree_method": "hist",
     "enable_categorical": True,  # категории pandas из make_matrix — без ручного кодирования
-    "max_cat_to_onehot": 1,
+    # Категории до 64 значений — разбиения «одна против остальных», а не по подмножествам: подмножества на
+    # десятках категорий запоминают train и ломаются при сдвиге (#145: public/regression честно RMSE 135.7 → 46.7)
+    "max_cat_to_onehot": 64,
     "random_state": SEED,
     "n_jobs": -1,
     "verbosity": 0,
@@ -322,6 +324,28 @@ def _fit_model(
     return MODEL_FITTERS[name](spec, hypothesis, x, y, eval_set, n_estimators)
 
 
+def _hide_unseen(hypothesis: Hypothesis, x_fit: pd.DataFrame, x_new: pd.DataFrame) -> pd.DataFrame:
+    """Категории, которых нет в обучающей части, → пропуск в x_new (#145).
+
+    Словарь категорий общий для train и test (make_matrix): у новой категории есть код, но ни одной строки в обучении.
+    XGBoost отправляет её по произвольной ветке разбиения: на practice/sales (все даты отложенной части новые) честно
+    RMSLE 1.63 против 0.49 с пропуском.
+    Пропуск модели обрабатывают штатно (ветка, выученная для пропусков). CatBoost не трогаем: пропуск в категории
+    он не принимает, а новую категорию и так кодирует априорной статистикой.
+    """
+    if str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower() == "catboost":
+        return x_new
+    cols = [c for c in x_new.columns if isinstance(x_new[c].dtype, pd.CategoricalDtype)]
+    unseen = {c: ~x_new[c].isin(x_fit[c].unique()) & x_new[c].notna() for c in cols}
+    unseen = {c: mask for c, mask in unseen.items() if mask.any()}
+    if not unseen:
+        return x_new
+    x_new = x_new.copy()
+    for col, mask in unseen.items():
+        x_new[col] = x_new[col].mask(mask)
+    return x_new
+
+
 def _predict(spec: TaskSpec, model, x: pd.DataFrame, log_target: bool):
     """Предсказание в том виде, который нужен метрике задачи."""
     if not _is_classification(spec):
@@ -419,6 +443,7 @@ def _fold_score(
     Третий элемент — вероятности классов на валидации (для proba_weights), у регрессии None.
     """
     x_tr, x_va = x.iloc[tr], x.iloc[va]
+    x_va = _hide_unseen(hypothesis, x_tr, x_va)
     if ops:
         x_tr, x_va = apply_feature_ops(ops, x_tr, y[tr], _is_classification(spec), x_va)
     model, best_iter = _fit_model(spec, hypothesis, x_tr, y_fit[tr], eval_set=(x_va, y_fit[va]))
@@ -548,6 +573,7 @@ def fit_predict_final(
     params = hypothesis.params
     log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
     x, x_test = make_matrix(profile, train, test)
+    x_test = _hide_unseen(hypothesis, x, x_test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
     ops = params.get("feature_ops")
