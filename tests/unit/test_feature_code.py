@@ -13,7 +13,7 @@ from agent.feature_code import (
     check_feature_code,
     parse_feature_hypothesis,
 )
-from interfaces.schemas import DataProfile, HypothesisKind
+from interfaces.schemas import DataProfile, Hypothesis, HypothesisKind
 from interfaces.stubs import stub_task_spec
 
 GOOD = """
@@ -59,6 +59,25 @@ def test_good_code_passes():
         ("def add_features(df):\n    getattr(df, 'x')\n    return df", "getattr"),
         ("def add_features(df):\n    df['t2'] = df['site_eui']\n    return df", "target"),
         ("def add_features(df):\n    return df\n" + "#" * 6000, "длиннее"),
+        # обходы предфильтра из ревью Данила (#101): доступ к ОС и файлам через атрибуты pandas/numpy
+        ("import pandas as pd\ndef add_features(df):\n    pd.io.common.os.system('echo x')\n    return df", "атрибут"),
+        ("import numpy as np\ndef add_features(df):\n    np.genfromtxt('/etc/hostname')\n    return df", "атрибут"),
+        ("import numpy as np\ndef add_features(df):\n    np.fromregex('/etc/x', 'a', 'S1')\n    return df", "атрибут"),
+        ("import numpy as np\ndef add_features(df):\n    np.memmap('/tmp/x')\n    return df", "атрибут"),
+        ("import numpy as np\ndef add_features(df):\n    np.lib.npyio.DataSource()\n    return df", "атрибут"),
+        ("import pandas as pd\ndef add_features(df):\n    pd.core.sys.exit()\n    return df", "атрибут"),
+        ("def add_features(df):\n    df['a2'] = df.eval('area * 2')\n    return df", "атрибут"),
+        ("def add_features(df):\n    df = df.query('area > 0')\n    return df", "атрибут"),
+        # операции по порядку строк: на склеенных train+test — утечка соседних строк
+        ("def add_features(df):\n    df['prev'] = df['area'].shift(1)\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['d'] = df['area'].diff()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['r'] = df['area'].rolling(3).mean()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['e'] = df['area'].expanding().mean()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['w'] = df['area'].ewm(span=3).mean()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['c'] = df['area'].cumsum()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['c'] = df.groupby('city').cumcount()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['p'] = df['area'].pct_change()\n    return df", "порядка строк"),
+        ("def add_features(df):\n    df['pos'] = df.index / len(df)\n    return df", "порядка строк"),
     ],
 )
 def test_bad_code_rejected(code, fragment):
@@ -175,3 +194,39 @@ def test_apply_refuses_table_with_target(table, tmp_path):
 def test_apply_leaves_no_files(table, tmp_path):
     apply(GOOD, table, tmp_path)
     assert list(tmp_path.iterdir()) == []  # обмен через временную папку, она удаляется
+
+
+def test_whole_table_statistics_still_allowed():
+    # разрешено то, что не зависит от порядка: статистики по всей таблице и groupby-transform
+    code = (
+        "def add_features(df):\n"
+        "    df = df.copy()\n"
+        "    df['area_rank'] = df['area'].rank(pct=True)\n"
+        "    df['city_mean_area'] = df.groupby('city')['area'].transform('mean')\n"
+        "    return df"
+    )
+    assert check_feature_code(code, target="site_eui") is None
+
+
+def test_feature_hypothesis_takes_params_of_best(spec):
+    best = Hypothesis(
+        id="xgb_tuned",
+        kind=HypothesisKind.HYPERPARAMS,
+        title="XGBoost",
+        params={"model": "xgboost", "model_params": {"max_depth": 6}, "_best_iteration": 420, "_proba_weights": [1.0]},
+    )
+    hyp = parse_feature_hypothesis({"id": "ratios", "title": "Отношения", "code": GOOD}, spec, [], best=best)
+    assert hyp.params == {"model": "xgboost", "model_params": {"max_depth": 6}}  # без служебных `_…`
+    assert hyp.parent_id == "xgb_tuned"
+    hyp.params["model_params"]["max_depth"] = 1
+    assert best.params["model_params"]["max_depth"] == 6  # копия, лучший не меняется
+
+
+def test_feature_hypothesis_without_best_is_default_lightgbm(spec):
+    hyp = parse_feature_hypothesis({"id": "ratios", "title": "Отношения", "code": GOOD}, spec, [])
+    assert hyp.params == {"model": "lightgbm"} and hyp.parent_id is None
+
+
+def test_prompt_forbids_row_order_features(spec, profile):
+    user = build_feature_messages(spec, profile, tried=[])[1]["content"]
+    assert "порядку строк" in user and "groupby-transform" in user
