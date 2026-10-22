@@ -37,7 +37,7 @@ import psutil
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 
 from agent.task_parser import parse_task
-from evaluation.local_score import score_submission
+from evaluation.local_score import organizer_score, score_submission
 from evaluation.submission import validate_submission
 from interfaces.schemas import TaskSpec, TaskType
 
@@ -104,9 +104,14 @@ def time_column(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) ->
     return None
 
 
+def targets_of(spec: TaskSpec) -> list[str]:
+    """Все колонки ответа-таргеты: основной и остальные (несколько таргетов, #174, #220)."""
+    return [spec.target, *spec.extra_targets]
+
+
 def holdout_mask(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame, frac: float) -> tuple[np.ndarray, str]:
     """Какие строки train уйдут в «скрытый тест» и как выбраны (для отчёта)."""
-    features = [c for c in train.columns if c not in (spec.target, spec.id_column) and c in test.columns]
+    features = [c for c in train.columns if c not in (*targets_of(spec), spec.id_column) and c in test.columns]
     found = time_column(train, test, features)
     if found:
         col, values = found
@@ -161,18 +166,19 @@ def make_holdout_task(task_md: Path, out: Path, frac: float = 0.25, rows: int | 
         return target
 
     part.to_csv(place(spec.train_path), index=False)
-    test_columns = [c for c in test.columns if c in hold.columns and c != spec.target]
+    targets = targets_of(spec)
+    test_columns = [c for c in test.columns if c in hold.columns and c not in targets]
     if spec.id_column not in test_columns:
         test_columns.insert(0, spec.id_column)
     hold[test_columns].to_csv(place(spec.test_path), index=False)
     if spec.sample_submission_path:
         sample = pd.read_csv(spec.sample_submission_path, nrows=1)
-        filler = sample[spec.target].iloc[0] if spec.target in sample.columns and len(sample) else 0
-        hold[[spec.id_column]].assign(**{spec.target: filler})[spec.submission_columns].to_csv(
+        fillers = {t: sample[t].iloc[0] if t in sample.columns and len(sample) else 0 for t in targets}
+        hold[[spec.id_column]].assign(**fillers)[spec.submission_columns].to_csv(
             place(spec.sample_submission_path), index=False
         )
-    hold[[spec.id_column, spec.target]].to_csv(out / "answers.csv", index=False)
-    return {"spec": spec, "task_md": task_dir / task_md.name, "split": how, "y_train": part[spec.target]}
+    hold[[spec.id_column, *targets]].to_csv(out / "answers.csv", index=False)
+    return {"spec": spec, "task_md": task_dir / task_md.name, "split": how, "y_train": part[targets]}
 
 
 # --- 2. Запуск агента
@@ -223,11 +229,57 @@ def llm_usage(run_dir: Path) -> dict:
         if not call.get("ok"):
             usage["llm_errors"] += 1
             continue
+        try:  # журнал пишет клиент агента; кривое поле — пропускаем строку, а не роняем прогон в FAILED
+            tokens = int(call.get("prompt") or 0) + int(call.get("completion") or 0)
+            rub = float(call.get("cost") or 0.0)
+        except (TypeError, ValueError):
+            continue
         usage["llm_calls"] += 1
-        usage["llm_tokens"] += int(call.get("prompt") or 0) + int(call.get("completion") or 0)
-        usage["llm_rub"] += float(call.get("cost") or 0.0)
+        usage["llm_tokens"] += tokens
+        usage["llm_rub"] += rub if np.isfinite(rub) else 0.0
     usage["llm_rub"] = round(usage["llm_rub"], 4)
     return usage
+
+
+def score_targets(
+    spec: TaskSpec, merged: pd.DataFrame, y_train: pd.DataFrame, x_train: pd.DataFrame, x_test: pd.DataFrame
+) -> dict:
+    """Балл по ответу; merged — answers + submission с суффиксами _true/_pred.
+
+    Несколько таргетов (#220): метрика каждого таргета считается отдельно, итог — среднее (так их сводят в task.md),
+    бейзлайны — тоже средние, балл — по формуле организаторов от средних.
+    """
+    parts = []
+    for target in targets_of(spec):
+        spec_t = spec
+        if target != spec.target:
+            labels = None  # классы остальных таргетов в TaskSpec не хранятся — берём из данных
+            if spec.task_type in (TaskType.BINARY, TaskType.MULTICLASS):
+                labels = sorted(pd.concat([y_train[target], merged[f"{target}_true"]]).dropna().astype(str).unique())
+            spec_t = spec.model_copy(update={"target": target, "class_labels": labels})
+        parts.append(
+            score_submission(
+                spec_t,
+                merged[f"{target}_true"],
+                merged[f"{target}_pred"],
+                y_train[target],
+                x_train=x_train,
+                x_test=x_test,
+            )
+        )
+    if len(parts) == 1:
+        return parts[0]
+    name = spec.metric.name
+    result = {"metric": name, **{k: float(np.mean([p[k] for p in parts])) for k in ("value", "baseline")}}
+    result["score"] = organizer_score(name, result["value"], result["baseline"])
+    model_baselines = [p.get("model_baseline", float("nan")) for p in parts]
+    if all(np.isfinite(model_baselines)):
+        result["model_baseline"] = float(np.mean(model_baselines))
+        result["model_score"] = organizer_score(name, result["value"], result["model_baseline"])
+    errors = [p["model_error"] for p in parts if "model_error" in p]
+    if errors:
+        result.update(model_baseline=float("nan"), model_score=float("nan"), model_error=errors[0])
+    return result
 
 
 def run_task(
@@ -273,11 +325,10 @@ def run_task(
         merged = answers.merge(submission, on=spec.id_column, suffixes=("_true", "_pred"))
         features = [c for c in test.columns if c != spec.id_column]
         x_test = merged[[spec.id_column]].merge(test, on=spec.id_column, how="left")[features]
-        x_train = pd.read_csv(new_spec.train_path, low_memory=False).drop(columns=[spec.target], errors="ignore")
-        scores = score_submission(
+        x_train = pd.read_csv(new_spec.train_path, low_memory=False).drop(columns=targets_of(spec), errors="ignore")
+        scores = score_targets(
             spec,
-            merged[f"{spec.target}_true"],
-            merged[f"{spec.target}_pred"],
+            merged,
             prepared["y_train"],
             x_train=x_train.drop(columns=[spec.id_column], errors="ignore"),
             x_test=x_test,
@@ -384,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:
     tasks = find_tasks() if args.all else [t.resolve() for t in args.task or []]
     if not tasks:
         parser.error("укажи --all или --task")
+    if args.llm and os.getenv("LLM_CACHE_DIR"):  # на платформе кэша нет: ответы из него не считаются в расход
+        print(f"⚠️ LLM_CACHE_DIR={os.getenv('LLM_CACHE_DIR')}: ответы из кэша не попадут в токены и ₽ — расход занижен")
     commit, date = commit_id(args.agent_root.resolve()), time.strftime("%Y-%m-%d %H:%M")
     rows = []
     # Дочерние процессы агента могут дописывать файлы в момент удаления папки («Directory not empty») —

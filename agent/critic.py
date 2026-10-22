@@ -68,12 +68,21 @@ def slowdown(hyp: Hypothesis) -> float:
     model = _model(hyp)
     factor = MODEL_SLOWDOWN.get(model, UNKNOWN_MODEL_SLOWDOWN)
     if model == "lightgbm":  # learning_rate и num_leaves откалиброваны только для LightGBM
-        if 0 < lr < BASE_PARAMS["learning_rate"]:
-            factor *= (BASE_PARAMS["learning_rate"] / lr) ** 0.5
-        if leaves > BASE_PARAMS["num_leaves"]:
-            factor *= (leaves / BASE_PARAMS["num_leaves"]) ** 0.4
+        factor *= lightgbm_slowdown(lr, leaves, BASE_PARAMS["learning_rate"], BASE_PARAMS["num_leaves"])
     factor *= max(1.0, folds / DEFAULT_FOLDS)
     return min(max(factor, 1.0), MAX_SLOWDOWN)
+
+
+def lightgbm_slowdown(lr: float, leaves: float, base_lr: float, base_leaves: float) -> float:
+    """Замедление LightGBM относительно бейзлайна с base_lr и base_leaves. Показатели степени — из замера
+    2026-10-21 (бейзлайн тогда был 0.05 и 63); бейзлайн передаётся аргументом, поэтому смена BASE_PARAMS
+    не ломает калибровку: оценка считается от того бейзлайна, время которого реально замерено в прогоне."""
+    factor = 1.0
+    if 0 < lr < base_lr:
+        factor *= (base_lr / lr) ** 0.5
+    if leaves > base_leaves:
+        factor *= (leaves / base_leaves) ** 0.4
+    return factor
 
 
 def estimated_seconds(hyp: Hypothesis, baseline_seconds: float) -> float:

@@ -99,7 +99,10 @@ def run_autoresearch(
             history.append((hyp, _skipped(hyp, spec, reason)))
             memory.record(hyp.id, False, reason)
             continue
-        result = run_experiment(spec, profile, with_validation(hyp, validation), train, budget)
+        # run_experiment пишет в params запущенной копии _best_iteration, _proba_weights, _optuna_best —
+        # финал должен обучаться на ней, а не на исходной гипотезе (#206: иначе 550 деревьев и без весов классов)
+        run_hyp = with_validation(hyp, validation)
+        result = run_experiment(spec, profile, run_hyp, train, budget)
         history.append((hyp, result))
         if result.status != ExperimentStatus.OK:
             log.info("  ✗ %s: %s", result.status.value, result.error)
@@ -109,8 +112,8 @@ def run_autoresearch(
         memory.record(hyp.id, accepted, reason)  # причина (t, k/5 фолдов) видна LLM в истории
         if accepted:
             log.info("  ✓ лучше: %.5f → %.5f — %s", best[1].mean_score, result.mean_score, reason)
-            best = (hyp, result)
-            on_new_best(hyp, result)
+            best = (run_hyp, result)
+            on_new_best(run_hyp, result)
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
     llm.log_summary()  # токены и время LLM — тай-брейк при равном балле; журнал вызовов — llm_calls.jsonl

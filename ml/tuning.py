@@ -1,6 +1,6 @@
 """Подбор гиперпараметров Optuna для params.optuna. Владелец — ML-pipeline инженер.
 
-params.optuna: {trials: 30, timeout: 600, folds: 3, rows: 100000} — любые ключи можно опустить.
+params.optuna: true или {trials: 30, timeout: 600, folds: 3, rows: 100000} — любые ключи можно опустить.
 Поиск дешёвый: на подвыборке (rows) и меньшем числе фолдов (folds). Найденные model_params run_experiment подставляет
 в гипотезу и затем делает обычную CV — её скор сравним с остальными гипотезами.
 
@@ -88,7 +88,8 @@ def tune(
     """
     from ml.experiment import DEFAULT_MODEL, SEED, _fold_score, _is_classification, _sample_rows, _split
 
-    cfg = {**DEFAULTS, **(hypothesis.params.get("optuna") or {})}
+    own = hypothesis.params.get("optuna")
+    cfg = {**DEFAULTS, **(own if isinstance(own, dict) else {})}  # optuna: true — всё по умолчанию
     model = str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower()
     classification = _is_classification(spec)
     timeout = max(0.0, min(float(cfg["timeout"]), budget.seconds_left() * BUDGET_SHARE))
