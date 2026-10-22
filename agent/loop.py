@@ -14,6 +14,7 @@ from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
+from agent.llm_critic import critique
 from agent.llm_hypotheses import reflect
 from agent.memory import ResearchMemory
 from interfaces.schemas import DataProfile, ExperimentResult, ExperimentStatus, Hypothesis, RunBudget, TaskSpec
@@ -57,6 +58,13 @@ def run_autoresearch(
                 reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
             queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
             batch_start = len(history)
+            rejected = critique(spec, profile, history, queue, llm, budget, memory)  # выключен без AGENT_LLM_CRITIC=1
+            for hyp in [h for h in queue if h.id in rejected]:
+                reason = f"критик LLM: {rejected[hyp.id]}"
+                log.info("  ⊘ %s — %s", hyp.id, reason)
+                history.append((hyp, _skipped(hyp, spec, reason)))
+                memory.record(hyp.id, False, reason)
+            queue = [h for h in queue if h.id not in rejected]
         if not queue:
             log.info("Гипотезы закончились — завершаю цикл")
             break
