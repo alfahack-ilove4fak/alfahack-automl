@@ -133,3 +133,24 @@ hypotheses:
     title: CatBoost (симметричные деревья, кодирование категорий по порядку)
     rationale: Сильнее всего там, где много категорий; симметричные деревья меньше переобучаются
     params: {model: catboost}
+
+  - id: hist_gb
+    kind: model
+    title: HistGradientBoosting из scikit-learn
+    rationale: Самый быстрый бустинг, категории нативно; третья реализация бустинга — другие ошибки, кандидат в ансамбль
+    params: {model: hist_gb}
+
+  - id: xgboost_log_target
+    kind: model
+    title: XGBoost на log1p(target) (комбинация)
+    rationale: Цикл не складывает выигрыши (#87); XGBoost и log1p по отдельности честно лучше на регрессии
+    task_types: [regression]
+    params: {model: xgboost, log_target: true}
+
+  - id: xgboost_balanced_proba_weights
+    kind: model
+    title: XGBoost + веса классов + множители вероятностей (комбинация)
+    rationale: Цикл не складывает выигрыши (#87); лучшая модель и лучшая гипотеза для метрик по меткам при дисбалансе
+    task_types: [binary, multiclass]
+    requires: imbalance
+    params: {model: xgboost, class_weight: balanced, proba_weights: true}
