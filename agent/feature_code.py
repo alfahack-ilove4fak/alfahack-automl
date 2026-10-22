@@ -12,6 +12,7 @@ check_feature_code — дешёвый предфильтр по тексту (AS
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import re
 import tempfile
@@ -40,6 +41,18 @@ FORBIDDEN_CALLS = {
 FILE_IO_ATTR = re.compile(
     r"^(read_\w+|to_(csv|parquet|pickle|excel|json|sql|feather|hdf|html|latex|stata|orc|clipboard|markdown|xml)|save\w*|load\w*|fromfile|tofile)$"
 )  # noqa: E501
+# Атрибуты, через которые pandas/numpy дают доступ к ОС, файлам и исполнению строк: pd.io.common.os.system(...),
+# np.genfromtxt('/etc/...'), df.eval/df.query (ревью Данила в #101 — обходы проверены запуском)
+FORBIDDEN_ATTRS = {
+    "os", "sys", "io", "lib", "ctypes", "subprocess", "system", "popen", "genfromtxt", "fromregex", "memmap",
+    "DataSource", "eval", "query",
+}  # fmt: skip
+# Операции, зависящие от порядка строк: на склеенных train+test они тащат в признак соседние строки
+# (а train часто отсортирован по target или времени) — утечка и сдвиг между train и test
+ORDER_ATTRS = {
+    "shift", "diff", "rolling", "expanding", "ewm", "cumsum", "cumprod", "cummax", "cummin", "cumcount",
+    "pct_change", "index",
+}  # fmt: skip
 MAX_NEW_COLUMNS = 10  # промпт просит ≤ 5; запас на случай, когда LLM разворачивает идею шире
 SANDBOX_TIMEOUT = 120.0  # сек: векторный код на 100–500 тыс. строк укладывается в секунды
 SANDBOX_MEM_MB = 8192  # ≥ 2048 только на импорт pandas (runtime/sandbox.py); таблица ×2–3 на копии
@@ -75,6 +88,10 @@ def check_feature_code(code: str, target: str | None = None) -> str | None:
                 return f"запрещён доступ к служебному атрибуту {node.attr}"
             if FILE_IO_ATTR.match(node.attr):
                 return f"запрещена работа с файлами: .{node.attr}"
+            if node.attr in FORBIDDEN_ATTRS:
+                return f"запрещён атрибут .{node.attr} (доступ к ОС, файлам или исполнению строк)"
+            if node.attr in ORDER_ATTRS:
+                return f"запрещено .{node.attr}: признак строки не должен зависеть от порядка строк"
         elif isinstance(node, ast.Constant) and target and node.value == target:
             return f"код обращается к target «{target}» — его в таблице нет, это признак утечки"
         elif isinstance(node, ast.Global | ast.Nonlocal):
@@ -111,10 +128,23 @@ def build_feature_messages(spec: TaskSpec, profile: DataProfile, tried: list[str
     return [{"role": "system", "content": system.strip()}, {"role": "user", "content": user.strip()}]
 
 
+def feature_params(best: Hypothesis | None) -> dict:
+    """params гипотезы признаков = params текущего лучшего без служебных `_…` (подобранных под старые признаки).
+
+    Тогда правило принятия (сравнение с лучшим) меряет эффект признаков, а не смену модели.
+    """
+    if best is None:
+        return {"model": "lightgbm"}
+    return copy.deepcopy({k: v for k, v in best.params.items() if not str(k).startswith("_")})
+
+
 def parse_feature_hypothesis(
-    raw, spec: TaskSpec, history: list[tuple[Hypothesis, ExperimentResult]]
+    raw, spec: TaskSpec, history: list[tuple[Hypothesis, ExperimentResult]], best: Hypothesis | None = None
 ) -> Hypothesis | None:
-    """Ответ LLM (JSON) → Hypothesis вида features с проверенным кодом, или None."""
+    """Ответ LLM (JSON) → Hypothesis вида features с проверенным кодом, или None.
+
+    best — текущая лучшая гипотеза: её params и id (parent_id) берутся за основу; без неё — LightGBM по умолчанию.
+    """
     if isinstance(raw, list) and raw:
         raw = raw[0]
     if not isinstance(raw, dict):
@@ -131,7 +161,14 @@ def parse_feature_hypothesis(
         hyp_id, n = f"{base_id}_{n}", n + 1
     try:
         return Hypothesis.model_validate(
-            item | {"id": hyp_id, "kind": HypothesisKind.FEATURES, "source": "llm", "params": {"model": "lightgbm"}}
+            item
+            | {
+                "id": hyp_id,
+                "kind": HypothesisKind.FEATURES,
+                "source": "llm",
+                "params": feature_params(best),
+                "parent_id": best.id if best is not None else None,
+            }
         )
     except ValidationError as exc:
         log.info("Гипотеза признаков от LLM не по схеме: %s", exc.errors()[0]["msg"])
