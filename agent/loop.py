@@ -12,6 +12,7 @@ import pandas as pd
 
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
+from agent.fallback import fallback_hypotheses
 from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
@@ -35,7 +36,7 @@ def run_autoresearch(
     history: list[tuple[Hypothesis, ExperimentResult]],
     best: tuple[Hypothesis, ExperimentResult],
     on_new_best: Callable[[Hypothesis, ExperimentResult], None],
-    max_iterations: int = 50,
+    max_iterations: int = 200,  # с запасными направлениями (#200) предел — время, а не число итераций
     llm: LLMClient | None = None,
     memory: ResearchMemory | None = None,
 ) -> tuple[Hypothesis, ExperimentResult]:
@@ -76,6 +77,11 @@ def run_autoresearch(
                 history.append((hyp, _skipped(hyp, spec, reason)))
                 memory.record(hyp.id, False, reason)
             queue = [h for h in queue if h.id not in rejected]
+        if not queue:
+            # playbook и LLM пусты, а время есть — не выходим, а берём запасные направления (#200)
+            queue = fallback_hypotheses(spec, history, best, budget)
+            if queue:
+                log.info("Playbook и LLM исчерпаны — запасные направления: %d гипотез", len(queue))
         if not queue:
             log.info("Гипотезы закончились — завершаю цикл")
             break
