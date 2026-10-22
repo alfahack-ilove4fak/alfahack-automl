@@ -299,3 +299,108 @@ def test_key_hidden_in_error_log(client, caplog):
     assert client.chat(MESSAGES) is None
     assert "Illegal header value" in caplog.text
     assert "sk-secret-777" not in caplog.text
+
+
+# ---------------------------------------------------------------- учёт токенов, стоимость, журнал вызовов
+
+
+def _usage(prompt=100, completion=50, reasoning=30, cost=None):
+    usage = SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=reasoning),
+    )
+    if cost is not None:
+        usage.cost = cost
+    return usage
+
+
+class UsageOpenAI(FakeOpenAI):
+    """Как FakeOpenAI, но с usage в формате прокси LiteLLM (cost, reasoning_tokens)."""
+
+    def __init__(self, answers, usage):
+        super().__init__(answers)
+        self.usage = usage
+
+    def _create(self, **kwargs):
+        self.requests += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=answer), finish_reason="stop")],
+            usage=self.usage,
+        )
+
+
+@pytest.fixture
+def live_client(monkeypatch, tmp_path):
+    """Клиент «с ключом», но с подменённым OpenAI; журнал — в tmp_path."""
+    monkeypatch.setenv("LLM_MOCK", "0")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-1234567890")
+    monkeypatch.setenv("OPENAI_MODEL", "qwen/test")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
+    monkeypatch.delenv("LLM_CACHE_DIR", raising=False)
+    monkeypatch.setenv("AGENT_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("LLM_PRICE_RUB_PER_1K_INPUT", "0")
+    monkeypatch.setenv("LLM_PRICE_RUB_PER_1K_OUTPUT", "0")
+    return LLMClient()
+
+
+def _ledger(tmp_path):
+    import json
+
+    return [json.loads(line) for line in (tmp_path / "llm_calls.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def test_proxy_cost_is_used_instead_of_zero_prices(live_client, tmp_path):
+    live_client._client = UsageOpenAI(["ok"], _usage(cost=0.0156))
+    assert live_client.chat(MESSAGES, purpose="hypotheses") == "ok"
+    s = live_client.summary()
+    assert s["rub"] == pytest.approx(0.0156)
+    assert (s["prompt_tokens"], s["completion_tokens"], s["reasoning_tokens"], s["total_tokens"]) == (100, 50, 30, 150)
+    assert s["calls"] == 1 and s["errors"] == 0
+
+
+def test_rub_limit_works_with_proxy_cost(live_client):
+    live_client.rub_limit = 0.02
+    live_client._client = UsageOpenAI(["a", "b"], _usage(cost=0.015))
+    assert live_client.chat(MESSAGES) == "a"
+    assert live_client.chat(MESSAGES + [{"role": "user", "content": "ещё"}]) == "b"
+    assert not live_client.available()  # 0.03 ₽ ≥ лимита 0.02 ₽ — дальше без LLM
+
+
+def test_ledger_records_purpose_tokens_and_answer(live_client, tmp_path):
+    live_client._client = UsageOpenAI(["гипотезы"], _usage(cost=0.01))
+    live_client.chat(MESSAGES, purpose="critic")
+    row = _ledger(tmp_path)[0]
+    assert row["purpose"] == "critic" and row["ok"] is True
+    assert row["prompt"] == 100 and row["reasoning"] == 30 and row["cost"] == pytest.approx(0.01)
+    assert row["answer"] == "гипотезы" and row["seconds"] >= 0
+
+
+def test_ledger_records_errors_without_key(live_client, tmp_path):
+    live_client._client = UsageOpenAI([ConnectionError("boom sk-test-1234567890")], _usage())
+    assert live_client.chat(MESSAGES, purpose="reflect") is None
+    row = _ledger(tmp_path)[0]
+    assert row["ok"] is False and "ConnectionError" in row["error"]
+    assert "sk-test-1234567890" not in row["error"]
+    assert live_client.summary()["errors"] == 1
+
+
+def test_no_ledger_without_run_dir(monkeypatch, live_client, tmp_path):
+    monkeypatch.delenv("AGENT_RUN_DIR")
+    client = LLMClient()
+    client._client = UsageOpenAI(["ok"], _usage())
+    client.chat(MESSAGES)
+    assert client.ledger is None
+
+
+def test_log_summary_mentions_tokens(live_client, caplog):
+    import logging
+
+    live_client._client = UsageOpenAI(["ok"], _usage(cost=0.5))
+    live_client.chat(MESSAGES)
+    with caplog.at_level(logging.INFO, logger="agent.llm"):
+        live_client.log_summary()
+    assert "LLM итог: 1 запросов" in caplog.text and "токены 150" in caplog.text

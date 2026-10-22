@@ -86,7 +86,9 @@ def llm_hypotheses(
     if messages is None:
         return []
     try:
-        raw = llm.chat_json(messages, temperature=TEMPERATURE, max_tokens=MAX_TOKENS, seconds_left=_left(budget))
+        raw = llm.chat_json(
+            messages, temperature=TEMPERATURE, max_tokens=MAX_TOKENS, seconds_left=_left(budget), purpose="hypotheses"
+        )
         if raw is None:  # не звали (мало времени), сбой или пустой/невалидный ответ — причина уже в логе клиента
             log.info("LLM гипотез не дала — гипотезы из playbook")
             return []
@@ -121,7 +123,13 @@ def reflect(
         return
     try:
         memory.add_lesson(
-            llm.chat(messages, temperature=0.2, max_tokens=REFLECTION_MAX_TOKENS, seconds_left=_left(budget))
+            llm.chat(
+                messages,
+                temperature=0.2,
+                max_tokens=REFLECTION_MAX_TOKENS,
+                seconds_left=_left(budget),
+                purpose="reflect",
+            )
         )
     except Exception:  # noqa: BLE001 — рефлексия необязательна
         log.exception("Рефлексия LLM не получена")
