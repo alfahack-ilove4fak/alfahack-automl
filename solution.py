@@ -33,7 +33,6 @@ from evaluation.submission import per_class_columns, validate_submission, write_
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
-from ml.validation import choose_validation
 from runtime.budget import StagePlan, ensure_final_reserve, make_budget, plan_stages
 from runtime.log import setup_logging
 from runtime.watchdog import Watchdog
@@ -120,33 +119,6 @@ class AnswerKeeper:
             log.exception("Финал (%s): не удалось проверить или восстановить submission.csv", reason)
 
 
-def baseline_in_scheme(
-    spec: TaskSpec, profile: DataProfile, train, test, budget: RunBudget
-) -> tuple[Hypothesis, ExperimentResult]:
-    """Шаг 1: бейзлайн в схеме валидации, похожей на скрытый test (#151, ADR 0013).
-
-    Схему выбираем один раз до цикла и пишем в params бейзлайна: цикл ведёт все гипотезы в ней же (agent/loop.py),
-    правило принятия не сравнивает разные схемы (ADR 0008, D1). Схема не выбралась или бейзлайн в ней упал
-    (например, во time-фолдах один класс) — пересчитываем в обычной kfold / stratified, чтобы не остаться
-    с тривиальным ответом.
-    """
-    log = setup_logging()
-    try:
-        validation = choose_validation(spec, profile, train, test)
-    except Exception:  # noqa: BLE001 — без схемы работаем как раньше, это не повод падать
-        log.exception("Схема валидации не выбрана — обычная CV")
-        validation = None
-    base = baseline_hypothesis()
-    if validation:
-        base = base.model_copy(update={"params": {**base.params, "validation": validation}})
-    base_result = run_experiment(spec, profile, base, train, budget)
-    if base_result.mean_score is None and "validation" in base.params:
-        log.warning("Бейзлайн в схеме %s не посчитался (%s) — возвращаюсь к обычной CV", validation, base_result.error)
-        base = baseline_hypothesis()
-        base_result = run_experiment(spec, profile, base, train, budget)
-    return base, base_result
-
-
 def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: AnswerKeeper, started: float) -> None:
     log = setup_logging()
     spec = parse_task(task_md)
@@ -176,14 +148,9 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
 
     profile = profile_data(spec, train, test)
     parsed_at = time.time()
-    base, base_result = baseline_in_scheme(spec, profile, train, test, budget)
-    log.info(
-        "Шаг 1: бейзлайн %s=%s ± %s (схема %s)",
-        base_result.metric_name,
-        base_result.mean_score,
-        base_result.std_score,
-        base_result.validation,
-    )
+    base = baseline_hypothesis()
+    base_result = run_experiment(spec, profile, base, train, budget)
+    log.info("Шаг 1: бейзлайн %s=%s ± %s", base_result.metric_name, base_result.mean_score, base_result.std_score)
     history = [(base, base_result)]
     if base_result.mean_score is None:
         log.error("Бейзлайн не обучился — остаёмся с тривиальным ответом")
