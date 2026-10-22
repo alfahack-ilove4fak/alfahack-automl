@@ -2,9 +2,17 @@
 
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
-from agent.feature_code import build_feature_messages, check_feature_code, parse_feature_hypothesis
+from agent.feature_code import (
+    MAX_NEW_COLUMNS,
+    apply_feature_code,
+    build_feature_messages,
+    check_feature_code,
+    parse_feature_hypothesis,
+)
 from interfaces.schemas import DataProfile, HypothesisKind
 from interfaces.stubs import stub_task_spec
 
@@ -79,3 +87,91 @@ def test_parse_good_answer(spec):
 )
 def test_parse_bad_answer(spec, raw):
     assert parse_feature_hypothesis(raw, spec, []) is None
+
+
+# ---------------------------------------------------------------- исполнение в песочнице (настоящий run_code)
+
+
+@pytest.fixture
+def table():
+    # train + test вместе, без target; индекс не с нуля — проверяем, что порядок и индекс сохраняются
+    return pd.DataFrame(
+        {"area": [100.0, 250.0, np.nan, 80.0], "floors": [1, 0, 3, 2], "city": ["a", "b", "a", "c"]},
+        index=[10, 11, 12, 13],
+    )
+
+
+def apply(code, table, tmp_path, **kw):
+    return apply_feature_code(code, table, target="site_eui", workdir=tmp_path, timeout=60, mem_mb=4096, **kw)
+
+
+def test_apply_adds_new_numeric_columns(table, tmp_path):
+    out, note = apply(GOOD, table, tmp_path)
+    assert note == ""
+    assert list(out.columns) == ["area", "floors", "city", "area_per_floor", "log_area"]
+    assert out.index.equals(table.index)
+    assert out.loc[10, "area_per_floor"] == 100.0
+    assert np.isnan(out.loc[11, "area_per_floor"])  # деление на 0 этажей → NaN, а не inf
+    pd.testing.assert_frame_equal(out[table.columns], table)
+
+
+def test_apply_ignores_changes_to_existing_columns(table, tmp_path):
+    code = "def add_features(df):\n    df['area'] = 0\n    df['twice'] = df['floors'] * 2\n    return df"
+    out, _ = apply(code, table, tmp_path)
+    pd.testing.assert_series_equal(out["area"], table["area"])  # исходные признаки — из нашего df
+    assert out["twice"].tolist() == [2.0, 0.0, 6.0, 4.0]
+
+
+def test_apply_inf_becomes_nan(table, tmp_path):
+    code = "import numpy as np\ndef add_features(df):\n    df['r'] = df['area'] / df['floors']\n    return df"
+    out, _ = apply(code, table, tmp_path)
+    assert np.isnan(out.loc[11, "r"])  # 250 / 0 = inf → NaN
+
+
+def test_apply_skips_text_and_constant_columns_with_note(table, tmp_path):
+    code = (
+        "def add_features(df):\n    df['txt'] = df['city'] + '!'\n    df['one'] = 1\n"
+        "    df['f'] = df['floors'] + 1\n    return df"
+    )
+    out, note = apply(code, table, tmp_path)
+    assert "f" in out.columns and "txt" not in out.columns and "one" not in out.columns
+    assert "txt" in note and "one" in note
+
+
+@pytest.mark.parametrize(
+    "code, fragment",
+    [
+        ("import os\ndef add_features(df):\n    return df", "импорт"),  # до песочницы
+        ("def add_features(df):\n    raise ValueError('boom')", "ValueError: boom"),
+        ("def add_features(df):\n    return df.iloc[:2]", "изменил строки"),
+        ("def add_features(df):\n    return df.iloc[::-1]", "изменил строки"),
+        ("def add_features(df):\n    return df.drop(columns=['city'])", "удалил исходные"),
+        ("def add_features(df):\n    return df", "ни одной числовой"),
+        ("def add_features(df):\n    return 42", "не DataFrame"),
+        ("def add_features(df):\n    df['c'] = 7\n    return df", "константные"),
+        (
+            f"def add_features(df):\n    for i in range({MAX_NEW_COLUMNS + 2}):\n"
+            "        df[f'x{i}'] = df['floors'] * (i + 1)\n    return df",
+            "больше",
+        ),
+    ],
+)
+def test_apply_rejects_bad_results(table, tmp_path, code, fragment):
+    out, reason = apply(code, table, tmp_path)
+    assert out is None and fragment in reason, reason
+
+
+def test_apply_timeout(table, tmp_path):
+    code = "def add_features(df):\n    while True:\n        pass"
+    out, reason = apply_feature_code(code, table, workdir=tmp_path, timeout=3, mem_mb=4096)
+    assert out is None and "не уложился" in reason
+
+
+def test_apply_refuses_table_with_target(table, tmp_path):
+    out, reason = apply(GOOD, table.assign(site_eui=1.0), tmp_path)
+    assert out is None and "target" in reason
+
+
+def test_apply_leaves_no_files(table, tmp_path):
+    apply(GOOD, table, tmp_path)
+    assert list(tmp_path.iterdir()) == []  # обмен через временную папку, она удаляется
