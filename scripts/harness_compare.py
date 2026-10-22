@@ -31,6 +31,11 @@ def _int(value) -> str:
     return "—" if pd.isna(value) else f"{value:.0f}"
 
 
+def _llm_total(board: pd.DataFrame, column: str) -> float:
+    """Сумма расхода LLM по задачам; старый лидерборд без колонки — 0."""
+    return float(board[column].fillna(0).sum()) if column in board.columns else 0.0
+
+
 def _mark(delta: float, head_status: str) -> str:
     if head_status != "OK":
         return "🔴 упал"
@@ -68,6 +73,11 @@ def render(base: pd.DataFrame, head: pd.DataFrame, minutes: float | None = None,
     mean_b = base["score"].mean() if len(base) else 0.0
     mean_h = head["score"].mean() if len(head) else 0.0
     lines += ["", f"**Средний балл: {mean_b:.1f} → {mean_h:.1f} ({mean_h - mean_b:+.1f})**", ""]
+    used_llm = _llm_total(base, "llm_calls") + _llm_total(head, "llm_calls") > 0
+    if used_llm:  # тай-брейк при равном балле: меньше токенов — выше место
+        tok_b, tok_h = _llm_total(base, "llm_tokens"), _llm_total(head, "llm_tokens")
+        rub_b, rub_h = _llm_total(base, "llm_rub"), _llm_total(head, "llm_rub")
+        lines += [f"Токены LLM: {tok_b:.0f} → {tok_h:.0f} ({tok_h - tok_b:+.0f}), {rub_b:.2f} → {rub_h:.2f} ₽", ""]
     errors = [f"- `{t}`: {e}" for t, e in head["error"].items() if isinstance(e, str) and e]
     if errors:
         lines += ["Ошибки в PR:", *errors, ""]
@@ -76,7 +86,7 @@ def render(base: pd.DataFrame, head: pd.DataFrame, minutes: float | None = None,
         setup.append(f"бюджет {minutes:g} мин на задачу")
     if rows:
         setup.append(f"train урезан до {rows} строк")
-    setup += ["без LLM", "один прогон"]
+    setup += ["с LLM" if used_llm else "без LLM", "один прогон"]
     lines.append(
         f"<sub>{', '.join(setup)}. Балл — по формуле организаторов относительно тривиального ответа "
         f"(`evaluation/local_score.py`). Разница меньше {NOISE:g} балла может быть шумом. "
