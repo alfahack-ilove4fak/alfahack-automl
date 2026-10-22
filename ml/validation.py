@@ -2,7 +2,7 @@
 
 ADR 0008, D1: схему выбирают один раз до цикла (choose_validation), все гипотезы считаются в ней, а
 ExperimentResult.validation = "<схема>-<число фолдов>" — результаты разных схем не сравниваются.
-Решение о схеме по умолчанию и цифры — docs/decisions/0011-validation-default.md.
+Решение о схеме по умолчанию и цифры — docs/decisions/0012-validation-default.md.
 
 Значения params.validation:
   kfold              — случайные фолды (по умолчанию для регрессии)
