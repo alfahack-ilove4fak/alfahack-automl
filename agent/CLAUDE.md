@@ -11,7 +11,6 @@
 | `llm_hypotheses.py` | ответ LLM → проверенные `Hypothesis`: схема, допустимые kind и ключи params, без повторов |
 | `prompting.py` | сборка промптов из `agent/prompts/*.md` (string.Template, `$плейсхолдеры`); нет файла → `None` → playbook |
 | `feature_code.py` | код признаков от LLM: промпт `prompts/features.md`, разбор ответа, проверка кода до песочницы (AST); `apply_feature_code(code, df)` — запуск в песочнице, возвращает df + новые числовые колонки или причину; `propose_feature_hypothesis` — запрос кода у LLM, цикл зовёт после первой пачки ≤ `MAX_FEATURE_TRIES` раз (`AGENT_FEATURE_CODE=0` выключает); в `ml/experiment.with_feature_code` код применяется до фолдов |
-| `loop.py` | цикл AutoResearch: гипотеза → `ml.run_experiment` → принять, если лучше на `min_delta` |
 | `memory.py` | память цикла: решение по каждой гипотезе и последние выводы LLM после неудачных пачек |
 | `critic.py` | критик по правилам: пустые для задачи гипотезы, недопустимые значения, цена по времени → пропуск (`SKIPPED`) до запуска |
 | `llm_critic.py` | LLM-критик: одна проверка пачки LLM-гипотез до запуска (утечка, подгонка, метрика, повтор, цена); `AGENT_LLM_CRITIC=1`, при сбое пропускает всё |
