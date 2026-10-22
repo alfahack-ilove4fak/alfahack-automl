@@ -14,7 +14,15 @@ import yaml
 
 from agent.llm_client import LLMClient
 from agent.memory import ResearchMemory
-from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, HypothesisKind, TaskSpec, TaskType
+from interfaces.schemas import (
+    DataProfile,
+    ExperimentResult,
+    Hypothesis,
+    HypothesisKind,
+    RunBudget,
+    TaskSpec,
+    TaskType,
+)
 
 PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "research" / "playbook.yaml"
 
@@ -56,15 +64,20 @@ def propose_hypotheses(
     profile: DataProfile,
     history: list[tuple[Hypothesis, ExperimentResult]],
     k: int = 3,
+    budget: RunBudget | None = None,
     llm: LLMClient | None = None,
     memory: ResearchMemory | None = None,
 ) -> list[Hypothesis]:
-    """Сначала гипотезы от LLM (если она доступна), недостающие — из playbook. Повторы истории отсекаются."""
+    """Сначала гипотезы от LLM (если она доступна), недостающие — из playbook. Повторы истории отсекаются.
+
+    budget (контракт 1.1, D3): по остатку времени LLM-клиент решает, звать ли модель и сколько ждать;
+    playbook бюджет не требует.
+    """
     out: list[Hypothesis] = []
     if llm is not None:
         from agent.llm_hypotheses import llm_hypotheses  # здесь: llm_hypotheses сам импортирует этот модуль
 
-        out = llm_hypotheses(spec, profile, history, k, llm, memory)
+        out = llm_hypotheses(spec, profile, history, k, llm, memory, budget)
     tried = {h.id for h, _ in history} | {h.id for h in out}
     seen_params = {params_key(h.params) for h, _ in history} | {params_key(h.params) for h in out}
     for item in load_playbook():

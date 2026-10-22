@@ -339,14 +339,22 @@ def check_llm_call() -> Check:
         sys.path.insert(0, str(ROOT))
         from agent.llm_client import LLMClient
 
+        client = LLMClient(timeout=60)
+        if not client.available():
+            return Check("запрос к LLM", FAIL, "клиент не создан: нет ключа/модели или LLM_MOCK=1", "проверь .env")
+        t0 = time.time()
         # Qwen рассуждает: скрытые размышления тратят max_tokens, при 10–40 ответ приходит пустым
-        answer = LLMClient(timeout=60).chat([{"role": "user", "content": "Ответь одним словом: готов"}], max_tokens=300)
+        # chat() возвращает None, если LLM не ответила, — doctor не должен падать до печати таблицы
+        answer = (
+            client.chat([{"role": "user", "content": "Ответь одним словом: готов"}], max_tokens=300) or ""
+        ).strip()
+        elapsed = time.time() - t0
     except Exception as exc:  # noqa: BLE001
         return Check("запрос к LLM", FAIL, f"{type(exc).__name__}: {exc}", "проверь .env и OPENAI_BASE_URL")
     return Check(
         "запрос к LLM",
-        OK if answer.strip() else FAIL,
-        (answer.strip() or "нет ответа")[:60],
+        OK if answer else FAIL,
+        f"{answer[:40]} за {elapsed:.1f} с" if answer else f"нет ответа за {elapsed:.1f} с — причина в логе выше",
         "проверь значения в .env; если ключ верный — напиши капитану",
     )
 

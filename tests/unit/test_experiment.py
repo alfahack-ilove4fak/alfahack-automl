@@ -533,6 +533,89 @@ def test_per_class_column_count_mismatch_is_error():
         fit_predict_final(spec, profile, hyp, train, test)
 
 
+def test_time_validation_in_experiment_and_result_label():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    train["year"] = np.repeat([1, 2, 3, 4, 5, 6], len(train) // 6)
+    profile = profile.model_copy(update={"numeric_features": [*profile.numeric_features, "year"]})
+    hyp = _hyp(validation="time:year", model_params={"n_estimators": 30})
+
+    result = run_experiment(spec, profile, hyp, train, RunBudget())
+
+    assert result.status == ExperimentStatus.OK, result.error
+    assert result.validation == "time:year-3"  # n_folds=3 в _hyp
+    assert len(result.fold_scores) == 3
+
+
+def test_time_validation_class_appears_only_late():
+    """Ранний период не знает поздний класс — вероятности дополняются нулём, эксперимент не падает."""
+    spec, train, profile = _multiclass_with_rare_class()
+    train["period"] = np.arange(len(train)) // 50
+    train.loc[train["y"] == "rare", "y"] = "up"  # в ранних периодах класса rare нет совсем
+    late = train["period"] >= 3
+    train.loc[late, "y"] = np.where(train.loc[late, "a"] > 1.0, "rare", "up")
+    assert (train.loc[train["period"] < 3, "y"] != "rare").all()
+    profile = profile.model_copy(update={"numeric_features": [*profile.numeric_features, "period"]})
+    result = run_experiment(
+        spec, profile, _hyp(validation="time:period", model_params={"n_estimators": 20}), train, RunBudget()
+    )
+    assert result.status == ExperimentStatus.OK, result.error
+
+
+def test_default_validation_label_and_bad_scheme():
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    assert (
+        run_experiment(spec, profile, _hyp(model_params={"n_estimators": 20}), train, RunBudget()).validation
+        == "kfold-3"
+    )
+    bad = run_experiment(spec, profile, _hyp(validation="magic"), train, RunBudget())
+    assert bad.status == ExperimentStatus.FAILED and "magic" in bad.error
+
+
+def test_fold_proba_has_all_classes_when_train_part_misses_one():
+    """Обучение без класса 1: вероятности всё равно по 3 классам, у класса 1 — нули (иначе argmax сдвинет номера)."""
+    from ml.experiment import _fold_score
+    from ml.profiling import make_matrix
+
+    spec = _spec(TaskType.MULTICLASS, "f1_macro", greater=True, labels=["a", "b", "c"])
+    rng = np.random.default_rng(3)
+    train = pd.DataFrame({"x": rng.normal(size=120)})
+    y = np.where(train["x"] > 0, 2, 0)
+    y[100:110] = 1  # класс 1 только в валидации
+    profile = DataProfile(n_train=120, n_test=0, numeric_features=["x"], categorical_features=[])
+    x, _ = make_matrix(profile, train, train.head(0))
+    tr, va = np.arange(100), np.arange(100, 120)
+
+    _, _, proba = _fold_score(spec, _hyp(model_params={"n_estimators": 20}), x, y, y, tr, va, None, False)
+
+    assert proba.shape == (20, 3)
+    assert (proba[:, 1] == 0).all()
+    assert np.allclose(proba.sum(axis=1), 1.0)
+
+
+def test_optuna_tunes_on_the_same_validation_scheme(monkeypatch):
+    """Ревью #115: подбор на KFold оптимизирует утечку — фолды подбора должны идти по схеме гипотезы (здесь время)."""
+    import ml.tuning
+
+    seen = {}
+
+    def fake_tune(spec, hypothesis, x, y, y_fit, ops, log_target, budget, split=None):
+        seen["folds"] = split(np.arange(len(y)), 3)
+        return {}
+
+    monkeypatch.setattr(ml.tuning, "tune", fake_tune)
+    spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
+    train, _, profile = _data(TaskType.REGRESSION)
+    train["year"] = np.repeat([1, 2, 3, 4, 5, 6], len(train) // 6)
+    profile = profile.model_copy(update={"numeric_features": [*profile.numeric_features, "year"]})
+    hyp = _hyp(validation="time:year", optuna={"trials": 2}, model_params={"n_estimators": 20})
+
+    assert run_experiment(spec, profile, hyp, train, RunBudget()).status == ExperimentStatus.OK
+    for tr, va in seen["folds"]:
+        assert train["year"].iloc[tr].max() < train["year"].iloc[va].min()
+
+
 def test_optuna_hidden_from_agent_until_honest_validation():
     """Ревью #115: подбор на KFold честно хуже бейзлайна — LLM и playbook не должны видеть ключ optuna (до #29)."""
     import re

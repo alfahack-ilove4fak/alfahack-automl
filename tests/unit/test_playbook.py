@@ -30,6 +30,11 @@ def test_supported_params_parsed():
     assert {"model", "model_params", "log_target", "class_weight"} <= SUPPORTED_PARAMS
 
 
+def test_playbook_models_run_in_ci():
+    """CI ставит зависимости без группы full: xgboost/catboost в playbook CI не проверит (и они ломаются — #145)."""
+    assert {item["params"].get("model", "lightgbm") for item in PLAYBOOK} <= {"lightgbm", "hist_gb", "linear"}
+
+
 def test_playbook_has_unique_ids():
     ids = [item["id"] for item in PLAYBOOK]
     assert len(ids) >= 10
@@ -105,3 +110,5 @@ def test_playbook_hypotheses_run(task_type, monkeypatch):
         hyp = Hypothesis(id=item["id"], kind=HypothesisKind(item["kind"]), title=item["title"], params=params)
         result = run_experiment(spec, profile, hyp, train, RunBudget())
         assert result.status == ExperimentStatus.OK, f"{item['id']}: {result.error}"
+        if item["params"].get("proba_weights") and spec.metric.name == "f1_macro":
+            assert hyp.params.get("_proba_weights"), f"{item['id']}: множители классов не подобраны"
