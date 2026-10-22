@@ -6,7 +6,9 @@
 
 Стратегия «сначала надёжно, потом умно»:
   0. сразу пишем тривиальный ответ (среднее / самый частый класс) — файл есть всегда;
-  1. обучаем надёжный бейзлайн и перезаписываем ответ;
+  1. обучаем надёжный бейзлайн и перезаписываем ответ. Бейзлайн не посчитался — лестница отступления (#171):
+     обычная CV вместо выбранной схемы → облегчённый бейзлайн → модель без CV; тривиальный ответ — только если
+     не обучилась ни одна модель;
   2. цикл AutoResearch улучшает модель, пока есть время; каждый новый лучший сразу сохраняется.
 
 Защита от нулевого балла: ответ пишется атомарно и проверяется после каждой записи; сторож
@@ -33,6 +35,7 @@ from evaluation.submission import per_class_columns, validate_submission, write_
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
+from ml.validation import choose_validation
 from runtime.budget import StagePlan, ensure_final_reserve, make_budget, plan_stages
 from runtime.log import setup_logging
 from runtime.watchdog import Watchdog
@@ -65,6 +68,43 @@ def trivial_answer(spec: TaskSpec, train, test):
     else:
         value = str(y.astype(str).mode()[0])
     return test[[spec.id_column]].assign(**{spec.target: value})[spec.submission_columns]
+
+
+LIGHT_ID = "baseline_light"
+LIGHT_MAX_ROWS = 200_000  # облегчённый бейзлайн: CV на сэмпле — порядок качества тот же, время в разы меньше
+LIGHT_PARAMS = {"n_folds": 3, "model_params": {"n_estimators": 500, "learning_rate": 0.1}}
+PLAIN_SCHEMES = (None, "kfold", "stratified")
+
+
+def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: RunBudget):
+    """Бейзлайн с запасными ступенями (#151, #171). → (гипотеза, результат); результат без скора — CV не удалась.
+
+    1. LightGBM в схеме валидации, похожей на скрытый test (choose_validation, ADR 0013) — один раз до цикла:
+       acceptance не сравнивает разные схемы, поэтому бейзлайн обязан быть в той же схеме, что и гипотезы;
+    2. та же модель в обычной CV — если выбранная схема не посчиталась (например, редкий класс во time-фолдах);
+    3. облегчённая: 3 фолда, меньше деревьев, CV на сэмпле ≤ LIGHT_MAX_ROWS — если не хватило времени или памяти.
+    """
+    log = setup_logging()
+    try:
+        validation = choose_validation(spec, profile, train, test)
+    except Exception:  # noqa: BLE001 — без выбранной схемы работаем в обычной CV
+        log.exception("Схема валидации не выбрана — обычная CV")
+        validation = None
+    log.info("Схема валидации: %s", validation or "обычная CV")
+    base = baseline_hypothesis()
+    rungs = []
+    if validation not in PLAIN_SCHEMES:
+        rungs.append((base.model_copy(update={"params": {**base.params, "validation": validation}}), train))
+    rungs.append((base, train))
+    light = base.model_copy(update={"id": LIGHT_ID, "params": {**base.params, **LIGHT_PARAMS}})
+    rungs.append((light, train.sample(n=min(len(train), LIGHT_MAX_ROWS), random_state=0)))
+    result = None
+    for hyp, rows in rungs:
+        result = run_experiment(spec, profile, hyp, rows, budget)
+        if result.mean_score is not None:
+            return hyp, result
+        log.warning("Бейзлайн «%s» не посчитался (%s: %s) — следующая ступень", hyp.id, result.status, result.error)
+    return light, result
 
 
 class AnswerKeeper:
@@ -135,25 +175,26 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
         try:
             answer = fit_predict_final(spec, profile, hyp, train, test)
             problems = keeper.write(answer[spec.submission_columns])
-            log.info(
-                "Сохранён ответ «%s» (CV %s=%.5f), проверка: %s",
-                hyp.id,
-                res.metric_name,
-                res.mean_score,
-                "OK" if not problems else problems,
-            )
+            score = "без CV" if res.mean_score is None else f"CV {res.metric_name}={res.mean_score:.5f}"
+            log.info("Сохранён ответ «%s» (%s), проверка: %s", hyp.id, score, "OK" if not problems else problems)
         except Exception:  # noqa: BLE001 — старый валидный ответ остаётся на месте
             log.exception("Не удалось сохранить ответ гипотезы %s", hyp.id)
         return time.time() - began
 
     profile = profile_data(spec, train, test)
     parsed_at = time.time()
-    base = baseline_hypothesis()
-    base_result = run_experiment(spec, profile, base, train, budget)
+    base, base_result = baseline_ladder(spec, profile, train, test, budget)
     log.info("Шаг 1: бейзлайн %s=%s ± %s", base_result.metric_name, base_result.mean_score, base_result.std_score)
     history = [(base, base_result)]
     if base_result.mean_score is None:
-        log.error("Бейзлайн не обучился — остаёмся с тривиальным ответом")
+        # Ни одна CV не посчиталась: сравнивать гипотезы не с чем, но обученная модель почти всегда лучше среднего
+        log.error("CV бейзлайна не удалась ни на одной ступени — финальная модель без CV, цикл пропускаем")
+        save(base, base_result, profile)
+        return
+    if base.id == LIGHT_ID:
+        # Облегчённая CV (3 фолда, сэмпл) несравнима с гипотезами цикла, а полная не успела — ресурсов мало
+        log.warning("Бейзлайн посчитан только облегчённым — сохраняем его, цикл AutoResearch пропускаем")
+        save(base, base_result, profile)
         return
     final_seconds = save(base, base_result, profile)
     if time.time() > plan.baseline_end:
