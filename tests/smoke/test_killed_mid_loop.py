@@ -65,6 +65,7 @@ def _start(tmp_path: Path, mode: str, budget_sec: int, safety_sec: int) -> tuple
     env = {
         **os.environ,
         "PYTHONPATH": str(ROOT),
+        "PYTHONIOENCODING": "utf-8",  # драйвер не проходит через main() solution.py, где stderr переводится в UTF-8
         "AGENT_TIME_BUDGET_SEC": str(budget_sec),
         "AGENT_SAFETY_SEC": str(safety_sec),
         "LLM_MOCK": "1",
