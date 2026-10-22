@@ -151,6 +151,7 @@ def test_real_client_json_in_markdown(spec, profile, monkeypatch):
 @pytest.mark.parametrize("answer", [[GOOD], None, "мусор"])
 def test_loop_survives_any_llm_answer(spec, profile, monkeypatch, answer):
     monkeypatch.setenv("AGENT_FEATURE_CODE", "0")  # считаем только запросы гипотез и рефлексии
+
     def fake_experiment(spec, profile, hyp, train, budget):
         return ExperimentResult(
             hypothesis_id=hyp.id, status=ExperimentStatus.OK, metric_name="rmse", mean_score=1.0, std_score=0.1
