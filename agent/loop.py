@@ -12,7 +12,7 @@ import pandas as pd
 
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
-from agent.fallback import fallback_hypotheses
+from agent.fallback import fallback_hypotheses, is_fallback
 from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
@@ -60,7 +60,9 @@ def run_autoresearch(
             break
         if not queue:
             batch = history[batch_start:]
-            if batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch):
+            missed = batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch)
+            # пачку запасных направлений придумали правила, а не LLM — рефлексия по ней тратит токены впустую
+            if missed and not all(is_fallback(h) for h, _ in batch):
                 reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
             queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
             if batch and feature_tries < MAX_FEATURE_TRIES:

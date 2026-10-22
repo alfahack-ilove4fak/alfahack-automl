@@ -134,6 +134,8 @@ def test_loop_uses_fallback_instead_of_exit(spec, monkeypatch):
 
     monkeypatch.setattr(loop, "run_experiment", fake_experiment)
     monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: [])
+    reflected = []
+    monkeypatch.setattr(loop, "reflect", lambda *a, **kw: reflected.append(a))
     base = (hyp("baseline", validation="time:Year"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
     profile = DataProfile(n_train=500, n_test=200, numeric_features=["a"], categorical_features=[])
     loop.run_autoresearch(spec, profile, None, RunBudget(total_seconds=3600), [base], base, lambda h, r: None, llm=None)
@@ -141,3 +143,4 @@ def test_loop_uses_fallback_instead_of_exit(spec, monkeypatch):
     assert any("optuna" in h.params for h in ran)
     assert all(h.params["validation"] == "time:Year" for h in ran)  # в схеме прогона, как все гипотезы
     assert len({h.id for h in ran}) == len(ran)  # без повторов
+    assert reflected == []  # пачки запасных направлений придумала не LLM — рефлексию не просим
