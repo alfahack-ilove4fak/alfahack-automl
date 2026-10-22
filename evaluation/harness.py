@@ -11,9 +11,10 @@
   2. собираем копию задачи (task.md, остальной train, новый test без target, sample_submission)
      и запускаем solution.py отдельным процессом с бюджетом времени — как платформа;
   3. считаем метрику задачи и два балла по формуле организаторов (evaluation/local_score.py): относительно
-     тривиального ответа (score) и относительно LightGBM по умолчанию на тех же данных (model_score) —
-     второй ближе к бейзлайну организаторов, по нему сверяемся с public.
+     тривиального ответа (score) и относительно сильного бейзлайна — лучшего из LightGBM по умолчанию и
+     тривиального ответа (model_score); второй ближе к бейзлайну организаторов, по нему сверяемся с public.
 Ответы лежат вне папки задачи — агент их не видит. Результаты дописываются в runs/harness/leaderboard.csv.
+Из CLI .env в корне подхватывается сам (ключ для --llm); сравнить «без LLM / с Qwen» — scripts/qwen.py compare.
 """
 
 from __future__ import annotations
@@ -259,7 +260,7 @@ def append_rows(rows: list[dict], path: Path = LEADERBOARD) -> None:
 
 def render(rows: list[dict]) -> str:
     lines = [
-        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | LightGBM | Балл к LightGBM | Статус | Время, с "
+        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному | Статус | Время, с "
         "| Пик RAM, МБ |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
@@ -276,9 +277,22 @@ def render(rows: list[dict]) -> str:
     model_scores = [r.get("model_score", float("nan")) for r in rows]
     if not np.all(np.isnan(model_scores)):
         lines.append(
-            f"Средний балл к LightGBM: **{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
+            f"Средний балл к сильному бейзлайну (лучший из LightGBM и тривиального): "
+            f"**{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
         )
     return "\n".join(lines)
+
+
+def load_env_file(path: Path = ROOT / ".env") -> bool:
+    """Подхватить .env из корня репозитория (ключ Qwen и настройки), не перезаписывая заданные переменные.
+
+    Только для локального запуска: на платформе .env нет, ключ задаёт сама платформа.
+    """
+    if not path.exists():
+        return False
+    from dotenv import load_dotenv
+
+    return load_dotenv(path, override=False)
 
 
 def find_tasks() -> list[Path]:
@@ -307,13 +321,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("укажи --all или --task")
     commit, date = commit_id(args.agent_root.resolve()), time.strftime("%Y-%m-%d %H:%M")
     rows = []
-    with tempfile.TemporaryDirectory(prefix="harness_") as tmp:
+    # Дочерние процессы агента могут дописывать файлы в момент удаления папки («Directory not empty») —
+    # ошибка уборки не должна терять результаты: строки пишем внутри with, уборку не роняем
+    with tempfile.TemporaryDirectory(prefix="harness_", ignore_cleanup_errors=True) as tmp:
         for task_md in tasks:
             print(f"… {task_md.parent.name}: бюджет {args.minutes} мин", flush=True)
             row = run_task(task_md, Path(tmp), args.minutes, args.frac, args.rows, args.llm, args.agent_root.resolve())
             rows.append({"date": date, "commit": commit, **row})
             print(f"  {row['status']}: балл {row['score']:.1f}", flush=True)
-    append_rows(rows, args.out)
+        append_rows(rows, args.out)
     print("\n" + render(rows))
     print(f"\nСтроки дописаны в {args.out}")
     return 0 if all(r["status"] == "OK" for r in rows) else 1
@@ -322,4 +338,5 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):  # Windows/Git Bash: не UTF-8 → кириллица роняет вывод
         _stream.reconfigure(encoding="utf-8", errors="replace")
+    load_env_file()  # только CLI: тесты зовут main() без .env
     sys.exit(main())
