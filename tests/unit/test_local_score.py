@@ -132,3 +132,13 @@ def test_model_baseline_error_does_not_break_scoring():
     x, y = _xy()
     result = score_submission(spec, y[200:], y[200:], y[:200], x_train=x[:200].iloc[:0], x_test=x[200:])
     assert result["score"] == 100 and np.isnan(result["model_score"]) and result["model_error"]
+
+
+def test_strong_baseline_is_never_weaker_than_trivial():
+    """Сдвиг между train и test (как отложенные годы): LightGBM хуже среднего — бейзлайн берём тривиальный."""
+    spec = _spec(TaskType.REGRESSION, "rmse", False)
+    x, y = _xy()
+    y_test = pd.Series(np.full(100, float(y[:200].mean())))  # на тесте связь с признаками пропала
+    result = score_submission(spec, y_test, y_test + 1.0, y[:200], x_train=x[:200], x_test=x[200:])
+    assert result["model_baseline"] == result["baseline"]  # тривиальный ответ здесь идеален и сильнее LightGBM
+    assert result["model_score"] == result["score"] == 0
