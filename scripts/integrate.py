@@ -173,7 +173,7 @@ def status_text(decision: Decision) -> str:
     guide = f"https://github.com/{REPO}/blob/dev/CONTRIBUTING.md"
     return (
         f"{MARKER}\n🤖 **Бот слияний:** {EMOJI[decision.action]} {decision.reason}\n\n"
-        f"<sub>Проверяю каждые 30 минут. Готов — метка `ready`, срочно — `hotfix`, подождать — `wait`. "
+        f"<sub>Проверяю на событиях PR (метки, открытие) и в 13:00, 18:30, 19:00 МСК. Готов — метка `ready`, срочно — `hotfix`, подождать — `wait`. "
         f"Правила: [CONTRIBUTING.md]({guide}).</sub>"
     )
 

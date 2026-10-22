@@ -25,7 +25,7 @@ def task_md(tmp_path, monkeypatch) -> Path:
     return tmp_path / "task.md"
 
 
-def run(task_md, monkeypatch, ok_ids: set[str], validation: str | None = None):
+def run(task_md, monkeypatch, ok_ids: set[str], validation: str | None = None, fail=ExperimentStatus.FAILED):
     """run_pipeline с подменённой CV: успешны только гипотезы из ok_ids. → (запущенные, гипотеза цикла или None)."""
     tried, loop_base = [], []
 
@@ -33,9 +33,7 @@ def run(task_md, monkeypatch, ok_ids: set[str], validation: str | None = None):
         key = f"{hyp.id}/{hyp.params.get('validation', 'plain')}"
         tried.append(key)
         if key not in ok_ids:
-            return ExperimentResult(
-                hypothesis_id=hyp.id, status=ExperimentStatus.FAILED, metric_name="roc_auc", error="не успела"
-            )
+            return ExperimentResult(hypothesis_id=hyp.id, status=fail, metric_name="roc_auc", error="не успела")
         return ExperimentResult(
             hypothesis_id=hyp.id, status=ExperimentStatus.OK, metric_name="roc_auc", mean_score=0.98, std_score=0.01
         )
@@ -90,3 +88,29 @@ def test_all_cv_failed_still_model_answer(task_md, monkeypatch):
     assert base is None
     assert is_model_answer(sub)
     assert sub["target"].between(0, 1).all() and len(sub) == 119
+
+
+def test_timeout_goes_straight_to_light(task_md, monkeypatch):
+    # ревью #176: после нехватки времени обычная CV той же модели не успеет и снова — сразу облегчённая
+    tried, _, sub = run(
+        task_md,
+        monkeypatch,
+        {f"{solution.LIGHT_ID}/plain"},
+        validation="time:mean_radius",
+        fail=ExperimentStatus.TIMEOUT,
+    )
+    assert tried == ["baseline/time:mean_radius", f"{solution.LIGHT_ID}/plain"]
+    assert is_model_answer(sub)
+
+
+@pytest.mark.parametrize(
+    "status, error, expected",
+    [
+        (ExperimentStatus.TIMEOUT, "кончилось время на фолде 1", True),
+        (ExperimentStatus.FAILED, "MemoryError: Unable to allocate 3.2 GiB", True),
+        (ExperimentStatus.FAILED, "ValueError: в фолде один класс", False),  # схема — пробуем обычную CV
+    ],
+)
+def test_out_of_resources(status, error, expected):
+    res = ExperimentResult(hypothesis_id="b", status=status, metric_name="m", error=error)
+    assert solution._out_of_resources(res) is expected

@@ -19,7 +19,7 @@
 | Быстрый прогон без LLM | `uv run python scripts/run_local.py --all --minutes 5 --mock-llm` |
 | Проверка рабочего места | `uv run python scripts/doctor.py --role <роль>` |
 | ZIP для платформы | `uv run python scripts/package_submission.py` |
-| Свежая автосборка dev (каждые 45 минут, workflow `build`) | `uv run python scripts/get_build.py` |
+| Свежая автосборка dev (2 раза в день, workflow `build`) | `uv run python scripts/get_build.py` |
 
 ## Стиль кода
 - Python 3.12, `ruff` (длина строки 120). Имена — по-английски, комментарии, docstring, логи и сообщения — **по-русски**.
