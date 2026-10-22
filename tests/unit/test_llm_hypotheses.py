@@ -39,6 +39,9 @@ class FakeLLM:
     def available(self):
         return self._available
 
+    def log_summary(self):
+        pass
+
     def chat_json(self, messages, **kwargs):
         self.requests += 1
         self.kwargs = kwargs
