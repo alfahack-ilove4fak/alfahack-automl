@@ -1,0 +1,12 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор партии
+temperature_c,feature,numeric,"Температура процесса, °C"
+ph,feature,numeric,Кислотность; бывают пропуски
+moisture,feature,numeric,"Влажность, доля 0–1"
+density,feature,numeric,"Плотность, г/см³"
+aging_days,feature,int,"Выдержка, дней"
+viscosity,feature,numeric,Вязкость; бывают пропуски
+additive_mg,feature,numeric,"Добавка, мг на кг"
+supplier,feature,category,Поставщик сырья
+line,feature,category,Производственная линия
+grade,target,int,Оценка качества партии: 1 (худшая) … 5 (лучшая)
