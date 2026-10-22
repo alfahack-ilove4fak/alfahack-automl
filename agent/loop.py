@@ -80,6 +80,7 @@ def run_autoresearch(
             history.append((hyp, _skipped(hyp, spec, reason)))
             memory.record(hyp.id, False, reason)
             continue
+        hyp = _with_run_validation(hyp, best[0])
         result = run_experiment(spec, profile, hyp, train, budget)
         history.append((hyp, result))
         if result.status != ExperimentStatus.OK:
@@ -95,6 +96,18 @@ def run_autoresearch(
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
     return best
+
+
+def _with_run_validation(hyp: Hypothesis, best: Hypothesis) -> Hypothesis:
+    """Схема валидации одна на весь прогон (ADR 0008, D1): гипотеза без своей получает схему лучшей.
+
+    Её выбрал solution.py до цикла и положил в params бейзлайна; иначе гипотеза посчиталась бы на kfold, а
+    accept() отклонил бы сравнение двух разных схем.
+    """
+    scheme = best.params.get("validation")
+    if "validation" in hyp.params or not scheme:
+        return hyp
+    return hyp.model_copy(update={"params": {**hyp.params, "validation": scheme}})
 
 
 def _skipped(hyp: Hypothesis, spec: TaskSpec, reason: str) -> ExperimentResult:

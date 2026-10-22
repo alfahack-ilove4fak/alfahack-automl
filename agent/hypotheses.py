@@ -55,7 +55,12 @@ def _applies(item: dict, spec: TaskSpec, profile: DataProfile) -> bool:
 
 
 def params_key(params: dict) -> str:
-    """Канонический вид params: одинаковые гипотезы с разными id считаем повтором."""
+    """Канонический вид params: одинаковые гипотезы с разными id считаем повтором.
+
+    validation не входит в ключ: схема одна на весь прогон (ADR 0008, D1) и есть у всех гипотез из истории,
+    а у новых кандидатов её ещё нет — иначе повтор бейзлайна или прошлой гипотезы не находился бы.
+    """
+    params = {k: v for k, v in params.items() if k != "validation"}
     return json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
 
 

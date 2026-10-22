@@ -33,6 +33,7 @@ from evaluation.submission import per_class_columns, validate_submission, write_
 from interfaces.schemas import DataProfile, ExperimentResult, Hypothesis, RunBudget, TaskSpec, TaskType
 from ml.experiment import fit_predict_final, run_experiment
 from ml.profiling import load_data, profile_data
+from ml.validation import choose_validation
 from runtime.budget import StagePlan, ensure_final_reserve, make_budget, plan_stages
 from runtime.log import setup_logging
 from runtime.watchdog import Watchdog
@@ -149,6 +150,12 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
     profile = profile_data(spec, train, test)
     parsed_at = time.time()
     base = baseline_hypothesis()
+    try:
+        # схема валидации — один раз до цикла, одна на все гипотезы (ADR 0008, D1); ошибка выбора не должна ронять прогон
+        validation = choose_validation(spec, profile, train, test)
+        base = base.model_copy(update={"params": {**base.params, "validation": validation}})
+    except Exception:  # noqa: BLE001 — останемся на схеме по умолчанию (kfold / stratified)
+        log.exception("Схему валидации выбрать не удалось — используем схему по умолчанию")
     base_result = run_experiment(spec, profile, base, train, budget)
     log.info("Шаг 1: бейзлайн %s=%s ± %s", base_result.metric_name, base_result.mean_score, base_result.std_score)
     history = [(base, base_result)]
