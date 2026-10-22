@@ -1,7 +1,8 @@
 """Разбор задачи: task.md + файлы рядом → TaskSpec. Владелец — LLM/agent-инженер.
 
-Сейчас разбор детерминированный (без LLM) — он должен работать ВСЕГДА, даже если LLM недоступна.
-LLM-уточнение (agent/llm_client.py) добавляется поверх и может только дополнить notes/метрику.
+Детерминированный разбор работает ВСЕГДА, даже если LLM недоступна. Поверх него — LLM-аналитик
+(agent/task_analyst.py): Qwen читает task.md, агент сверяет её ответ с данными. LLM заменяет только то,
+что эвристика угадала (нет sample_submission, метрика не найдена), остальное попадает в notes.
 
 Важно: пути в тексте task.md не обязаны совпадать с реальной раскладкой
 (в публичных задачах так и есть), поэтому файлы ищем сами.
@@ -52,7 +53,8 @@ def find_task_files(task_md: Path) -> dict[str, Path]:
     return found
 
 
-def parse_task(task_md: Path) -> TaskSpec:
+def parse_task(task_md: Path, llm=None) -> TaskSpec:
+    """task.md → TaskSpec. llm — LLMClient для аналитика; None — создать свой (без ключа он сразу недоступен)."""
     task_md = task_md.resolve()
     text = task_md.read_text(encoding="utf-8")
     files = find_task_files(task_md)
@@ -66,23 +68,35 @@ def parse_task(task_md: Path) -> TaskSpec:
     dictionary = _read_dictionary(files.get("data_dictionary"))
 
     # id и target: надёжнее всего — заголовок sample_submission
+    guessed: set[str] = set()  # что эвристика лишь угадала — это может уточнить LLM-аналитик
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
         if target not in train_cols:
             # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
-            target = _guess_target(train_cols, test_cols, dictionary)
+            target = _guess_target(train_cols, test_cols, dictionary, strict=False)
+            guessed.add("target")
             notes.append(
                 f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
             )
     else:
-        target = _guess_target(train_cols, test_cols, dictionary)
+        target = _guess_target(train_cols, test_cols, dictionary, strict=False)
         id_column = _guess_id(test_cols, dictionary)
-        submission_columns = [id_column, target]
+        guessed |= {"target", "id_column"}
         notes.append("Нет sample_submission: id и target определены по train/test/словарю")
+    metric_name = find_metric_in_text(text)
+    if metric_name is None:
+        guessed.add("metric")
+
+    target, id_column, metric_name = _ask_analyst(
+        text, files, train_cols, test_cols, target, id_column, metric_name, guessed, notes, llm
+    )
+    if target is None:
+        raise ValueError(f"Не удалось определить target: колонки только в train = {_train_only(train_cols, test_cols)}")
+    if "sample_submission" not in files:
+        submission_columns = [id_column, target]
 
     y = pd.read_csv(files["train"], usecols=[target])[target]
-    metric_name = find_metric_in_text(text)
     task_type = _guess_task_type(y, metric_name, dictionary.get(target))
     metric_name = _check_needs_proba(metric_name, task_type, text, files.get("sample_submission"), target, notes)
     if metric_name is None:
@@ -122,6 +136,31 @@ def parse_task(task_md: Path) -> TaskSpec:
         len(class_labels) if class_labels else "-",
     )
     return spec
+
+
+def _ask_analyst(text, files, train_cols, test_cols, target, id_column, metric_name, guessed, notes, llm):
+    """LLM-аналитик (agent/task_analyst.py): уточняет угаданные поля, пишет расхождения в notes. Никогда не падает."""
+    try:
+        from agent import task_analyst  # здесь: разбор без LLM не должен зависеть от промптов и клиента
+
+        if not task_analyst.enabled():
+            return target, id_column, metric_name
+        if llm is None:
+            from agent.llm_client import LLMClient
+
+            llm = LLMClient()
+        view = task_analyst.ask_llm(text, train_cols, test_cols, files.get("sample_submission"), llm)
+        heuristic = {"target": target, "id_column": id_column, "metric": metric_name}
+        accepted, extra = task_analyst.reconcile(view, heuristic, guessed, train_cols, test_cols)
+    except Exception:  # noqa: BLE001 — разбор по данным важнее
+        log.exception("LLM-аналитик задачи упал — остаёмся на разборе по данным")
+        return target, id_column, metric_name
+    notes += extra
+    return accepted.get("target", target), accepted.get("id_column", id_column), accepted.get("metric", metric_name)
+
+
+def _train_only(train_cols, test_cols) -> list[str]:
+    return [c for c in train_cols if c not in test_cols]
 
 
 def _check_needs_proba(
@@ -186,13 +225,16 @@ def _read_dictionary(path: Path | None) -> dict[str, dict]:
         return {}
 
 
-def _guess_target(train_cols, test_cols, dictionary) -> str:
+def _guess_target(train_cols, test_cols, dictionary, strict: bool = True) -> str | None:
+    """target по словарю или единственной колонке «только в train». strict=False — None вместо ошибки (решит LLM)."""
     for name, row in dictionary.items():
         if str(row.get("role", "")).lower() == "target" and name in train_cols:
             return name
-    extra = [c for c in train_cols if c not in test_cols]
+    extra = _train_only(train_cols, test_cols)
     if len(extra) == 1:
         return extra[0]
+    if not strict:
+        return None
     raise ValueError(f"Не удалось определить target: колонки только в train = {extra}")
 
 
