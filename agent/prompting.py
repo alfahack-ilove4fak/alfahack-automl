@@ -28,6 +28,7 @@ MAX_FEATURES_SHOWN = 30
 MAX_CLASSES_SHOWN = 20
 MAX_MISSING_SHOWN = 10
 HISTORY_LAST_N = 8
+MAX_NOTES_SHOWN = 6
 HISTORY_BEST_K = 3
 
 
@@ -60,6 +61,8 @@ def describe_task(spec: TaskSpec) -> str:
     ]
     if spec.class_labels:
         lines.append(f"- Классов: {len(spec.class_labels)}")
+    for note in spec.notes[:MAX_NOTES_SHOWN]:  # что заметили при разборе: формат ответа, время, условия из текста
+        lines.append(f"- Заметка: {note}")
     description = spec.description.strip()
     if description:
         if len(description) > MAX_DESCRIPTION_CHARS:

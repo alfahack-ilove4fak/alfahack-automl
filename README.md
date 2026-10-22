@@ -66,7 +66,7 @@ uv run python solution.py tasks/public/regression/task.md
 | Git в нашем репозитории | [docs/git-guide.md](docs/git-guide.md) |
 | Ритм команды и стыковки | [docs/team-process.md](docs/team-process.md) |
 | Чек-поинты CP0–CP5 | [docs/checkpoints.md](docs/checkpoints.md) |
-| **План на 22–27.10 по ролям** | [docs/final-sprint.md](docs/final-sprint.md) |
+| **План до 27.10 по ролям (обновлён 22.10 вечером)** | [docs/final-sprint.md](docs/final-sprint.md) |
 | Состав команды и статусы | [docs/team.md](docs/team.md) |
 | Ролевые пакеты | [docs/roles/](docs/roles/) |
 | Проверенные материалы | [docs/resources/](docs/resources/) |
