@@ -205,3 +205,24 @@ def build_reflection_messages(
     if system is None or user is None:
         return None
     return [{"role": "system", "content": system.strip()}, {"role": "user", "content": user}]
+
+
+def build_critic_messages(
+    spec: TaskSpec,
+    profile: DataProfile,
+    history: list[tuple[Hypothesis, ExperimentResult]],
+    candidates: str,
+    memory: ResearchMemory | None = None,
+) -> list[dict] | None:
+    """Запрос к LLM-критику: проверить пачку гипотез по чек-листу. candidates — гипотезы в JSON. None — не собрался."""
+    system = load_prompt("system")
+    user = _render(
+        "critic",
+        task=describe_task(spec),
+        profile=describe_profile(profile),
+        history=describe_history(history, spec.metric.greater_is_better, memory),
+        candidates=candidates,
+    )
+    if system is None or user is None:
+        return None
+    return [{"role": "system", "content": system.strip()}, {"role": "user", "content": user}]

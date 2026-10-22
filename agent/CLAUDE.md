@@ -6,12 +6,13 @@
 | Файл | Роль |
 |---|---|
 | `task_parser.py` | `task.md` + файлы → `TaskSpec`. Детерминированный, работает без LLM — не ломать! |
-| `llm_client.py` | Qwen через OpenAI-совместимый API: кэш на диск, учёт ₽, `available()` = False без ключа |
-| `hypotheses.py` | `propose_hypotheses`: сначала LLM (если доступна), недостающие — из `research/playbook.yaml`; повторы id/params отсекаются |
+| `llm_client.py` | Qwen через OpenAI-совместимый API: кэш на диск, учёт ₽, `available()` = False без ключа; по остатку бюджета (`seconds_left`) ждёт не дольше четверти оставшегося времени, при < 2 мин не зовёт LLM |
+| `hypotheses.py` | `propose_hypotheses(spec, profile, history, k, budget)`: сначала LLM (если доступна и хватает времени), недостающие — из `research/playbook.yaml`; повторы id/params отсекаются |
 | `llm_hypotheses.py` | ответ LLM → проверенные `Hypothesis`: схема, допустимые kind и ключи params, без повторов |
 | `prompting.py` | сборка промптов из `agent/prompts/*.md` (string.Template, `$плейсхолдеры`); нет файла → `None` → playbook |
 | `memory.py` | память цикла: решение по каждой гипотезе и последние выводы LLM после неудачных пачек |
 | `critic.py` | критик по правилам: пустые для задачи гипотезы, недопустимые значения, цена по времени → пропуск (`SKIPPED`) до запуска |
+| `llm_critic.py` | LLM-критик: одна проверка пачки LLM-гипотез до запуска (утечка, подгонка, метрика, повтор, цена); `AGENT_LLM_CRITIC=1`, при сбое пропускает всё |
 | `loop.py` | цикл AutoResearch: очередь гипотез (по 3 за запрос к LLM) → `ml.run_experiment` → принять, если лучше на `min_delta` |
 
 ## Контракты
