@@ -30,11 +30,9 @@ def test_every_task_has_answers():
 def test_parser_understands_task(name):
     expected = MANIFEST[name]
     spec = parse_task(PRACTICE / name / "task.md")
-    assert (spec.metric.name, spec.target, spec.id_column) == (
-        expected["metric"],
-        expected["target"],
-        expected["id_column"],
-    )
+    assert (spec.metric.name, spec.id_column) == (expected["metric"], expected["id_column"])
+    # Несколько таргетов: основным агент может выбрать любой — важно, что нашёл все
+    assert {spec.target, *spec.extra_targets} == {expected["target"], *expected.get("extra_targets", [])}
 
 
 @pytest.mark.parametrize("name", sorted(MANIFEST))
@@ -43,9 +41,10 @@ def test_answers_match_test(name):
     test_csv = next((PRACTICE / name).rglob("test*.csv"))
     test = pd.read_csv(test_csv, usecols=[expected["id_column"]])
     answers = pd.read_csv(PRACTICE / "_answers" / f"{name}.csv")
-    assert list(answers.columns) == [expected["id_column"], expected["target"]]
+    targets = [expected["target"], *expected.get("extra_targets", [])]
+    assert list(answers.columns) == [expected["id_column"], *targets]
     assert answers[expected["id_column"]].tolist() == test[expected["id_column"]].tolist()
-    assert answers[expected["target"]].notna().all()
+    assert answers[targets].notna().all().all()
 
 
 # Схема валидации, которую должен выбрать агент: задачи-ловушки ревью #150 (ADR 0013)
@@ -78,6 +77,11 @@ def test_trap_tasks_keep_their_traps():
     batches_cols = set(pd.read_csv(PRACTICE / "batches_ordinal_qwk" / "train.csv", nrows=1).columns)
     assert "`vsc`" in batches_md and "additive_mg" not in batches_md  # ошибка в описании — намеренная
     assert {"viscosity", "additive_mg"} <= batches_cols
+
+    util_sample = pd.read_csv(PRACTICE / "utilities_multitarget_mae" / "sample_submission.csv", nrows=1)
+    util_test = pd.read_csv(PRACTICE / "utilities_multitarget_mae" / "test.csv", nrows=1)
+    assert list(util_sample.columns) == ["id", "heat_gcal", "water_m3"]  # два таргета в одном ответе
+    assert not {"heat_gcal", "water_m3"} & set(util_test.columns)
 
     claims_train = pd.read_csv(PRACTICE / "claims_regression_mape_rowno" / "train.csv")
     claims_test = pd.read_csv(PRACTICE / "claims_regression_mape_rowno" / "test.csv")
