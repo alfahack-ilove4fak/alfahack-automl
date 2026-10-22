@@ -57,7 +57,7 @@ def test_metric_key_known_names(value, expected):
     assert metric_key(value) == expected
 
 
-@pytest.mark.parametrize("value", [None, "", "   ", 5, ["mae"], "ndcg@10"])
+@pytest.mark.parametrize("value", [None, "", "   ", 5, ["mae"], "quantum_score@10"])
 def test_metric_key_unknown_or_garbage(value):
     """Пустое, не строка и метрика не из реестра дают None, а не исключение."""
     assert metric_key(value) is None
@@ -192,28 +192,30 @@ def test_reconcile_found_metric_wins_over_llm():
 
 
 def test_reconcile_metric_not_in_registry():
-    """Метрики нет в реестре (например ndcg@10) — ничего не принимаем, note «нет в реестре»."""
-    accepted, notes = run({"metric": "ndcg@10"}, heur(metric="rmse"), guessed={"metric"})
+    """Метрики нет в реестре (например quantum_score@10) — ничего не принимаем, note «нет в реестре»."""
+    accepted, notes = run({"metric": "quantum_score@10"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {}
     assert len(notes) == 1
-    assert "нет в реестре" in notes[0] and "ndcg@10" in notes[0]
+    assert "нет в реестре" in notes[0] and "quantum_score@10" in notes[0]
 
 
 def test_reconcile_unknown_metric_takes_closest_from_registry():
-    """#186: метрики нет в реестре (Huber), поиск по тексту ничего не нашёл — оптимизируем ближайшую из реестра."""
-    accepted, notes = run({"metric": "Huber loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed={"metric"})
+    """#186: метрики нет в реестре (Quantum loss), поиск по тексту ничего не нашёл — оптимизируем ближайшую из реестра."""
+    accepted, notes = run({"metric": "Quantum loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {"metric": "mae"}
-    assert "Huber loss" in notes[0] and "оптимизируем mae" in notes[0]
+    assert "Quantum loss" in notes[0] and "оптимизируем mae" in notes[0]
 
 
 def test_reconcile_closest_ignored_when_text_search_found_metric():
-    accepted, notes = run({"metric": "Huber loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed=set())
+    accepted, notes = run({"metric": "Quantum loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed=set())
     assert accepted == {} and "оптимизируем rmse" in notes[0]
 
 
-@pytest.mark.parametrize("closest", [None, "", "ndcg@5", 42])
+@pytest.mark.parametrize("closest", [None, "", "quantum_score@5", 42])
 def test_reconcile_bad_closest_ignored(closest):
-    accepted, _ = run({"metric": "ndcg@10", "closest_metric": closest}, heur(metric="rmse"), guessed={"metric"})
+    accepted, _ = run(
+        {"metric": "quantum_score@10", "closest_metric": closest}, heur(metric="rmse"), guessed={"metric"}
+    )
     assert accepted == {}
 
 
@@ -399,7 +401,7 @@ def test_parse_task_text_metric_beats_llm(tmp_path):
 def test_parse_task_unknown_metric_falls_back_to_default(tmp_path):
     """LLM назвала метрику не из реестра и в тексте её нет — берём метрику по умолчанию, не падаем."""
     task_md = write_task(tmp_path, text="Предскажи значение y.")
-    spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": "ndcg@10"}))
+    spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": "quantum_score@10"}))
     assert spec.metric.name == "rmse"
     assert any("нет в реестре" in n for n in spec.notes)
 
@@ -465,9 +467,9 @@ def test_parse_task_analyst_notes_go_to_spec(tmp_path):
 
 
 def test_parse_task_unknown_metric_uses_closest(tmp_path):
-    """#186: «Метрика — Huber loss» раньше молча становилась rmse; теперь — ближайшая из реестра от LLM."""
-    task_md = write_task(tmp_path, text="Предскажи значение y. Метрика — Huber loss.")
-    llm = FakeLLM({"target": "y", "metric": "Huber loss", "closest_metric": "mae"})
+    """#186: «Метрика — Quantum loss» раньше молча становилась rmse; теперь — ближайшая из реестра от LLM."""
+    task_md = write_task(tmp_path, text="Предскажи значение y. Метрика — Quantum loss.")
+    llm = FakeLLM({"target": "y", "metric": "Quantum loss", "closest_metric": "mae"})
     spec = parse_task(task_md, llm=llm)
     assert spec.metric.name == "mae"
-    assert any("Huber loss" in n for n in spec.notes)
+    assert any("Quantum loss" in n for n in spec.notes)
