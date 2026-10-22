@@ -87,6 +87,8 @@ def test_validation_is_not_part_of_repeat_key():
 
     assert params_key({"model": "lightgbm", "validation": "time:Year"}) == params_key({"model": "lightgbm"})
     assert params_key({"model": "lightgbm", "class_weight": "balanced"}) != params_key({"model": "lightgbm"})
+
+
 @pytest.mark.parametrize(
     "run_scheme, own, skipped",
     [
