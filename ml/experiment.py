@@ -4,11 +4,9 @@
 не помещается в свободную память; после первого фолда — прогноз, и если остальные не успеют, эксперимент
 останавливается с TIMEOUT. Подвыборка детерминированная — все гипотезы видят одни и те же строки.
 
-Скрытый ключ optuna — {trials, timeout, folds, rows}: подбор model_params (ml/tuning.py). Его нет в списке ниже,
-поэтому LLM и playbook его не выбирают: на public/regression подбор на KFold честно хуже бейзлайна (год 5: RMSE 53.99
-против 51.25, ревью #115) — он оптимизирует утечку через повторы объектов. Теперь подбор идёт на схеме гипотезы
-(params.validation): на time:Year_Factor честно 45.92 против 51.25 (ADR 0013). Вернуть в список, когда solution.py
-передаёт choose_validation во все гипотезы — иначе по умолчанию снова kfold.
+Подбор optuna идёт на схеме гипотезы (params.validation), которую цикл ставит каждой гипотезе (#175, #176): на KFold он
+оптимизировал утечку через повторы объектов (public/regression год 5: честно 53.99 против бейзлайна 51.25, ревью #115),
+на time:Year_Factor — честно 45.92 (ADR 0013). Поэтому ключ снова открыт агенту (#200).
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
   model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
@@ -19,7 +17,8 @@
   model_params   — словарь гиперпараметров именно выбранной модели (у LightGBM num_leaves, у CatBoost depth);
                    чужой параметр → FAILED с ошибкой библиотеки
   n_folds        — число фолдов (по умолчанию 5)
-  log_target     — для регрессии: учиться на log1p(y), предсказывать expm1
+  log_target     — для регрессии: учиться на log1p(y), предсказывать expm1. Не задан — включён для метрик на
+                   лог-шкале (RMSLE, MSLE: это RMSE/MSE на log1p — обучение сразу под метрику, #206), иначе выключен
   class_weight   — для классификации: "balanced" или None
   feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
                    элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
@@ -28,6 +27,12 @@
                    выбирается один раз до цикла (choose_validation) и одинакова у всех гипотез (ADR 0008, D1)
   proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
                    (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
+  optuna         — true или {trials, timeout, folds, rows} (любой ключ можно опустить — значение по умолчанию): подбор
+                   model_params выбранной модели Optuna на подвыборке и схеме валидации гипотезы (ml/tuning.py), затем
+                   обычная CV с найденными параметрами. Не дольше 30% оставшегося времени агента; не вместе с ensemble
+  ensemble       — список моделей, прогноз — среднее их прогнозов (вероятностей у классификации): ["lightgbm", "xgboost"]
+                   или [{model: xgboost, model_params: {...}}, ...]; у каждой своя ранняя остановка и число деревьев.
+                   Остальные params (log_target, class_weight, feature_ops, proba_weights…) — общие для всех моделей
 
 """
 
@@ -81,6 +86,9 @@ BASE_PARAMS = {
     "n_jobs": min(os.cpu_count() or 1, 4),
 }
 EARLY_STOPPING = 100
+FINAL_TREES_MARGIN = 1.1  # на всём train деревьев нужно чуть больше, чем в фолде CV
+CV_TRAIN_SHARE = 0.8  # доля train в фолде kfold-5 — под неё подобран FINAL_TREES_MARGIN
+MAX_TREES_SCALE = 3.0  # поправка на долю train не больше ×3: деревьев с данными растёт медленнее, чем линейно
 MAX_CV_ROWS = 500_000  # больше строк для сравнения гипотез не нужно: скор стабилен, а время растёт линейно
 MIN_CV_ROWS = 1_000  # меньше — оценка бессмысленна, лучше честно упасть по памяти
 RAM_FACTOR = 6  # пик памяти эксперимента ≈ RAM_FACTOR × размер матрицы (копии фолдов, бины и деревья модели)
@@ -117,6 +125,18 @@ XGBOOST_PARAMS = {
 
 def _is_classification(spec: TaskSpec) -> bool:
     return spec.task_type in (TaskType.BINARY, TaskType.MULTICLASS)
+
+
+LOG_SCALE_METRICS = ("rmsle", "msle")  # метрики на log1p(y): для них log_target по умолчанию включён
+
+
+def _use_log_target(spec: TaskSpec, params: dict) -> bool:
+    """Учиться ли на log1p(y): явный params.log_target, а без него — да для метрик на лог-шкале (только регрессия)."""
+    if spec.task_type != TaskType.REGRESSION:
+        return False
+    if params.get("log_target") is not None:
+        return bool(params["log_target"])
+    return spec.metric.name in LOG_SCALE_METRICS
 
 
 def _encode_target(spec: TaskSpec, y: pd.Series) -> np.ndarray:
@@ -321,11 +341,112 @@ def _fit_model(
     eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
     n_estimators: int | None = None,
 ) -> tuple[object, int]:
-    """Выбрать модель по params.model и обучить её."""
+    """Выбрать модель по params.model (или ансамбль по params.ensemble) и обучить её."""
+    if hypothesis.params.get("ensemble"):
+        return _fit_ensemble(spec, hypothesis, x, y, eval_set, n_estimators)
     name = str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower()
     if name not in MODEL_FITTERS:
         raise ValueError(f"неизвестная модель {name!r}, доступны: {sorted(MODEL_FITTERS)}")
     return MODEL_FITTERS[name](spec, hypothesis, x, y, eval_set, n_estimators)
+
+
+def _ensemble_members(hypothesis: Hypothesis) -> list[Hypothesis]:
+    """params.ensemble → гипотезы-участники: общие params гипотезы + своя модель и её model_params."""
+    members = hypothesis.params["ensemble"]
+    if not isinstance(members, list) or len(members) < 2:
+        raise ValueError("ensemble — список хотя бы из 2 моделей")
+    common = {k: v for k, v in hypothesis.params.items() if k not in ("ensemble", "model", "model_params")}
+    out = []
+    for item in members:
+        spec_item = {"model": item} if isinstance(item, str) else dict(item)
+        if "ensemble" in spec_item:
+            raise ValueError("вложенный ансамбль не поддерживается")
+        model = str(spec_item.get("model") or DEFAULT_MODEL).strip().lower()
+        if model not in MODEL_FITTERS:
+            raise ValueError(f"неизвестная модель {model!r} в ensemble, доступны: {sorted(MODEL_FITTERS)}")
+        params = {**common, "model": model, "model_params": dict(spec_item.get("model_params") or {})}
+        out.append(hypothesis.model_copy(update={"params": params}))
+    return out
+
+
+def _fill_missing_categories(x: pd.DataFrame) -> pd.DataFrame:
+    """Пропуск в категории → отдельная категория: CatBoost не принимает NaN в cat_features (пропуск даёт _hide_unseen)."""
+    cols = [c for c in x.columns if isinstance(x[c].dtype, pd.CategoricalDtype) and x[c].isna().any()]
+    if not cols:
+        return x
+    x = x.copy()
+    for col in cols:
+        if MISSING_CATEGORY not in x[col].cat.categories:
+            x[col] = x[col].cat.add_categories(MISSING_CATEGORY)
+        x[col] = x[col].fillna(MISSING_CATEGORY)
+    return x
+
+
+MISSING_CATEGORY = "__missing__"
+
+
+class _Ensemble:
+    """Среднее прогнозов моделей. У классификации — среднее вероятностей (все учились на одних закодированных y)."""
+
+    def __init__(self, models: list, fill_categories: list[bool]):
+        self.models = models
+        self.fill_categories = fill_categories
+        self.classes_ = getattr(models[0], "classes_", None)
+
+    def _inputs(self, x: pd.DataFrame):
+        filled = None
+        for model, fill in zip(self.models, self.fill_categories, strict=True):
+            if fill and filled is None:
+                filled = _fill_missing_categories(x)
+            yield model, filled if fill else x
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        return np.mean([np.asarray(m.predict(xi), dtype=float).reshape(len(x)) for m, xi in self._inputs(x)], axis=0)
+
+    def predict_proba(self, x: pd.DataFrame) -> np.ndarray:
+        return np.mean([m.predict_proba(xi) for m, xi in self._inputs(x)], axis=0)
+
+
+def _fit_ensemble(
+    spec: TaskSpec,
+    hypothesis: Hypothesis,
+    x: pd.DataFrame,
+    y: np.ndarray,
+    eval_set: tuple[pd.DataFrame, np.ndarray] | None = None,
+    n_estimators: list[int] | int | None = None,
+) -> tuple[_Ensemble, list[int]]:
+    """Обучить участников ансамбля. Число деревьев — своё у каждого: список из CV (n_estimators) или ранняя остановка."""
+    members = _ensemble_members(hypothesis)
+    if n_estimators is not None and not isinstance(n_estimators, list):
+        n_estimators = [n_estimators] * len(members)
+    models, iters, fills = [], [], []
+    for i, member in enumerate(members):
+        fill = member.params["model"] == "catboost"
+        x_m = _fill_missing_categories(x) if fill else x
+        eval_m = eval_set
+        if fill and eval_set is not None:
+            eval_m = (_fill_missing_categories(eval_set[0]), eval_set[1])
+        n_m = None if n_estimators is None else n_estimators[i]
+        model, best_iter = MODEL_FITTERS[member.params["model"]](spec, member, x_m, y, eval_m, n_m)
+        models.append(model)
+        iters.append(int(best_iter))
+        fills.append(fill)
+    return _Ensemble(models, fills), iters
+
+
+def _mean_best_iteration(best_iters: list) -> int | list[int]:
+    """Среднее число деревьев по фолдам; у ансамбля — по каждому участнику отдельно."""
+    if best_iters and isinstance(best_iters[0], list):
+        return [int(v) for v in np.mean(best_iters, axis=0)]
+    return int(np.mean(best_iters))
+
+
+def _final_estimators(best: int | list[int] | None, scale: float = 1.0) -> int | list[int]:
+    """Деревьев на всём train: чуть больше, чем в CV, × поправка на долю train (у ансамбля — для каждого участника)."""
+    factor = FINAL_TREES_MARGIN * scale
+    if isinstance(best, list):
+        return [max(50, int(b * factor)) for b in best]
+    return max(50, int((500 if best is None else best) * factor))
 
 
 def _hide_unseen(hypothesis: Hypothesis, x_fit: pd.DataFrame, x_new: pd.DataFrame) -> pd.DataFrame:
@@ -354,7 +475,8 @@ def _predict(spec: TaskSpec, model, x: pd.DataFrame, log_target: bool):
     """Предсказание в том виде, который нужен метрике задачи."""
     if not _is_classification(spec):
         pred = model.predict(x)
-        return np.expm1(pred) if log_target else pred
+        # expm1 от отрицательного прогноза < 0, а y ≥ 0 (иначе log1p не брали бы) — отсекаем снизу
+        return np.clip(np.expm1(pred), 0, None) if log_target else pred
     proba = model.predict_proba(x)
     if METRICS[spec.metric.name].prediction == "proba":
         return proba
@@ -482,7 +604,7 @@ def run_experiment(
     started = time.time()
     peak = used_ram_mb()
     params = hypothesis.params
-    log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
+    log_target = _use_log_target(spec, params)
     try:
         # Разбор params — внутри try: кривой n_folds или feature_ops от LLM → FAILED, а не падение цикла агента
         n_folds = int(params.get("n_folds", 5))
@@ -497,6 +619,8 @@ def run_experiment(
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scheme, column = parse_validation(params.get("validation"), spec)
         features = profile.numeric_features + profile.categorical_features
+        if params.get("optuna") and params.get("ensemble"):
+            raise ValueError("optuna и ensemble вместе не поддерживаются: подбор идёт для одной модели")
         if params.get("optuna") and "_optuna_best" not in params:
             from ml.tuning import tune  # здесь: tuning сам импортирует этот модуль
 
@@ -544,7 +668,9 @@ def run_experiment(
                         error=f"не успеет: прогноз ещё {forecast:.0f} с, осталось {budget.seconds_left():.0f} с",
                         validation=validation,
                     )
-        hypothesis.params.setdefault("_best_iteration", int(np.mean(best_iters)))
+        hypothesis.params.setdefault("_best_iteration", _mean_best_iteration(best_iters))
+        # Доля train в фолде: у time-схемы — расширяющееся окно (в среднем ≈ половина), финалу нужно больше деревьев
+        hypothesis.params.setdefault("_train_fraction", round(float(np.mean([len(tr) for tr, _ in folds])) / len(y), 4))
         if _use_proba_weights(spec, params):
             gib = spec.metric.greater_is_better
             plain = float(np.mean(scores))
@@ -638,12 +764,24 @@ def with_feature_code(
     return profile.model_copy(update={"numeric_features": profile.numeric_features + new}), train, test
 
 
+def _trees_scale(params: dict) -> float:
+    """Во сколько раз финалу нужно больше деревьев, чем в CV, из-за доли train в фолдах (#218: схема time:).
+
+    Ранняя остановка в фолде, где train — треть данных, наступает раньше, чем нужно модели на всём train.
+    Для kfold-5 (доля 0.8) поправки нет — там хватает FINAL_TREES_MARGIN. Нет _train_fraction — тоже без поправки.
+    """
+    fraction = params.get("_train_fraction")
+    if not fraction:
+        return 1.0
+    return min(MAX_TREES_SCALE, max(1.0, CV_TRAIN_SHARE / float(fraction)))
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
     """Обучение на всём train с числом деревьев из CV и предсказание test в формате сабмита."""
     params = hypothesis.params
-    log_target = bool(params.get("log_target")) and spec.task_type == TaskType.REGRESSION
+    log_target = _use_log_target(spec, params)
     profile, train, test = with_feature_code(spec, profile, hypothesis, train, test)
     x, x_test = make_matrix(profile, train, test)
     x_test = _hide_unseen(hypothesis, x, x_test)
@@ -652,8 +790,7 @@ def fit_predict_final(
     ops = params.get("feature_ops")
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
-    # На всех данных деревьев нужно чуть больше, чем на 4/5 из CV
-    n_estimators = max(50, int(params.get("_best_iteration", 500) * 1.1))
+    n_estimators = _final_estimators(params.get("_best_iteration"), _trees_scale(params))
     model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
     pred = _predict(spec, model, x_test, log_target)
     if _use_proba_weights(spec, params) and params.get("_proba_weights"):

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from agent import loop
-from agent.critic import MAX_SLOWDOWN, TIME_SAFETY, estimated_seconds, review, slowdown
+from agent import critic, loop
+from agent.critic import MAX_SLOWDOWN, TIME_SAFETY, estimated_seconds, lightgbm_slowdown, review, slowdown
 from interfaces.schemas import (
     ExperimentResult,
     ExperimentStatus,
@@ -76,14 +76,22 @@ def test_playbook_like_hypotheses_pass(multiclass):
 
 
 @pytest.mark.parametrize(
-    "h, measured",
+    "lr, leaves, measured",
     [
-        (lgbm(learning_rate=0.02), 197 / 122),  # multiclass, замер 2026-10-21
-        (lgbm(num_leaves=255, min_child_samples=10), 217 / 122),
+        (0.02, 63, 197 / 122),  # multiclass, замер 2026-10-21: бейзлайн тогда — learning_rate 0.05, num_leaves 63
+        (0.05, 255, 217 / 122),
     ],
 )
-def test_slowdown_calibrated_on_measurements(h, measured):
-    assert slowdown(h) == pytest.approx(measured, rel=0.15)
+def test_slowdown_calibrated_on_measurements(lr, leaves, measured):
+    # бейзлайн замера задан явно: калибровка не зависит от текущих BASE_PARAMS (#206)
+    assert lightgbm_slowdown(lr, leaves, base_lr=0.05, base_leaves=63) == pytest.approx(measured, rel=0.15)
+
+
+def test_slowdown_relative_to_current_base(monkeypatch):
+    # смена бейзлайна (num_leaves 63 → 31): оценка — от нового бейзлайна, тест калибровки не падает
+    monkeypatch.setitem(critic.BASE_PARAMS, "num_leaves", 31)
+    assert slowdown(lgbm(num_leaves=31)) == 1.0
+    assert slowdown(lgbm(num_leaves=63)) == pytest.approx((63 / 31) ** 0.4)
 
 
 def test_slowdown_rules():
