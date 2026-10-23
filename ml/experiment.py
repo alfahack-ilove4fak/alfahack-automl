@@ -33,6 +33,10 @@
   ensemble       — список моделей, прогноз — среднее их прогнозов (вероятностей у классификации): ["lightgbm", "xgboost"]
                    или [{model: xgboost, model_params: {...}}, ...]; у каждой своя ранняя остановка и число деревьев.
                    Остальные params (log_target, class_weight, feature_ops, proba_weights…) — общие для всех моделей
+  objective      — "metric": цель обучения под метрику задачи для выбранной модели (регрессия; #186, #237): MAE/MedAE/
+                   WAPE → L1, pinball@α → квантиль α, Huber → Huber δ=1, MAPE → MAPE, девиансы → Poisson/Gamma/Tweedie
+                   (METRIC_OBJECTIVES). Нет своей цели у метрики или модели, обучение на log1p(y), цель задана в
+                   model_params явно или таргет ей не подходит (Poisson на отрицательных) — L2, как без ключа
 
 """
 
@@ -146,8 +150,109 @@ def _encode_target(spec: TaskSpec, y: pd.Series) -> np.ndarray:
     return y.to_numpy(dtype=float)
 
 
-def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis):
-    params = {**BASE_PARAMS, **hypothesis.params.get("model_params", {})}
+# Цель обучения под метрику (#186, #237): метрика → вид цели. Метрик здесь нет — учимся на L2, как раньше.
+# WAPE = Σ|e| / Σ|y| и MedAE оптимизируются медианой (L1), как MAE
+METRIC_OBJECTIVES = {
+    "mae": "l1",
+    "medae": "l1",
+    "wape": "l1",
+    "pinball": "quantile",
+    "huber": "huber",
+    "mape": "mape",
+    "poisson_deviance": "poisson",
+    "gamma_deviance": "gamma",
+    "tweedie_deviance": "tweedie",
+}
+HUBER_DELTA = 1.0  # как в evaluation.metrics._huber
+TWEEDIE_POWER = 1.5  # как в метрике tweedie_deviance (evaluation/metrics.py)
+OBJECTIVE_KEYS = ("objective", "loss_function", "loss")  # цель, заданная в model_params явно, важнее подстановки
+
+
+def _objective_by_model(kind: str, alpha: float) -> dict[str, dict]:
+    """Параметры цели вида kind для каждой модели; модели без подходящей цели в словаре нет (учится на L2)."""
+    return {
+        "l1": {
+            "lightgbm": {"objective": "l1"},
+            "xgboost": {"objective": "reg:absoluteerror"},
+            "catboost": {"loss_function": "MAE"},
+            "hist_gb": {"loss": "absolute_error"},
+        },
+        "quantile": {
+            "lightgbm": {"objective": "quantile", "alpha": alpha},
+            "xgboost": {"objective": "reg:quantileerror", "quantile_alpha": alpha},
+            "catboost": {"loss_function": f"Quantile:alpha={alpha}"},
+            "hist_gb": {"loss": "quantile", "quantile": alpha},
+        },
+        "huber": {
+            "lightgbm": {"objective": "huber", "alpha": HUBER_DELTA},  # у LightGBM alpha — это δ Huber
+            "xgboost": {"objective": "reg:pseudohubererror", "huber_slope": HUBER_DELTA},
+            "catboost": {"loss_function": f"Huber:delta={HUBER_DELTA}"},
+        },
+        "mape": {"lightgbm": {"objective": "mape"}, "catboost": {"loss_function": "MAPE"}},
+        "poisson": {
+            "lightgbm": {"objective": "poisson"},
+            "xgboost": {"objective": "count:poisson"},
+            "catboost": {"loss_function": "Poisson"},
+            "hist_gb": {"loss": "poisson"},
+        },
+        "gamma": {
+            "lightgbm": {"objective": "gamma"},
+            "xgboost": {"objective": "reg:gamma"},
+            "hist_gb": {"loss": "gamma"},
+        },
+        "tweedie": {
+            "lightgbm": {"objective": "tweedie", "tweedie_variance_power": TWEEDIE_POWER},
+            "xgboost": {"objective": "reg:tweedie", "tweedie_variance_power": TWEEDIE_POWER},
+            "catboost": {"loss_function": f"Tweedie:variance_power={TWEEDIE_POWER}"},
+        },
+    }[kind]
+
+
+def metric_objective_kind(spec: TaskSpec, params: dict) -> tuple[str, float] | None:
+    """(вид цели, α квантиля) под метрику задачи, если гипотеза просит params.objective="metric", иначе None.
+
+    None и для классификации, и при обучении на log1p(y) (метрика тогда уже на другой шкале), и для метрик без
+    своей цели (RMSE, R² — L2 по умолчанию и так под них).
+    """
+    objective = params.get("objective")
+    if objective is None:
+        return None
+    if objective != "metric":
+        raise ValueError(f"params.objective={objective!r}: поддерживается только 'metric'")
+    if spec.task_type != TaskType.REGRESSION or _use_log_target(spec, params):
+        return None
+    base, _, level = spec.metric.name.partition("@")
+    kind = METRIC_OBJECTIVES.get(base)
+    if kind is None:
+        return None
+    return kind, float(level) if level else 0.5
+
+
+def _objective_params(spec: TaskSpec, hypothesis: Hypothesis, model: str, y: np.ndarray | None) -> dict:
+    """Параметры цели под метрику для модели model (или {}): см. params.objective в шапке модуля.
+
+    Таргет не подходит цели (Poisson/Tweedie — отрицательные значения, Gamma — неположительные) — {} (L2), а не
+    падение гипотезы: на другой задаче та же гипотеза полезна.
+    """
+    if any(key in hypothesis.params.get("model_params", {}) for key in OBJECTIVE_KEYS):
+        return {}
+    resolved = metric_objective_kind(spec, hypothesis.params)
+    if resolved is None:
+        return {}
+    kind, alpha = resolved
+    if y is not None and len(y):
+        low = float(np.nanmin(y))
+        if (kind in ("poisson", "tweedie") and low < 0) or (kind == "gamma" and low <= 0):
+            return {}
+    return dict(_objective_by_model(kind, alpha).get(model, {}))
+
+
+def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis, y: np.ndarray | None = None):
+    params = {
+        **BASE_PARAMS,
+        **_objective_params(spec, hypothesis, "lightgbm", y),
+        **hypothesis.params.get("model_params", {}),
+    }
     if _is_classification(spec):
         return lgb.LGBMClassifier(class_weight=hypothesis.params.get("class_weight"), **params)
     return lgb.LGBMRegressor(**params)
@@ -170,7 +275,7 @@ def _fit_lightgbm(
     С eval_set — ранняя остановка на валидации фолда (CV).
     Без eval_set — ровно n_estimators деревьев (финальное обучение на всём train).
     """
-    model = _make_lightgbm(spec, hypothesis)
+    model = _make_lightgbm(spec, hypothesis, y)
     if n_estimators is not None:
         model.set_params(n_estimators=n_estimators)
     if eval_set is None:
@@ -196,7 +301,11 @@ def _fit_catboost(
     # Импорт здесь, а не в начале файла: catboost — из группы full, без него падает только эта гипотеза
     from catboost import CatBoostClassifier, CatBoostRegressor
 
-    params = {**CATBOOST_PARAMS, **hypothesis.params.get("model_params", {})}
+    params = {
+        **CATBOOST_PARAMS,
+        **_objective_params(spec, hypothesis, "catboost", y),
+        **hypothesis.params.get("model_params", {}),
+    }
     if n_estimators is not None:
         params["iterations"] = n_estimators
     params["cat_features"] = [c for c in x.columns if isinstance(x[c].dtype, pd.CategoricalDtype)]
@@ -226,7 +335,11 @@ def _fit_xgboost(
     # Импорт здесь: xgboost — из группы full, без него падает только эта гипотеза
     from xgboost import XGBClassifier, XGBRegressor
 
-    params = {**XGBOOST_PARAMS, **hypothesis.params.get("model_params", {})}
+    params = {
+        **XGBOOST_PARAMS,
+        **_objective_params(spec, hypothesis, "xgboost", y),
+        **hypothesis.params.get("model_params", {}),
+    }
     if n_estimators is not None:
         params["n_estimators"] = n_estimators
     if eval_set is not None:
@@ -312,6 +425,7 @@ def _fit_hist_gb(
         # Внутренняя валидация делится со стратификацией: класс из 1 объекта её ломает — тогда без остановки
         if _is_classification(spec) and np.unique(y, return_counts=True)[1].min() < 2:
             params.update(early_stopping=False, max_iter=300)
+    params.update(_objective_params(spec, hypothesis, "hist_gb", y))
     params.update(hypothesis.params.get("model_params", {}))
     if _is_classification(spec):
         estimator = HistGradientBoostingClassifier(class_weight=hypothesis.params.get("class_weight"), **params)
