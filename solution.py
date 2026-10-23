@@ -181,6 +181,27 @@ def _out_of_resources(result: ExperimentResult) -> bool:
     return result.status == ExperimentStatus.TIMEOUT or "memory" in (result.error or "").lower()
 
 
+def write_fallback_answer(task_md: Path, where: str) -> bool:
+    """Ответ без TaskSpec: образец формата от организаторов, иначе ответ без разбора задачи (#187). → записан ли.
+
+    Пустой файл хуже: им закрываем и конец работы без ответа, и ожидание LLM-аналитика, когда разбор по данным
+    не справился (#239) — пока он думает до 90 с, на диске уже что-то лежит.
+    """
+    log = setup_logging()
+    path = task_md.parent / "submission.csv"
+    sample = find_task_files(task_md).get("sample_submission")
+    if sample is not None:
+        shutil.copyfile(sample, path)
+        log.error("%s: ответа не было — скопирован %s", where, sample.name)
+        return True
+    if (blind := blind_answer(task_md)) is not None:
+        write_submission_atomic(blind, path)
+        log.error("%s: ответа и образца нет — ответ без разбора задачи: %s", where, list(blind))
+        return True
+    log.error("%s: ответа нет, и образца sample_submission тоже", where)
+    return False
+
+
 class AnswerKeeper:
     """Хранит последний валидный ответ и в любой момент (в том числе из сторожа) восстанавливает submission.csv."""
 
@@ -222,16 +243,7 @@ class AnswerKeeper:
                     write_submission_atomic(self.last_good, self.path)
                     return
             if not self.path.exists():
-                # Не успели даже разобрать задачу: пустой файл хуже, чем образец формата от организаторов
-                sample = find_task_files(self.task_md).get("sample_submission")
-                if sample is not None:
-                    shutil.copyfile(sample, self.path)
-                    log.error("Финал (%s): ответа не было — скопирован %s", reason, sample.name)
-                elif (blind := blind_answer(self.task_md)) is not None:
-                    write_submission_atomic(blind, self.path)
-                    log.error("Финал (%s): ответа и образца нет — ответ без разбора задачи: %s", reason, list(blind))
-                else:
-                    log.error("Финал (%s): ответа нет, и образца sample_submission тоже", reason)
+                write_fallback_answer(self.task_md, f"Финал ({reason})")
         except Exception:  # noqa: BLE001 — финализация не должна ронять процесс
             log.exception("Финал (%s): не удалось проверить или восстановить submission.csv", reason)
 
@@ -284,6 +296,10 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
         spec = parse_task(task_md, use_analyst=False)  # быстрый разбор по данным: шаг 0 не ждёт LLM (#239)
     except Exception as exc:  # noqa: BLE001 — по данным не разобрать (например, неоднозначный target): решает аналитик
         log.warning("Разбор по данным не справился (%s) — зовём LLM-аналитика до шага 0, как раньше", exc)
+        try:
+            write_fallback_answer(task_md, "До аналитика")  # аналитик ждёт до 90 с — пусть файл уже будет
+        except Exception:  # noqa: BLE001 — страховка не должна мешать разбору
+            log.exception("Страховочный ответ до аналитика не записан")
         spec = parse_task(task_md)
         analyst_asked = True
     keeper.spec = spec
