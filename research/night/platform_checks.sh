@@ -54,14 +54,14 @@ grep connect "$OUT/strace.txt" | grep -v 'AF_UNIX\|AF_LOCAL' | head -5
 
 echo "== 3. kill -9 посреди цикла (бюджет 300 с, убиваем на 40-й секунде)"
 K=$(mktemp -d /tmp/kill_XXXX); cp -r "$TASK_SRC"/. "$K"/
-( cd "$K" && AGENT_TIME_BUDGET_SEC=300 LLM_MOCK=1 AGENT_RUN_DIR="$K/run" "$PY" "$ROOT/solution.py" task.md > /dev/null 2>&1 & echo $! > "$K/pid" )
+( cd "$K" && exec env AGENT_TIME_BUDGET_SEC=300 LLM_MOCK=1 AGENT_RUN_DIR="$K/run" "$PY" "$ROOT/solution.py" task.md > /dev/null 2>&1 ) & echo $! > "$K/pid"  # exec: PID — сам агент, а не подоболочка
 sleep 40; kill -9 "$(cat "$K/pid")"; sleep 1
 echo "   до убийства в логе: $(grep -c 'Итерация' "$K/run/agent.log") итераций, последняя запись ответа: $(grep -o 'Сохранён ответ «[^»]*»' "$K/run/agent.log" | tail -1)"
 check "$K"
 
 echo "== 3b. SIGTERM посреди цикла (как остановка платформы)"
 K2=$(mktemp -d /tmp/term_XXXX); cp -r "$TASK_SRC"/. "$K2"/
-( cd "$K2" && AGENT_TIME_BUDGET_SEC=300 LLM_MOCK=1 AGENT_RUN_DIR="$K2/run" "$PY" "$ROOT/solution.py" task.md > /dev/null 2>&1 & echo $! > "$K2/pid" )
+( cd "$K2" && exec env AGENT_TIME_BUDGET_SEC=300 LLM_MOCK=1 AGENT_RUN_DIR="$K2/run" "$PY" "$ROOT/solution.py" task.md > /dev/null 2>&1 ) & echo $! > "$K2/pid"
 sleep 40; t0=$(date +%s); kill -TERM "$(cat "$K2/pid")"
 while kill -0 "$(cat "$K2/pid")" 2>/dev/null; do sleep 0.2; done
 echo "   процесс завершился через $(( $(date +%s) - t0 )) с после SIGTERM"
