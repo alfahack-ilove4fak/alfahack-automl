@@ -88,3 +88,15 @@ def test_parametric_pinball_is_resolved_on_demand():
     for bad in ("pinball@1.5", "pinball@abc", "huber@0.9"):
         with pytest.raises(KeyError):
             compute_metric(bad, [1], [1])
+
+
+def test_parametric_fbeta_is_resolved_on_demand():
+    assert METRICS["fbeta@2"].name == "fbeta@2" and METRICS["fbeta@2"].greater_is_better
+    assert METRICS["fbeta@2"].prediction == "label" and "fbeta@2" not in METRICS
+    # precision = 2/3, recall = 1: F2 = 5·P·R / (4·P + R) = 10/11
+    assert compute_metric("fbeta@2", [1, 1, 0, 0], [1, 1, 1, 0]) == pytest.approx(10 / 11)
+    assert compute_metric("fbeta@0.5", [1, 0], [1, 1]) == pytest.approx(1.25 * 0.5 * 1 / (0.25 * 0.5 + 1))
+    assert compute_metric("fbeta@2", [0, 1, 2], [0, 1, 2]) == 1.0  # много классов — macro, не ошибка
+    for bad in ("fbeta@0", "fbeta@1", "fbeta@abc", "fbeta@-2", "fbeta@500"):
+        with pytest.raises(KeyError):
+            compute_metric(bad, [1], [1])
