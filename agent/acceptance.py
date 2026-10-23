@@ -11,7 +11,10 @@
 потому что обучающие части фолдов пересекаются; поправка увеличивает дисперсию на n_test/n_train.
 
 Схема по времени (time:…, #236): фолдов всего 3–4, и t ≥ 2 почти недостижим даже для честно лучших гипотез.
-Поэтому там принимаем ещё и гипотезу, которая лучше в среднем и на последнем (самом позднем, ближайшем к test) периоде.
+Поэтому там принимаем ещё и гипотезу, которая лучше в среднем и на последнем (самом позднем, ближайшем к test) периоде,
+но только если среднее улучшение не меньше TIME_MIN_REL_GAIN от метрики: иначе проходит шум подбора на тех же
+фолдах (Optuna на public/regression: +0.6% на CV, на holdout RMSE 44.5 → 53.1). Порог — страховка, подобран на одном
+примере; надёжнее не тюнить на time-фолдах вовсе (#236).
 Остальные схемы — только по t. Исследование — docs/research/accept-rule.md.
 
 Если фолды несравнимы (другое n_folds, упавшие фолды) — старое правило: среднее лучше на NOISE_FACTOR·std.
@@ -27,6 +30,7 @@ T_MIN = 2.0  # порог скорректированной t-статисти�
 MIN_REL_GAIN = 1e-4  # улучшение меньше 0.01% от метрики не стоит переобучения на всём train
 NOISE_FACTOR = 0.25  # запасное правило: какую долю std лучшего результата считаем шумом
 TIME_PREFIX = "time:"  # схема по времени: фолды по возрастанию периода (ml/validation._time_folds)
+TIME_MIN_REL_GAIN = 0.01  # time-правило без t: улучшение меньше 1% от метрики считаем шумом подбора
 
 
 def fold_gains(new: ExperimentResult, best: ExperimentResult, greater_is_better: bool) -> list[float] | None:
@@ -67,6 +71,11 @@ def accept(new: ExperimentResult, best: ExperimentResult, greater_is_better: boo
     t = corrected_t(gains)
     wins = sum(g > 0 for g in gains)
     reason = f"улучшение {mean_gain:.4g}, лучше на {wins}/{len(gains)} фолдах, t={t:.2f} (порог {T_MIN})"
-    if t < T_MIN and (new.validation or "").startswith(TIME_PREFIX) and gains[-1] > 0:
+    if (
+        t < T_MIN
+        and (new.validation or "").startswith(TIME_PREFIX)
+        and gains[-1] > 0
+        and mean_gain >= TIME_MIN_REL_GAIN * abs(best.mean_score)
+    ):
         return True, f"{reason}; лучше на последнем периоде ({gains[-1]:.4g}) и в среднем — time-схема"
     return t >= T_MIN, reason
