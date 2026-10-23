@@ -25,8 +25,10 @@
                    фолда, без утечки
   validation     — схема CV: kfold | stratified | group:<колонка> | group:duplicates | time:<колонка> (ml/validation.py);
                    выбирается один раз до цикла (choose_validation) и одинакова у всех гипотез (ADR 0008, D1)
-  proba_weights  — true: множители вероятностей классов под метрику по меткам (Macro F1…), подбор на OOF
-                   (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует
+  proba_weights  — множители вероятностей классов под метрику по меткам (Macro F1, F1, accuracy…), подбор на OOF
+                   (ml/class_weights.py), скор — кросс-подгонкой; для регрессии и метрик по вероятностям не действует.
+                   Не задан — включён по умолчанию (#191: без порога бинарный F1 при редком классе — лотерея), но
+                   множители остаются, только если кросс-подгонка лучше argmax; true — всегда; false — выключен
   optuna         — true или {trials, timeout, folds, rows} (любой ключ можно опустить — значение по умолчанию): подбор
                    model_params выбранной модели Optuna на подвыборке и схеме валидации гипотезы (ml/tuning.py), затем
                    обычная CV с найденными параметрами. Не дольше 30% оставшегося времени агента; не вместе с ensemble
@@ -545,9 +547,13 @@ def _cv_rows(spec: TaskSpec, profile: DataProfile, y: np.ndarray, budget: RunBud
 
 
 def _use_proba_weights(spec: TaskSpec, params: dict) -> bool:
-    """proba_weights действует только для классификации с метрикой по меткам — иначе молча не применяется."""
+    """proba_weights действует только для классификации с метрикой по меткам — иначе молча не применяется.
+
+    Ключ не задан — включён (#191): порог argmax 0.5 на редком классе зависит от калибровки модели, а не от
+    ранжирования (payments: F1 0.086 без множителей против 0.341 с ними).
+    """
     return (
-        bool(params.get("proba_weights"))
+        bool(params.get("proba_weights", True))
         and _is_classification(spec)
         and METRICS[spec.metric.name].prediction == "label"
     )
@@ -671,20 +677,25 @@ def run_experiment(
         hypothesis.params.setdefault("_best_iteration", _mean_best_iteration(best_iters))
         # Доля train в фолде: у time-схемы — расширяющееся окно (в среднем ≈ половина), финалу нужно больше деревьев
         hypothesis.params.setdefault("_train_fraction", round(float(np.mean([len(tr) for tr, _ in folds])) / len(y), 4))
-        if _use_proba_weights(spec, params):
+        if _use_proba_weights(spec, params) and len(oof) > 1:  # кросс-подгонке нужно ≥ 2 фолдов
             gib = spec.metric.greater_is_better
             plain = float(np.mean(scores))
-            scores = cross_fit_scores(spec.metric.name, gib, oof)
-            weights = fit_weights(
-                spec.metric.name, gib, np.concatenate([f[0] for f in oof]), np.vstack([f[1] for f in oof])
-            )
-            params["_proba_weights"] = weights.round(4).tolist()
+            crossed = cross_fit_scores(spec.metric.name, gib, oof)
+            # По умолчанию (ключ не задан) множители остаются, только если кросс-подгонка честно лучше argmax:
+            # на accuracy без дисбаланса (digits) они лишь добавляют шум. Явный true — всегда, как раньше
+            better = (np.mean(crossed) > plain) if gib else (np.mean(crossed) < plain)
+            if params.get("proba_weights") is True or better:
+                scores = crossed
+                weights = fit_weights(
+                    spec.metric.name, gib, np.concatenate([f[0] for f in oof]), np.vstack([f[1] for f in oof])
+                )
+                params["_proba_weights"] = weights.round(4).tolist()
             log.info(
                 "proba_weights: %s %.5f → %.5f, множители %s",
                 spec.metric.name,
                 plain,
-                np.mean(scores),
-                weights.round(2),
+                np.mean(crossed),
+                params["_proba_weights"] if "_proba_weights" in params else "не нужны (argmax не хуже)",
             )
         return ExperimentResult(
             hypothesis_id=hypothesis.id,

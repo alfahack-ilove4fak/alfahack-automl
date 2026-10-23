@@ -817,3 +817,47 @@ def test_time_scheme_gives_more_final_trees(monkeypatch):
     monkeypatch.setattr(experiment, "_fit_model", spy_fit)
     fit_predict_final(spec, profile, hyp, train, test)
     assert seen["n"] > int(hyp.params["_best_iteration"] * 1.1)
+
+
+def _rare_binary(n: int = 2000, seed: int = 7) -> tuple[pd.DataFrame, pd.DataFrame, DataProfile]:
+    """Редкий класс (~4%) со слабым сигналом: argmax почти никогда не выбирает его — F1 около нуля."""
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame({"id": range(n), "a": rng.normal(size=n), "b": rng.normal(size=n)})
+    logit = 1.2 * df["a"] - 3.6
+    df["y"] = np.where(rng.random(n) < 1 / (1 + np.exp(-logit)), "yes", "no")  # «положительный» — последний по алфавиту
+    test = df.drop(columns="y").head(50)
+    return df, test, DataProfile(n_train=n, n_test=50, numeric_features=["a", "b"], categorical_features=[])
+
+
+def test_proba_weights_on_by_default_for_label_metric():
+    """#191: ключ не задан → на бинарном F1 с редким классом множители подбираются и CV выше, чем у argmax."""
+    spec = _spec(TaskType.BINARY, "f1", greater=True, labels=["no", "yes"])
+    train, test, profile = _rare_binary()
+    default = _hyp(model_params={"n_estimators": 100})
+    off = _hyp(proba_weights=False, model_params={"n_estimators": 100})
+
+    with_weights = run_experiment(spec, profile, default, train, RunBudget())
+    plain = run_experiment(spec, profile, off, train, RunBudget())
+
+    assert with_weights.status == plain.status == ExperimentStatus.OK
+    assert default.params.get("_proba_weights"), "множители по умолчанию не подобраны"
+    assert "_proba_weights" not in off.params
+    assert with_weights.mean_score > plain.mean_score
+    assert set(fit_predict_final(spec, profile, default, train, test)["y"]) <= {"no", "yes"}
+
+
+def test_proba_weights_default_kept_only_when_better(monkeypatch):
+    """По умолчанию множители не остаются, если кросс-подгонка не лучше argmax; явный true — остаются всегда."""
+    import ml.experiment as experiment
+
+    monkeypatch.setattr(experiment, "cross_fit_scores", lambda metric, gib, folds: [0.0] * len(folds))
+    spec = _spec(TaskType.BINARY, "f1", greater=True, labels=["no", "yes"])
+    train, _, profile = _rare_binary()
+    default = _hyp(model_params={"n_estimators": 30})
+    forced = _hyp(proba_weights=True, model_params={"n_estimators": 30})
+
+    run_experiment(spec, profile, default, train, RunBudget())
+    run_experiment(spec, profile, forced, train, RunBudget())
+
+    assert "_proba_weights" not in default.params
+    assert forced.params.get("_proba_weights")

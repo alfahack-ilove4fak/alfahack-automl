@@ -51,3 +51,34 @@ def test_cross_fit_does_not_invent_gain_on_noise():
     assert in_sample > plain  # переобучение под свои же данные
     assert honest < in_sample
     assert abs(honest - plain) < 0.03
+
+
+def test_grid_reaches_low_threshold_for_rare_class():
+    """#191: у редкого класса лучший порог бывает < 0.06 — сетка должна давать отношение множителей > 16."""
+    rng = np.random.default_rng(3)
+    n = 20000
+    y = (rng.random(n) < 0.01).astype(int)
+    p1 = np.clip(np.where(y == 1, rng.normal(0.035, 0.01, n), rng.normal(0.01, 0.008, n)), 1e-4, 0.2)
+    proba = np.column_stack([1 - p1, p1])
+    w = fit_weights("f1", True, y, proba)
+    assert w[1] / w[0] > 16
+    assert _score_f1(y, proba, w) > _score_f1(y, proba, np.ones(2))
+
+
+def _score_f1(y, proba, w):
+    return compute_metric("f1", y, (proba * w).argmax(axis=1))
+
+
+def test_fit_weights_subsamples_large_oof(monkeypatch):
+    """Больше MAX_FIT_ROWS строк — подбор на детерминированной подвыборке: те же множители при повторе."""
+    import ml.class_weights as cw
+
+    monkeypatch.setattr(cw, "MAX_FIT_ROWS", 500)
+    seen = []
+    original = cw._score
+    monkeypatch.setattr(cw, "_score", lambda metric, y, proba, w: seen.append(len(y)) or original(metric, y, proba, w))
+    y, proba = _underconfident_rare_class(n=3000)
+    first = cw.fit_weights("f1_macro", True, y, proba)
+    second = cw.fit_weights("f1_macro", True, y, proba)
+    assert set(seen) == {500}
+    assert np.array_equal(first, second)
