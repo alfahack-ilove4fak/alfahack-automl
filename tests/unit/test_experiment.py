@@ -16,7 +16,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
-from ml.experiment import fit_predict_final, run_experiment
+from ml.experiment import fit_predict_final, match_class_columns, run_experiment
 
 
 def _spec(task_type: TaskType, metric: str, greater: bool, labels=None) -> TaskSpec:
@@ -521,6 +521,57 @@ def test_per_class_probability_answer(columns):
             spec.model_copy(update={"submission_columns": ["id", "x", "y", "z"]}), profile, hyp, train, test
         )
         assert np.allclose(answer["z"], plain["z"])
+
+
+@pytest.mark.parametrize(
+    "columns, labels, expected",
+    [
+        (["z", "x", "y"], ["x", "y", "z"], ["z", "x", "y"]),  # точно, в другом порядке
+        (["proba_mid", "proba_low", "proba_vip"], ["low", "mid", "vip"], ["mid", "low", "vip"]),  # приставка
+        (["low_prob", "vip_prob"], ["low", "vip"], ["low", "vip"]),  # окончание
+        (["P_Low", "P_High"], ["high", "low"], ["low", "high"]),  # регистр
+        (["class_1.0", "class_0.0"], ["0", "1"], ["1", "0"]),  # числовые метки: 1.0 = 1
+        (["p1", "p10"], ["1", "10"], ["1", "10"]),  # приставка «p1» съела бы имя — режем только «p»
+        (["proba_long", "proba_low"], ["long", "low"], ["long", "low"]),  # общее начало классов «lo» не трогаем
+        (["ab", "bb"], ["ab", "bb"], ["ab", "bb"]),  # точное имя важнее обрезки окончания «b»
+    ],
+)
+def test_match_class_columns_by_name(columns, labels, expected):
+    assert match_class_columns(columns, labels) == expected
+
+
+@pytest.mark.parametrize(
+    "columns, labels",
+    [
+        (["class_1", "class_2", "class_3"], ["x", "y", "z"]),  # имена не о классах — сопоставить нельзя
+        (["proba_a", "proba_b"], ["a", "c"]),  # колонка без класса
+        (["proba_a", "proba_a "], ["a", "b"]),  # две колонки на один класс
+    ],
+)
+def test_match_class_columns_ambiguous_is_none(columns, labels):
+    assert match_class_columns(columns, labels) is None
+
+
+def test_per_class_proba_prefix_semantic_order():
+    """Ночной аудит (#230, #238): колонки «proba_<класс>» в смысловом, а не алфавитном порядке — сопоставление по имени.
+
+    Раньше имена не совпадали с классами точно, колонки шли по порядку, и вероятности доставались чужим классам
+    (logloss 2.13 — хуже тривиального ответа).
+    """
+    train, test, profile = _three_classes()
+    spec = _spec(TaskType.MULTICLASS, "logloss", greater=False, labels=["x", "y", "z"])
+    hyp = _hyp(model_params={"n_estimators": 30})
+    run_experiment(spec, profile, hyp, train, RunBudget())
+
+    columns = ["proba_z", "proba_x", "proba_y"]
+    answer = fit_predict_final(
+        spec.model_copy(update={"submission_columns": ["id", *columns]}), profile, hyp, train, test
+    )
+    plain = fit_predict_final(
+        spec.model_copy(update={"submission_columns": ["id", "x", "y", "z"]}), profile, hyp, train, test
+    )
+    for label in ["x", "y", "z"]:
+        assert np.allclose(answer[f"proba_{label}"], plain[label])
 
 
 def test_per_class_column_count_mismatch_is_error():
