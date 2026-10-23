@@ -42,7 +42,12 @@ def base_params(params: dict) -> dict:
 
 
 def _key(params: dict) -> str:
-    return params_key(base_params(params))
+    """Ключ повтора. Optuna — одно направление на модель и предобработку: её timeout зависит от остатка бюджета,
+    а model_params после подбора — от результата, поэтому их не учитываем (иначе на diabetes ≈ 70 повторов, #230)."""
+    params = base_params(params)
+    if params.get("optuna"):
+        params = {k: v for k, v in params.items() if k != "model_params"} | {"optuna": True}
+    return params_key(params)
 
 
 def _hyp(kind: HypothesisKind, title: str, rationale: str, params: dict, parent: Hypothesis) -> Hypothesis:
