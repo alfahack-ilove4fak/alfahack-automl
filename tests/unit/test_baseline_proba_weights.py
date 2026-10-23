@@ -85,3 +85,18 @@ def test_parametric_metric_from_registry(monkeypatch):
     monkeypatch.setattr(hypotheses, "METRICS", Registry())
     assert hypotheses.wants_proba_weights(spec_for(TaskType.BINARY, "fbeta@2"))
     assert not hypotheses.wants_proba_weights(spec_for(TaskType.BINARY, "нет_такой"))
+
+
+def test_llm_hypotheses_get_label_defaults(monkeypatch):
+    """ADR 0014: LLM добирает, когда playbook исчерпан, — и её гипотезы тоже с множителями классов, как бейзлайн."""
+    import agent.hypotheses as hypotheses
+    import agent.llm_hypotheses as llm_hypotheses
+    from interfaces.schemas import Hypothesis, HypothesisKind
+
+    spec = spec_for(TaskType.BINARY, "f1")
+    profile = DataProfile(n_train=500, n_test=200, numeric_features=["a"], categorical_features=[])
+    proposed = Hypothesis(id="llm_x", kind=HypothesisKind.MODEL, title="x", params={"model": "xgboost"}, source="llm")
+    monkeypatch.setattr(hypotheses, "load_playbook", lambda: [])
+    monkeypatch.setattr(llm_hypotheses, "llm_hypotheses", lambda *a, **kw: [proposed])
+    hyps = propose_hypotheses(spec, profile, _history(spec), k=3, llm=object())
+    assert [h.params for h in hyps] == [{"model": "xgboost", "proba_weights": True}]
