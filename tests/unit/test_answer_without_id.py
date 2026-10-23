@@ -22,7 +22,7 @@ def make_task(folder, sample_columns=("price",), n=200, n_test=50):
     y = 10 + 3 * x["x0"] + rng.normal(scale=0.1, size=len(x))
     train = x.iloc[:n].assign(price=y.iloc[:n].to_numpy())
     test = x.iloc[n:].reset_index(drop=True)
-    sample = pd.DataFrame({c: (np.arange(n_test) + 1000 if c == "id" else np.zeros(n_test)) for c in sample_columns})
+    sample = pd.DataFrame({c: (np.zeros(n_test) if c == "price" else np.arange(n_test) + 1000) for c in sample_columns})
     train.to_csv(folder / "train.csv", index=False)
     test.to_csv(folder / "test.csv", index=False)
     sample.to_csv(folder / "sample_submission.csv", index=False)
@@ -67,3 +67,15 @@ def test_id_in_template_but_not_in_test_is_taken_from_sample(tmp_path):
     assert list(test["id"]) == [str(1000 + i) for i in range(len(test))]
     answer = trivial_answer(spec, train, test)
     assert list(answer.columns) == ["id", "price"] and len(answer) == len(test)
+
+
+def test_unknown_first_name_in_template_is_id_taken_from_sample(tmp_path):
+    """index,price / row,price: первая колонка шаблона — не таргет из train, значит это id; значения — из образца."""
+    for name in ("index", "row"):
+        folder = tmp_path / name
+        folder.mkdir()
+        spec = parse_task(make_task(folder, sample_columns=(name, "price")), use_analyst=False)
+        assert spec.id_column == name and spec.submission_columns == [name, "price"]
+        train, test = load_data(spec)
+        answer = trivial_answer(spec, train, test)
+        assert list(answer.columns) == [name, "price"] and len(answer) == len(test)

@@ -82,8 +82,8 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
-        if id_column not in test_cols and not _looks_like_id(id_column):
-            # Шаблон без id (одна колонка `price`, строки в порядке test): ответ — по номеру строки, id в ответ не входит
+        if id_column not in test_cols and (id_column in train_cols or len(submission_columns) == 1):
+            # Шаблон без id (первая колонка — таргет из train или единственная, строки в порядке test): ответ — по номеру строки, id в ответ не входит
             id_column = ROW_ID_COLUMN
             notes.append("В шаблоне ответа нет id: строки ответа идут в порядке test.csv")
         if target not in train_cols:
