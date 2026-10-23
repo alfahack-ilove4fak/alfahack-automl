@@ -43,6 +43,14 @@ def test_semicolon_and_decimal_comma(tmp_path):
     assert df["район"].tolist() == ["Юг", "Север, центр"]  # запятая в тексте — не десятичная
 
 
+def test_decimal_comma_column_with_missing_tokens(tmp_path):
+    """Ревью #246: «NA», «-», пусто среди чисел не мешают признать колонку числовой."""
+    path = write(tmp_path / "train.csv", "id;x\n1;1,5\n2;NA\n3;-2,25\n4;\n5;-\n")
+    df = pd.read_csv(standard_csv(path), na_values=["-"])
+    assert df["x"].dtype.kind == "f"
+    assert df["x"].iloc[[0, 2]].tolist() == [1.5, -2.25] and df["x"].isna().sum() == 3
+
+
 def test_commas_inside_quotes_do_not_change_separator(tmp_path):
     path = write(tmp_path / "train.csv", '"Номер заявки","Доход, руб.","Город; район"\n1,"10,5",A\n')
     assert sniff(path)["sep"] == ","

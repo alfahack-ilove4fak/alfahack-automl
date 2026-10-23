@@ -26,6 +26,9 @@ ENCODINGS = ("utf-8-sig", "cp1251")
 SEPARATORS = (",", ";", "\t", "|")  # при равенстве — запятая (первая)
 SNIFF_BYTES = 65536
 NUMBER_WITH_COMMA = re.compile(r"-?\d+(,\d+)?")
+# Пропуски среди чисел: колонка «1,5 / NA / -2,25» всё равно числовая (ревью #246). Тысячные разделители
+# («1 200,5») не обрабатываем: такая колонка останется строками, как без приведения
+MISSING_TOKENS = {"na", "n/a", "nan", "null", "none", "-", "?"}
 CACHE_DIR = Path(tempfile.gettempdir()) / "agent_csv"
 
 
@@ -69,7 +72,7 @@ def standard_csv(path: Path) -> Path:
             df = pd.read_csv(path, sep=dialect["sep"], encoding=dialect["encoding"], dtype=str, keep_default_na=False)
             if dialect["decimal"] == ",":
                 for column in df.columns:
-                    values = df[column][df[column] != ""]
+                    values = df[column][~df[column].str.strip().str.lower().isin(MISSING_TOKENS | {""})]
                     if len(values) and values.str.fullmatch(NUMBER_WITH_COMMA.pattern).all():
                         df[column] = df[column].str.replace(",", ".", regex=False)
             out.parent.mkdir(parents=True, exist_ok=True)
