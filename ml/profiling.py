@@ -7,7 +7,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from interfaces.schemas import DataProfile, TaskSpec, TaskType
+from interfaces.schemas import ROW_ID_COLUMN, DataProfile, TaskSpec, TaskType
 from runtime.log import get_logger
 
 log = get_logger("profiling")
@@ -18,11 +18,29 @@ def load_data(spec: TaskSpec) -> tuple[pd.DataFrame, pd.DataFrame]:
     dtype = {spec.id_column: str}
     train = pd.read_csv(spec.train_path, low_memory=False, dtype=dtype)
     test = pd.read_csv(spec.test_path, low_memory=False, dtype=dtype)
+    if spec.id_column not in test.columns:
+        test[spec.id_column] = _missing_ids(spec, len(test))
     missing = train[spec.target].isna()
     if missing.any():
         log.warning("В train %d строк с пустым target — выкидываем, учиться на них нельзя", int(missing.sum()))
         train = train.loc[~missing].reset_index(drop=True)
     return train, test
+
+
+def _missing_ids(spec: TaskSpec, n_rows: int) -> pd.Series:
+    """id, которого нет в test (1.1.2): значения из sample_submission, если он есть и той же длины, иначе номер строки.
+
+    Шаблон без id-колонки (ROW_ID_COLUMN) — ответ идёт по порядку строк test; колонка нужна внутри агента,
+    в submission.csv её нет.
+    """
+    if spec.id_column != ROW_ID_COLUMN and spec.sample_submission_path is not None:
+        try:
+            sample = pd.read_csv(spec.sample_submission_path, usecols=[spec.id_column], dtype=str)[spec.id_column]
+            if len(sample) == n_rows:
+                return sample
+        except Exception:  # noqa: BLE001 — нет такой колонки в образце: ниже номера строк
+            pass
+    return pd.Series(range(n_rows)).astype(str)
 
 
 LOG_SCALE_METRICS = {"rmsle", "msle"}  # ошибка считается на log1p(y): обучение на log1p(target) совпадает с метрикой

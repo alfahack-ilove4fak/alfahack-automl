@@ -17,7 +17,7 @@ import pandas as pd
 
 from agent.csv_dialect import read_text_any, standard_csv
 from evaluation.metrics import METRICS, find_metric_in_text
-from interfaces.schemas import MetricSpec, TaskSpec, TaskType
+from interfaces.schemas import ROW_ID_COLUMN, MetricSpec, TaskSpec, TaskType
 from runtime.log import get_logger
 
 log = get_logger("task_parser")
@@ -82,6 +82,10 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
+        if id_column not in test_cols and not _looks_like_id(id_column):
+            # Шаблон без id (одна колонка `price`, строки в порядке test): ответ — по номеру строки, id в ответ не входит
+            id_column = ROW_ID_COLUMN
+            notes.append("В шаблоне ответа нет id: строки ответа идут в порядке test.csv")
         if target not in train_cols:
             # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
             target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
@@ -109,7 +113,8 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
 
     # Несколько таргетов (#174): другие колонки ответа, которые есть только в train, — тоже таргеты.
     # Основной (по нему CV и цикл) — тот, к которому подходит метрика из текста
-    targets = [target] + [c for c in submission_columns[1:] if c != target and c in train_cols and c not in test_cols]
+    answer_columns = [c for c in submission_columns if c != id_column]
+    targets = [target] + [c for c in answer_columns if c != target and c in train_cols and c not in test_cols]
     if len(targets) > 1:
         target = _primary_target(files["train"], targets, metric_name)
         notes.append(f"Несколько таргетов: {targets} — модель на каждый, цикл — по {target}")
@@ -126,7 +131,6 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
     class_labels = None
     if task_type in (TaskType.BINARY, TaskType.MULTICLASS):
         class_labels = sorted(map(str, y.dropna().unique()))
-        answer_columns = submission_columns[1:]
         if len(answer_columns) > 1 and not extra_targets and set(answer_columns) != set(class_labels):
             notes.append(f"Колонки ответа {answer_columns} не совпадают с классами train {class_labels}")
 
@@ -356,6 +360,6 @@ def spec_for_target(spec: TaskSpec, target: str, y: pd.Series) -> TaskSpec:
             "extra_targets": [],
             "task_type": task_type,
             "class_labels": labels,
-            "submission_columns": [spec.id_column, target],
+            "submission_columns": [c for c in (spec.id_column, target) if c != ROW_ID_COLUMN],
         }
     )
