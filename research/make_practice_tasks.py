@@ -632,6 +632,215 @@ def claims(task_dir: Path) -> dict:
     return {"answers": answers}
 
 
+@task("search_ranking_ndcg", "ndcg", True)
+def search(task_dir: Path) -> dict:
+    """Ранжирование (вебинар: «может быть ранжирование»; #186): документы внутри запроса, метрика NDCG@10.
+
+    Строка — пара «запрос — документ», query_id — группа; релевантность 0–3. В test — **новые** запросы
+    (группы не пересекаются с train), поэтому query_id — не признак, а группа: схема валидации по query_id
+    честнее kfold. Ответ — число на документ, важен только порядок внутри запроса.
+    """
+    rng = np.random.default_rng(SEED + 5)
+    n_queries = 900
+    sizes = rng.integers(8, 31, n_queries)
+    qid = np.repeat(np.arange(n_queries) + 500, sizes)
+    n = len(qid)
+    query_len = np.repeat(rng.integers(1, 7, n_queries), sizes)
+    query_hard = np.repeat(rng.normal(0, 0.6, n_queries), sizes)  # трудность запроса: сдвиг для всех его документов
+    sources = np.array(["news", "wiki", "forum", "shop", "blog"])
+    source_effect = {"news": 0.1, "wiki": 0.35, "forum": -0.2, "shop": 0.0, "blog": -0.1}
+    df = pd.DataFrame(
+        {
+            "query_id": qid,
+            "query_len": query_len,
+            "bm25": np.clip(rng.gamma(2.0, 4.0, n) - query_hard * 2, 0, None).round(3),
+            "title_match": rng.binomial(query_len, 0.4) / query_len,
+            "click_rate": np.clip(rng.beta(1.2, 12, n), 0, 1).round(4),
+            "doc_len": rng.lognormal(6.5, 0.8, n).round(0),
+            "age_days": rng.integers(0, 2000, n),
+            "source": rng.choice(sources, n, p=[0.25, 0.15, 0.25, 0.2, 0.15]),
+        }
+    )
+    latent = (
+        0.12 * df["bm25"]
+        + 1.6 * df["title_match"]
+        + 6.0 * df["click_rate"]
+        - 0.25 * np.log1p(df["age_days"] / 30)
+        + df["source"].map(source_effect)
+        - 0.15 * np.abs(np.log(df["doc_len"]) - 6.5)
+        + query_hard
+        + rng.normal(0, 0.45, n)
+    )
+    df["relevance"] = np.digitize(latent, np.quantile(latent, [0.55, 0.8, 0.94]))  # 0 — нерелевантно, 3 — точно
+    df.loc[rng.random(n) < 0.05, "click_rate"] = np.nan  # новые документы без истории кликов
+    df.insert(0, "id", rng.permutation(n) + 300000)
+    test_queries = rng.choice(np.unique(qid), size=int(n_queries * 0.25), replace=False)
+    in_test = df["query_id"].isin(test_queries)
+    train = df[~in_test].reset_index(drop=True)
+    test_full = df[in_test].sort_values("id").reset_index(drop=True)
+    answers = test_full[["id", "relevance"]]
+    test = test_full.drop(columns=["relevance"])
+    dictionary = _dictionary(
+        [
+            ("id", "id", "int", "Идентификатор пары «запрос — документ»"),
+            ("query_id", "group", "int", "Номер поискового запроса; документы одного запроса ранжируются вместе"),
+            ("query_len", "feature", "int", "Число слов в запросе"),
+            ("bm25", "feature", "numeric", "Текстовая близость документа к запросу (BM25)"),
+            ("title_match", "feature", "numeric", "Доля слов запроса в заголовке"),
+            ("click_rate", "feature", "numeric", "Доля кликов по документу в прошлом; у новых документов пусто"),
+            ("doc_len", "feature", "numeric", "Длина документа, слов"),
+            ("age_days", "feature", "int", "Возраст документа, дней"),
+            ("source", "feature", "category", "Тип источника"),
+            ("relevance", "target", "int", "Оценка асессора: 0 — нерелевантно … 3 — точный ответ"),
+        ]
+    )
+    md = f"""
+# Ранжирование поисковой выдачи
+
+## Задача
+
+Для каждого поискового запроса нужно упорядочить найденные документы: самые полезные — наверх.
+Асессоры оценили документы по шкале 0–3; по этим оценкам и проверяется порядок.
+
+## Данные
+
+- `train.csv` — {len(train)} пар «запрос — документ» ({train["query_id"].nunique()} запросов) с оценкой `relevance`;
+- `test.csv` — {len(test)} пар для **других** запросов ({test["query_id"].nunique()}), без оценки;
+- `data_dictionary.csv` — описание полей;
+- `sample_submission.csv` — шаблон ответа; значения в нём не являются правильными ответами.
+
+Документы одного запроса связаны через `query_id`.
+
+## Что предсказать
+
+Для каждой строки `test.csv` — число `relevance`: чем больше, тем выше документ в выдаче своего запроса.
+Важен только порядок документов внутри запроса, шкала числа не важна.
+
+Метрика — **NDCG@10**, считается отдельно для каждого `query_id` и усредняется по запросам (больше — лучше).
+
+## Формат результата
+
+Файл `submission.csv` в каталоге этого файла, два столбца:
+
+```csv
+id,relevance
+```
+
+Для каждого `id` из `test.csv` — одна строка, порядок как в `test.csv`.
+"""
+    _write(
+        task_dir,
+        {
+            "train.csv": train,
+            "test.csv": test,
+            "data_dictionary.csv": dictionary,
+            "sample_submission.csv": answers.assign(relevance=0.0),
+        },
+        md,
+    )
+    return {"answers": answers}
+
+
+@task("utilities_multitarget_mae", "mae", False)
+def utilities(task_dir: Path) -> dict:
+    """Два таргета в одном ответе (вебинар: «мультитаргет, несколько колонок ответа»; #174, #185).
+
+    Тепло и вода по дому за месяц: оба числа зависят от одних признаков, но по-разному (тепло — от площади
+    и температуры, вода — от жильцов). Агент должен найти оба таргета по шаблону ответа и обучить модель
+    на каждый; ответ по одному столбцу — невалидный сабмит. Метрика — MAE, усреднённая по столбцам.
+    """
+    rng = np.random.default_rng(SEED + 4)
+    n = 6000
+    districts = np.array([f"D{i}" for i in range(12)])
+    district_effect = dict(zip(districts, rng.normal(0, 0.15, 12), strict=True))
+    heating = {"central": 1.0, "individual": 0.8, "electric": 0.6}
+    df = pd.DataFrame(
+        {
+            "district": rng.choice(districts, n),
+            "heating": rng.choice(list(heating), n, p=[0.6, 0.25, 0.15]),
+            "area_m2": np.clip(rng.lognormal(4.0, 0.35, n), 18, 250).round(1),
+            "floors": rng.integers(1, 26, n),
+            "year_built": rng.integers(1955, 2024, n),
+            "residents": rng.poisson(2.4, n) + 1,
+            "outdoor_temp": rng.normal(-6, 7, n).round(1),
+        }
+    )
+    age = 2024 - df["year_built"]
+    heat = (
+        0.018
+        * df["area_m2"]
+        * df["heating"].map(heating)
+        * (1 + 0.004 * age)
+        * (1 - 0.03 * df["outdoor_temp"])
+        * np.exp(df["district"].map(district_effect))
+        * rng.lognormal(0, 0.12, n)
+    )
+    water = (2.6 * df["residents"] + 0.02 * df["area_m2"]) * rng.lognormal(0, 0.18, n)
+    df["heat_gcal"], df["water_m3"] = heat.round(3), water.round(2)
+    df.loc[rng.random(n) < 0.04, "year_built"] = np.nan
+    df.insert(0, "id", rng.permutation(n) + 70000)
+    train, test_full = train_test_split(df, test_size=0.25, random_state=SEED)
+    train, test_full = train.reset_index(drop=True), test_full.sort_values("id").reset_index(drop=True)
+    answers = test_full[["id", "heat_gcal", "water_m3"]]
+    test = test_full.drop(columns=["heat_gcal", "water_m3"])
+    dictionary = _dictionary(
+        [
+            ("id", "id", "int", "Идентификатор квартиры"),
+            ("district", "feature", "category", "Район"),
+            ("heating", "feature", "category", "Тип отопления"),
+            ("area_m2", "feature", "numeric", "Площадь, м²"),
+            ("floors", "feature", "int", "Этажность дома"),
+            ("year_built", "feature", "int", "Год постройки; бывают пропуски"),
+            ("residents", "feature", "int", "Число жильцов"),
+            ("outdoor_temp", "feature", "numeric", "Средняя температура месяца, °C"),
+            ("heat_gcal", "target", "numeric", "Потребление тепла за месяц, Гкал"),
+            ("water_m3", "target", "numeric", "Потребление воды за месяц, м³"),
+        ]
+    )
+    md = f"""
+# Тепло и вода за месяц
+
+## Задача
+
+Управляющая компания хочет заранее оценить, сколько тепла и воды потребит каждая квартира за месяц.
+Нужны **оба** числа: по ним планируют закупку и проверяют показания счётчиков.
+
+## Данные
+
+- `train.csv` — {len(train)} квартир с признаками и обоими ответами;
+- `test.csv` — {len(test)} квартир без ответов;
+- `data_dictionary.csv` — описание полей;
+- `sample_submission.csv` — шаблон ответа; значения в нём не являются правильными ответами.
+
+## Что предсказать
+
+Для каждой квартиры из `test.csv` — `heat_gcal` (тепло, Гкал) и `water_m3` (вода, м³).
+
+Метрика — **MAE**, mean absolute error, считается по каждому столбцу отдельно и усредняется (меньше — лучше).
+
+## Формат результата
+
+Файл `submission.csv` в каталоге этого файла, три столбца:
+
+```csv
+id,heat_gcal,water_m3
+```
+
+Для каждого `id` из `test.csv` — одна строка, порядок как в `test.csv`.
+"""
+    _write(
+        task_dir,
+        {
+            "train.csv": train,
+            "test.csv": test,
+            "data_dictionary.csv": dictionary,
+            "sample_submission.csv": answers.assign(heat_gcal=0.0, water_m3=0.0),
+        },
+        md,
+    )
+    return {"answers": answers}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Пересоздать тренировочные задачи tasks/practice/")
     parser.add_argument("--only", nargs="*", choices=sorted(TASKS), help="какие задачи (по умолчанию все)")
@@ -651,6 +860,8 @@ def main() -> int:
             "id_column": answers.columns[0],
             "target": answers.columns[1],
         }
+        if len(answers.columns) > 2:  # несколько таргетов: основной — первый, по нему метрика в харнессе
+            manifest[name]["extra_targets"] = list(answers.columns[2:])
         print(f"✅ {name}: {metric}, test {len(answers)} строк → {task_dir.relative_to(ROOT)}")
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"

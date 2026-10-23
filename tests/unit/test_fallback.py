@@ -80,6 +80,29 @@ def test_history_repeats_are_skipped(spec):
     assert fallback_hypotheses(spec, history, best, RunBudget(total_seconds=3600)) == []
 
 
+def test_optuna_not_repeated_when_budget_shrinks(spec):
+    """#230: timeout Optuna считается от остатка бюджета — с меньшим остатком это та же гипотеза, а не новая."""
+    best = (hyp("best"), result("b", BASE))
+    first = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    history = [best] + [(h, result(h.id, [50.0] * 5)) for h in first]
+    later = fallback_hypotheses(spec, history, best, RunBudget(total_seconds=1000, safety_seconds=0))
+    assert later == []
+    assert [h.id for h in first if "optuna" in h.params] == [
+        h.id
+        for h in fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=1000, safety_seconds=0))
+        if "optuna" in h.params
+    ]  # id не зависит от остатка бюджета
+
+
+def test_accepted_optuna_not_tuned_again(spec):
+    """Принятая Optuna становится лучшей с подобранными model_params — подбирать ту же модель снова незачем."""
+    tuned = hyp("fb-x", model="lightgbm", optuna={"timeout": 600}, model_params={"num_leaves": 17}, _optuna_best={})
+    best = (tuned, result("fb-x", [30.0] * 5))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert not any(h.params.get("optuna") and h.params["model"] == "lightgbm" for h in hyps)
+    assert all("optuna" not in h.params for h in hyps if h.params["model"] != "lightgbm")
+
+
 def test_near_misses_combined_on_best(spec):
     best = (hyp("best", class_weight=None, feature_ops=["missing_flags"]), result("b", BASE))
     a = (hyp("a", model_params={"num_leaves": 31}), result("a", [39.0, 40.5, 41.5, 43.5, 44.5]))  # 3 из 5 лучше
