@@ -3,8 +3,8 @@
     uv run python research/pitch_charts.py      # → docs/pitch/img/*.png
 
 График 1 «CV против честной проверки»: каждая точка — гипотеза на задаче. По X — выигрыш над бейзлайном
-по CV агента, по Y — на честной отложенной части. Оранжевым — случаи, где решение агента по CV неверное:
-принял, а честно хуже бейзлайна, или отверг, а честно лучше больше чем на 1%.
+по CV агента (в его схеме валидации), по Y — на честной отложенной части. Цвет — решение агента по его правилу
+(agent.acceptance.accept): принял и честно лучше, принял и честно хуже, отклонил. Данные — стенд v2 и #237.
 """
 
 from __future__ import annotations
@@ -23,19 +23,23 @@ PITCH = ROOT / "docs" / "pitch"
 # Палитра — категориальные слоты 1–2 (проверены на дальтонизм, all-pairs), текст — нейтральные чернила
 SURFACE, INK, INK_2, INK_MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8984", "#e6e5e1"
 OK_COLOR, WRONG_COLOR = "#2a78d6", "#eb6834"
-MISSED_GAIN_PCT = 1.0  # «отверг, а честно лучше» считаем ошибкой, только если выигрыш заметный
+MISSED_GAIN_PCT = 1.0  # «отверг, а честно лучше» считаем упущенным, только если выигрыш заметный
+LIM = 40.0  # оси, %: дальше — выбросы целей «не под метрику» (−10⁶ %)
 
 
 def cv_vs_honest(data: Path, out: Path) -> dict:
     d = pd.read_csv(data)
-    wrong = (d.agent_accepts & (d.honest_gain_pct < 0)) | (~d.agent_accepts & (d.honest_gain_pct > MISSED_GAIN_PCT))
+    acc = d.agent_accepts.astype(bool)
+    acc_ok, acc_bad = acc & (d.honest_gain_pct >= 0), acc & (d.honest_gain_pct < 0)
     stats = {
         "pairs": len(d),
-        "wrong": int(wrong.sum()),
-        "accepted_worse": int((d.agent_accepts & (d.honest_gain_pct < 0)).sum()),
-        "rejected_better": int((~d.agent_accepts & (d.honest_gain_pct > MISSED_GAIN_PCT)).sum()),
+        "accepted": int(acc.sum()),
+        "accepted_worse": int(acc_bad.sum()),
+        "rejected_better": int((~acc & (d.honest_gain_pct > MISSED_GAIN_PCT)).sum()),
         "tasks": d.task.nunique(),
     }
+    # Цели «не под метрику» дают −10⁶ %: прижимаем к краю, иначе остальные точки сливаются в одну
+    x, y = d.cv_gain_pct.clip(-LIM, LIM), d.honest_gain_pct.clip(-LIM, LIM)
 
     fig, ax = plt.subplots(figsize=(12, 6.75), dpi=150, facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
@@ -49,50 +53,57 @@ def cv_vs_honest(data: Path, out: Path) -> dict:
 
     # Форма — второе кодирование: цвет никогда не единственный носитель смысла
     ax.scatter(
-        d.cv_gain_pct[~wrong],
-        d.honest_gain_pct[~wrong],
-        s=70,
+        x[~acc],
+        y[~acc],
+        s=40,
+        marker="o",
+        color=INK_MUTED,
+        alpha=0.45,
+        edgecolor="none",
+        zorder=2,
+        label="агент отклонил",
+    )
+    ax.scatter(
+        x[acc_ok],
+        y[acc_ok],
+        s=80,
         marker="o",
         color=OK_COLOR,
         edgecolor=SURFACE,
         linewidth=2,
         zorder=3,
-        label="CV подсказала верное решение",
+        label="агент принял — честно лучше",
     )
     ax.scatter(
-        d.cv_gain_pct[wrong],
-        d.honest_gain_pct[wrong],
-        s=110,
+        x[acc_bad],
+        y[acc_bad],
+        s=120,
         marker="D",
         color=WRONG_COLOR,
         edgecolor=SURFACE,
         linewidth=2,
         zorder=4,
-        label="CV подсказала неверное решение",
+        label="агент принял — честно хуже",
     )
 
-    # Подписи — только у самых показательных точек
-    top = d[wrong].reindex(d[wrong].honest_gain_pct.abs().sort_values(ascending=False).index).head(2)
-    for _, r in top.iterrows():
+    for _, r in d[acc_bad].iterrows():
         ax.annotate(
             f"{r.hypothesis}\n{r.task}: CV {r.cv_gain_pct:+.1f}%, честно {r.honest_gain_pct:+.1f}%",
-            (r.cv_gain_pct, r.honest_gain_pct),
-            xytext=(14, -4),
+            (min(max(r.cv_gain_pct, -LIM), LIM), min(max(r.honest_gain_pct, -LIM), LIM)),
+            xytext=(-14, -18),
             textcoords="offset points",
             fontsize=10,
             color=INK_2,
-            va="center",
+            ha="right",
         )
 
-    lim_x = max(abs(d.cv_gain_pct).max(), 1) * 1.15
-    ax.set_xlim(-lim_x, lim_x)
-    ax.text(0.99, 0.02, "агент примет →", transform=ax.transAxes, ha="right", fontsize=10, color=INK_MUTED)
-    ax.text(0.01, 0.02, "← агент отвергнет", transform=ax.transAxes, ha="left", fontsize=10, color=INK_MUTED)
+    ax.set_xlim(-LIM * 1.05, LIM * 1.05)
+    ax.set_ylim(-LIM * 1.05, LIM * 1.05)
     ax.set_xlabel("Выигрыш над бейзлайном по кросс-валидации агента, %", color=INK_2, fontsize=11)
-    ax.set_ylabel("Выигрыш на честной проверке, %", color=INK_2, fontsize=11)
+    ax.set_ylabel("Выигрыш на честной отложенной части, %", color=INK_2, fontsize=11)
     ax.tick_params(colors=INK_2, labelsize=10)
     fig.suptitle(
-        f"Обычная кросс-валидация ведёт агента к неверному решению в {stats['wrong']} случаях из " f"{stats['pairs']}",
+        f"Агент ошибся с принятием гипотезы {stats['accepted_worse']} раз из {stats['accepted']}",
         x=0.06,
         y=0.97,
         ha="left",
@@ -101,19 +112,20 @@ def cv_vs_honest(data: Path, out: Path) -> dict:
         weight="bold",
     )
     ax.set_title(
-        f"{stats['tasks']} задач × гипотезы playbook. Неверно: принял, а честно хуже бейзлайна "
-        f"({stats['accepted_worse']}), или отверг, а честно лучше > {MISSED_GAIN_PCT:.0f}% "
-        f"({stats['rejected_better']})",
+        f"{stats['tasks']} задач × гипотезы playbook, {stats['pairs']} проверок. Принимает только то, что лучше "
+        f"на тех же фолдах с запасом на шум (t ≥ 2); платит за это осторожностью — отклонено {stats['rejected_better']} "
+        f"честно лучших > {MISSED_GAIN_PCT:.0f}%",
         loc="left",
         fontsize=10.5,
         color=INK_2,
         pad=10,
+        wrap=True,
     )
-    ax.legend(loc="lower right", bbox_to_anchor=(1, 0.07), frameon=False, fontsize=10, labelcolor=INK_2)
+    ax.legend(loc="upper left", frameon=False, fontsize=10, labelcolor=INK_2)
     ax.text(
         0.99,
-        0.2,
-        "порог «принять» — чуть правее нуля:\nзапас на шум 0.25·разброс по фолдам",
+        0.02,
+        f"значения за ±{LIM:.0f}% показаны на краю",
         transform=ax.transAxes,
         ha="right",
         fontsize=9,
