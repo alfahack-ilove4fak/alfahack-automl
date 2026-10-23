@@ -52,5 +52,14 @@
     "id_column": "id",
     "metric": "ndcg",
     "target": "relevance"
+  },
+  "utilities_multitarget_mae": {
+    "extra_targets": [
+      "water_m3"
+    ],
+    "greater_is_better": false,
+    "id_column": "id",
+    "metric": "mae",
+    "target": "heat_gcal"
   }
 }
