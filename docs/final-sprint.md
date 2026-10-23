@@ -45,6 +45,8 @@
 
 Сабмит — **только если харнесс показал улучшение** (балл к сильному бейзлайну вырос). 2–3 в день; один — с тем, что влито за день. Дежурные: 23.10 — egor, 24.10 — danil, 25.10 — roma, 26.10 — vasya (заморозка), 27.10 — вместе.
 
+**Гейт перед сабмитом (#240).** Дежурный перед сабмитом запускает `uv run python scripts/gate.py --minutes 5` (≈ 1,5 ч при 5 мин на задачу; в 13:00 — запустить, к 18:30 будет готов). Гейт прогоняет 15 «чужих» задач (`research/night/`) и public-пару и сравнивает с `docs/gate_baseline.json` (результат прошлого сабмита). Не пускает (код выхода 1), если: нулей на чужих задачах стало больше или задача с баллом стала нулём; «балл к сильному» на public упал больше чем на 2; агент ушёл за бюджет по времени. Отчёт — `runs/gate/<время>/gate.md`. После сабмита: `--update-baseline`, и `docs/gate_baseline.json` идёт в PR вместе со строкой в [submissions.md](submissions.md).
+
 ## 5. Команды
 
 | Что | Команда |
@@ -52,6 +54,7 @@
 | Харнесс — все 10 задач | `uv run python -m evaluation.harness --all --minutes 5` |
 | Харнесс — public-пара (быстро для PR) | `uv run python -m evaluation.harness --task tasks/public/regression/task.md --task tasks/public/multiclass/task.md --minutes 5` |
 | Сравнить два прогона | `uv run python scripts/harness_compare.py base.csv head.csv --out comment.md` |
+| Гейт перед сабмитом | `uv run python scripts/gate.py --minutes 5` (`--no-run` — только сравнить, `--update-baseline` — после сабмита) |
 | Проверка «как на платформе» (в отчёте — доля использованного бюджета и почему закончился цикл; ⚠️ при простое < 50% или выходе за бюджет) | `uv run python scripts/pre_submit.py` |
 | Репетиция 3 ч, без интернета, 8 ядер | `taskset -c 0-7 uv run --offline python scripts/pre_submit.py --task tasks/public/regression/task.md --minutes 180` |
 | Проверка Qwen и бюджета | `uv run python scripts/qwen.py check` / `budget` |
