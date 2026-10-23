@@ -148,9 +148,14 @@ def _skipped(hyp: Hypothesis, spec: TaskSpec, reason: str) -> ExperimentResult:
 
 
 def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:
-    """Гипотеза в схеме валидации бейзлайна. В историю идёт исходная гипотеза: её params — то, что предложено."""
+    """Копия гипотезы в схеме валидации бейзлайна. В историю идёт исходная гипотеза: её params — то, что предложено.
+
+    Копия — всегда: run_experiment дописывает в params служебные _best_iteration, _train_fraction, а исходная
+    гипотеза в истории должна остаться как была (иначе повтор той же идеи от LLM не опознавался).
+    """
     if validation is None or "validation" in hyp.params:
-        return hyp  # своя схема гипотезы — acceptance отклонит её как несравнимую, но не подменяем молча
+        # своя схема гипотезы — acceptance отклонит её как несравнимую, но не подменяем молча
+        return hyp.model_copy(update={"params": dict(hyp.params)})
     return hyp.model_copy(update={"params": {**hyp.params, "validation": validation}})
 
 

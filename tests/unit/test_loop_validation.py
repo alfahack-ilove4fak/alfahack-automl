@@ -76,7 +76,8 @@ def test_scheme_kept_after_new_best(spec, profile, monkeypatch):
 
 def test_with_validation_helper():
     h = hyp("a")
-    assert loop.with_validation(h, None) is h
+    copy = loop.with_validation(h, None)
+    assert copy.params == h.params and copy.params is not h.params  # копия: служебные ключи прогона — не в историю
     assert loop.with_validation(h, "time:Year").params["validation"] == "time:Year"
     assert "validation" not in h.params  # исходная гипотеза не меняется
 
@@ -149,3 +150,35 @@ def test_final_gets_params_written_by_cv(spec, profile, monkeypatch):
     assert best[0] is finals[0]
     # в историю по-прежнему исходная гипотеза: повторы ищутся по предложенным params
     assert "_best_iteration" not in history[1][0].params and "validation" not in history[1][0].params
+
+
+@pytest.mark.parametrize("scheme", [None, "time:Year"])
+def test_history_keeps_proposed_params_in_any_scheme(spec, profile, monkeypatch, scheme):
+    """В обычной CV (схема None) run_experiment писал _best_iteration в саму гипотезу из истории — повтор той же идеи
+    от LLM под новым id не опознавался и прогонялся снова (поддельная LLM: llm_l1, llm_l1_2, llm_l1_3… с одним скором).
+    """
+
+    def fake_experiment(spec, profile, h, train, budget):
+        h.params["_best_iteration"] = 137
+        h.params["_train_fraction"] = 0.8
+        return result(h.id, 40.0, f"{h.params.get('validation', 'kfold')}-5")
+
+    monkeypatch.setattr(loop, "run_experiment", fake_experiment)
+    batches = [[hyp("a", model_params={"num_leaves": 15})]]
+    monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: batches.pop(0) if batches else [])
+    base_params = {"validation": scheme} if scheme else {}
+    history = [(hyp("baseline", **base_params), result("baseline", 42.0, f"{scheme or 'kfold'}-5"))]
+    loop.run_autoresearch(spec, profile, None, RunBudget(), history, history[0], lambda h, r: None, llm=None)
+    assert history[1][0].params == {"model": "lightgbm", "model_params": {"num_leaves": 15}}
+
+    from agent.llm_hypotheses import parse_hypotheses
+
+    again = {"id": "a_again", "kind": "hyperparams", "title": "то же", "params": {"model_params": {"num_leaves": 15}}}
+    assert parse_hypotheses([again], history, k=3) == []
+
+
+def test_service_keys_not_part_of_repeat_key():
+    from agent.hypotheses import params_key
+
+    lgbm = {"model": "lightgbm", "model_params": {"num_leaves": 15}}
+    assert params_key({**lgbm, "_best_iteration": 87, "_proba_weights": [1, 2], "_optuna_best": {}}) == params_key(lgbm)
