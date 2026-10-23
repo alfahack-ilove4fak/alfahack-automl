@@ -90,11 +90,13 @@ def purpose_of(prompt: str) -> str:
     low = prompt.lower()
     if "add_features" in prompt:
         return "features"
-    if "критик" in low and "гипотез" in low and "отклон" in low:
+    if "верни json-список из" in low:
+        return "hypotheses"
+    if "ты — критик" in low:
         return "critic"
-    if "target" in low and "метрик" in low and "id_column" in low:
+    if "id_column" in low and "answer_format" in low:
         return "task"
-    if "почему" in low and "пачк" in low:
+    if "не улучшили лучший результат" in low:
         return "reflect"
     return "hypotheses"
 
