@@ -68,3 +68,20 @@ def test_playbook_hypotheses_get_label_defaults(metric, expected):
     assert all(("proba_weights" in h.params) is expected for h in hyps)
     # повтор бейзлайна (только proba_weights поверх LightGBM по умолчанию) не предлагается
     assert all(h.params != {"model": "lightgbm", "proba_weights": True} for h in hyps)
+
+
+def test_parametric_metric_from_registry(monkeypatch):
+    """Ревью #254: реестр собирает параметрические метрики (fbeta@2) через __missing__ — dict.get его не вызывает."""
+    from types import SimpleNamespace
+
+    import agent.hypotheses as hypotheses
+
+    class Registry(dict):
+        def __missing__(self, name):
+            if name.startswith("fbeta@"):
+                return SimpleNamespace(prediction="label")
+            raise KeyError(name)
+
+    monkeypatch.setattr(hypotheses, "METRICS", Registry())
+    assert hypotheses.wants_proba_weights(spec_for(TaskType.BINARY, "fbeta@2"))
+    assert not hypotheses.wants_proba_weights(spec_for(TaskType.BINARY, "нет_такой"))

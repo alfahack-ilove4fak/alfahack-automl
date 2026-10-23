@@ -39,8 +39,11 @@ def wants_proba_weights(spec: TaskSpec | None) -> bool:
     """Подбирать ли множители классов в этой задаче: классификация + метрика по меткам, кроме accuracy."""
     if spec is None or spec.task_type == TaskType.REGRESSION or spec.metric.name in PROBA_WEIGHTS_SKIP:
         return False
-    metric = METRICS.get(spec.metric.name)
-    return metric is not None and metric.prediction == "label"
+    try:
+        metric = METRICS[spec.metric.name]  # не .get(): параметрические (fbeta@2, pinball@0.9) собирает __missing__
+    except KeyError:
+        return False
+    return metric.prediction == "label"
 
 
 def baseline_hypothesis(spec: TaskSpec | None = None) -> Hypothesis:
