@@ -8,6 +8,10 @@
 оптимизировал утечку через повторы объектов (public/regression год 5: честно 53.99 против бейзлайна 51.25, ревью #115),
 на time:Year_Factor — честно 45.92 (ADR 0013). Поэтому ключ снова открыт агенту (#200).
 
+Финал (fit_predict_final) у бустингов — среднее AGENT_FINAL_SEEDS моделей с разными сидами (по умолчанию 3, #261 E3):
+подвыборка строк и признаков у каждой своя, среднее снижает разброс ответа. AGENT_FINAL_SEEDS=1 — одна модель, как
+раньше; первый сид всегда SEED. Время финала замеряет solution.py — резерв (ensure_final_reserve) растёт сам.
+
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
   model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
                    hist_gb — HistGradientBoosting из scikit-learn: самый быстрый бустинг, категории нативно
@@ -44,6 +48,8 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import lightgbm as lgb
 import numpy as np
@@ -125,6 +131,41 @@ XGBOOST_PARAMS = {
     "n_jobs": -1,
     "verbosity": 0,
 }
+
+
+FINAL_SEEDS_ENV = "AGENT_FINAL_SEEDS"
+DEFAULT_FINAL_SEEDS = 3
+MAX_FINAL_SEEDS = 10
+# Модели со случайностью в обучении (подвыборка строк/признаков): у linear и hist_gb без ранней остановки сид
+# ничего не меняет — несколько копий только тратили бы время
+SEEDED_MODELS = {"lightgbm", "xgboost", "catboost"}
+_model_seed: ContextVar[int] = ContextVar("model_seed", default=SEED)
+
+
+@contextmanager
+def seeded(seed: int):
+    """Сид моделей внутри блока (финал с несколькими сидами); model_params гипотезы с явным сидом важнее."""
+    token = _model_seed.set(seed)
+    try:
+        yield
+    finally:
+        _model_seed.reset(token)
+
+
+def final_seeds() -> int:
+    """Сколько сидов у финальной модели: AGENT_FINAL_SEEDS (1…MAX_FINAL_SEEDS), не задан или мусор — по умолчанию."""
+    try:
+        value = int(os.environ.get(FINAL_SEEDS_ENV, DEFAULT_FINAL_SEEDS))
+    except ValueError:
+        return DEFAULT_FINAL_SEEDS
+    return min(max(value, 1), MAX_FINAL_SEEDS)
+
+
+def _seed_sensitive(hypothesis: Hypothesis) -> bool:
+    """Есть ли в гипотезе модель, у которой сид меняет результат (у ансамбля — хотя бы один участник)."""
+    if hypothesis.params.get("ensemble"):
+        return any(m.params["model"] in SEEDED_MODELS for m in _ensemble_members(hypothesis))
+    return str(hypothesis.params.get("model") or DEFAULT_MODEL).strip().lower() in SEEDED_MODELS
 
 
 def _is_classification(spec: TaskSpec) -> bool:
@@ -250,6 +291,7 @@ def _objective_params(spec: TaskSpec, hypothesis: Hypothesis, model: str, y: np.
 def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis, y: np.ndarray | None = None):
     params = {
         **BASE_PARAMS,
+        "random_state": _model_seed.get(),
         **_objective_params(spec, hypothesis, "lightgbm", y),
         **hypothesis.params.get("model_params", {}),
     }
@@ -303,6 +345,7 @@ def _fit_catboost(
 
     params = {
         **CATBOOST_PARAMS,
+        "random_seed": _model_seed.get(),
         **_objective_params(spec, hypothesis, "catboost", y),
         **hypothesis.params.get("model_params", {}),
     }
@@ -337,6 +380,7 @@ def _fit_xgboost(
 
     params = {
         **XGBOOST_PARAMS,
+        "random_state": _model_seed.get(),
         **_objective_params(spec, hypothesis, "xgboost", y),
         **hypothesis.params.get("model_params", {}),
     }
@@ -936,6 +980,20 @@ def _trees_scale(params: dict) -> float:
     return min(MAX_TREES_SCALE, max(1.0, CV_TRAIN_SHARE / float(fraction)))
 
 
+def _fit_final_models(spec: TaskSpec, hypothesis: Hypothesis, x: pd.DataFrame, y: np.ndarray, n_estimators):
+    """Финальная модель: одна или среднее final_seeds() копий с сидами s, s+1, … от текущего s (SEED по умолчанию, #261 E3)."""
+    n_seeds = final_seeds() if _seed_sensitive(hypothesis) else 1
+    first = _model_seed.get()
+    models = []
+    for i in range(n_seeds):
+        with seeded(first + i):
+            models.append(_fit_model(spec, hypothesis, x, y, n_estimators=n_estimators)[0])
+    if n_seeds == 1:
+        return models[0]
+    log.info("Финал «%s»: среднее %d моделей с разными сидами", hypothesis.id, n_seeds)
+    return _Ensemble(models, [False] * n_seeds)
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
@@ -951,7 +1009,7 @@ def fit_predict_final(
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
     n_estimators = _final_estimators(params.get("_best_iteration"), _trees_scale(params))
-    model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
+    model = _fit_final_models(spec, hypothesis, x, y_fit, n_estimators)
     pred = _predict(spec, model, x_test, log_target)
     if _use_proba_weights(spec, params) and params.get("_proba_weights"):
         pred = (model.predict_proba(x_test) * np.asarray(params["_proba_weights"])).argmax(axis=1)
