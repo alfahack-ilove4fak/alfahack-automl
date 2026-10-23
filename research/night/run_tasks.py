@@ -151,11 +151,9 @@ def independent_score(truth, answers, sub, train, test, target):
     else:
         classes = sorted(train[target].dropna().astype(str).unique())
         yc = pd.Categorical(y.astype(str), categories=classes).codes
-        prior = (
-            pd.Categorical(train[target].dropna().astype(str), categories=classes)
-            .value_counts(normalize=True)
-            .to_numpy()
-        )
+        prior = pd.Series(pd.Categorical(train[target].dropna().astype(str), categories=classes)).value_counts(
+            normalize=True, sort=False
+        ).to_numpy()
         proba_lg = lgbm_baseline(truth, train, test, target, id_col, "clf", classes)
         if m == "logloss":  # колонки по классам в порядке образца
             cols = [c for c in sub.columns if c != id_col]
@@ -254,8 +252,11 @@ def main() -> None:
     ap.add_argument("--minutes", type=float, default=4)
     ap.add_argument("--only", default="")
     ap.add_argument("--llm", action="store_true")
+    ap.add_argument("--rescore", action="store_true", help="не запускать агента: пересчитать проверки по готовым runs/night/<имя>")
     ap.add_argument("--out", type=Path, default=ROOT / "runs" / "night")
     args = ap.parse_args()
+    if not args.llm:
+        os.environ["LLM_MOCK"] = "1"  # parse_task в этом процессе не должен звать настоящую LLM
     names = [p.name for p in sorted(args.tasks.iterdir()) if p.is_dir() and not p.name.startswith("_")]
     if args.only:
         names = [n for n in names if n in args.only.split(",")]
@@ -263,9 +264,16 @@ def main() -> None:
     for name in names:
         run_dir = args.out / name
         print(f"▶ {name} ({args.minutes} мин)", flush=True)
-        run = run_agent(args.tasks / name, run_dir, args.minutes, args.llm)
+        if args.rescore:
+            prev = [json.loads(ln) for ln in (args.out / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+            old = next((r for r in reversed(prev) if r["task"] == name), None)
+            if old is None or not run_dir.exists():
+                continue
+            run = {k: old[k] for k in ("seconds", "exit", "status", "peak_ram_mb")}
+        else:
+            run = run_agent(args.tasks / name, run_dir, args.minutes, args.llm)
         row = check_one(name, args.tasks, run_dir, run)
-        with (args.out / "results.jsonl").open("a", encoding="utf-8") as fh:
+        with (args.out / ("results_rescored.jsonl" if args.rescore else "results.jsonl")).open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         sc = row.get("score")
         print(
