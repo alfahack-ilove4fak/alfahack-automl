@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 import pandas as pd
@@ -26,6 +27,9 @@ from runtime.log import get_logger
 log = get_logger("loop")
 
 BATCH = 3  # гипотез за один запрос к LLM: дешевле, чем спрашивать на каждой итерации
+# LLM зовём после playbook (ADR 0014), но к этой доле времени цикла она должна сделать хотя бы один ход: решения
+# должна принимать LLM (вебинар), а на больших данных playbook может занять весь бюджет (ревью #257)
+LLM_TURN_SHARE = 0.5
 
 
 def run_autoresearch(
@@ -53,6 +57,7 @@ def run_autoresearch(
     # Схему валидации выбрали один раз до цикла и посчитали в ней бейзлайн (#151, ADR 0008 D1, ADR 0013):
     # все гипотезы идут в ней же, иначе acceptance не сравнит их с бейзлайном
     validation = best[0].params.get("validation")
+    llm_turn_at = time.monotonic() + budget.seconds_left() * LLM_TURN_SHARE
     for iteration in range(1, max_iterations + 1):
         # Не успеваем даже эксперимент ценой в бейзлайн — дальше пробовать нечего
         if not budget.has_time(needed_seconds=baseline_seconds * 1.2):
@@ -65,7 +70,18 @@ def run_autoresearch(
             # не она, разбор их неудач тратит токены впустую
             if missed and any(h.source == "llm" for h, _ in batch):
                 reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
-            queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
+            llm_due = (
+                llm_turn_at is not None
+                and time.monotonic() >= llm_turn_at
+                and llm.available()
+                and not any(h.source == "llm" for h, _ in history)
+            )
+            if llm_due:
+                llm_turn_at = None  # один раз: дальше — обычный порядок
+                log.info("Половина времени цикла позади, а LLM ещё не ходила — её пачка вперёд playbook")
+            queue = propose_hypotheses(
+                spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory, llm_first=llm_due or None
+            )
             if batch and feature_tries < MAX_FEATURE_TRIES and not any(h.source == "playbook" for h in queue):
                 # когда playbook исчерпан (ADR 0014) и лучший известен: LLM пишет код признаков (A-L3-1) для песочницы
                 feature_tries += 1

@@ -209,7 +209,7 @@ def test_no_time_left_playbook_only(spec, profile, monkeypatch):
 def test_loop_passes_budget(spec, profile, monkeypatch):
     seen = []
 
-    def fake_propose(spec, profile, history, k=3, budget=None, llm=None, memory=None):
+    def fake_propose(spec, profile, history, k=3, budget=None, llm=None, memory=None, llm_first=None):
         seen.append(budget)
         return []
 
@@ -218,6 +218,44 @@ def test_loop_passes_budget(spec, profile, monkeypatch):
     history = baseline_history()
     loop.run_autoresearch(spec, profile, None, budget, history, history[0], lambda h, r: None, llm=FakeLLM(None))
     assert seen == [budget]
+
+
+def make_hyp(hid):
+    return Hypothesis(id=hid, kind=HypothesisKind.HYPERPARAMS, title=hid, params={"n_folds": 3}, source="playbook")
+
+
+@pytest.mark.parametrize(
+    "share, available, expected",
+    [
+        (
+            0.0,
+            True,
+            [True, None],
+        ),  # середина времени прошла, LLM не ходила — один раз вперёд playbook, дальше как обычно
+        (0.5, True, [None, None]),  # время ещё есть — обычный порядок ADR 0014
+        (0.0, False, [None, None]),  # LLM выключена — звать некого
+    ],
+)
+def test_llm_gets_a_turn_by_half_time(spec, profile, monkeypatch, share, available, expected):
+    """Ревью #257: решения должна принимать LLM (вебинар) — на больших данных playbook мог съесть весь бюджет."""
+    seen = []
+    batches = [[make_hyp("p1")], [make_hyp("p2")]]
+
+    def fake_propose(spec, profile, history, k=3, budget=None, llm=None, memory=None, llm_first=None):
+        seen.append(llm_first)
+        return batches.pop(0) if batches else []
+
+    def fake_experiment(spec, profile, h, train, budget):
+        return ExperimentResult(hypothesis_id=h.id, status=ExperimentStatus.OK, metric_name="rmse", mean_score=50.0)
+
+    monkeypatch.setattr(loop, "LLM_TURN_SHARE", share)
+    monkeypatch.setattr(loop, "propose_hypotheses", fake_propose)
+    monkeypatch.setattr(loop, "run_experiment", fake_experiment)
+    monkeypatch.setattr(loop, "fallback_hypotheses", lambda *a, **kw: [])
+    history = baseline_history()
+    llm = FakeLLM(None, available=available)
+    loop.run_autoresearch(spec, profile, None, RunBudget(), history, history[0], lambda h, r: None, llm=llm)
+    assert seen[:2] == expected
 
 
 @pytest.mark.parametrize(

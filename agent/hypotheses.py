@@ -182,15 +182,19 @@ def propose_hypotheses(
     budget: RunBudget | None = None,
     llm: LLMClient | None = None,
     memory: ResearchMemory | None = None,
+    llm_first: bool | None = None,
 ) -> list[Hypothesis]:
     """Сначала playbook, недостающие — от LLM (ADR 0014). Повторы истории отсекаются.
 
     Playbook бесплатен и мгновенен, а LLM на замере (#179) выигрыша не дала, но стоила времени и токенов
     (тай-брейки платформы). Поэтому LLM зовём, когда применимые гипотезы playbook кончились: она видит всю их
-    историю и предлагает то, чего в playbook нет. AGENT_LLM_FIRST=1 — прежний порядок.
+    историю и предлагает то, чего в playbook нет.
+    llm_first=True — LLM вперёд playbook (цикл так зовёт её, если к середине времени она ещё не ходила);
+    None — по AGENT_LLM_FIRST (=1 — прежний порядок).
     budget (контракт 1.1, D3): по остатку времени LLM-клиент решает, звать ли модель и сколько ждать.
     """
-    llm_first = os.getenv(LLM_FIRST_ENV, "0") == "1"
+    if llm_first is None:
+        llm_first = os.getenv(LLM_FIRST_ENV, "0") == "1"
     out: list[Hypothesis] = _llm_part(spec, profile, history, k, llm, memory, budget) if llm_first else []
     out += _playbook_part(spec, profile, history, k - len(out), out)
     if not llm_first and len(out) < k:
