@@ -1,6 +1,6 @@
 """Прогон агента на вариантах формата (gen_variants.py), бюджет 60 с: что вышло в submission.csv.
 
-    python research/night/run_variants.py runs/night/variants
+python research/night/run_variants.py runs/night/variants
 """
 
 from __future__ import annotations
@@ -27,8 +27,14 @@ def main(root: Path) -> None:
         shutil.copytree(root / name, run / "task")
         env = {**os.environ, "AGENT_TIME_BUDGET_SEC": "60", "AGENT_RUN_DIR": str(run), "LLM_MOCK": "1"}
         t0 = time.time()
-        p = subprocess.run([sys.executable, str(ROOT / "solution.py"), str(run / "task" / "task.md")], env=env,
-                           cwd=run, capture_output=True, text=True, timeout=300)
+        p = subprocess.run(
+            [sys.executable, str(ROOT / "solution.py"), str(run / "task" / "task.md")],
+            env=env,
+            cwd=run,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
         sec = round(time.time() - t0)
         sub = run / "task" / "submission.csv"
         ans = pd.read_csv(root / "_answers" / f"{name}.csv")
@@ -40,7 +46,9 @@ def main(root: Path) -> None:
             ok = list(s.columns) == ["id", e["target"]] and len(s) == len(ans)
             res["format_ok"] = ok
             if ok:
-                mae = float(np.mean(np.abs(pd.to_numeric(s[e["target"]], errors="coerce") - ans[e["target"]].to_numpy())))
+                mae = float(
+                    np.mean(np.abs(pd.to_numeric(s[e["target"]], errors="coerce") - ans[e["target"]].to_numpy()))
+                )
                 res["mae"] = round(mae, 4)
                 res["const0_mae"] = round(float(np.mean(np.abs(ans[e["target"]]))), 4)
         log = run / "agent.log"

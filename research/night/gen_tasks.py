@@ -1,3 +1,4 @@
+# ruff: noqa: UP031
 """Генератор «чужих» синтетических задач для ночного аудита (фаза 3).
 
     uv run python research/night/gen_tasks.py runs/night/tasks

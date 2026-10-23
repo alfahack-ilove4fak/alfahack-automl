@@ -44,8 +44,14 @@ def main() -> None:
                 resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
         t0 = time.time()
-        p = subprocess.Popen([sys.executable, str(ROOT / "solution.py"), str(run / "task" / "task.md")], env=env, cwd=run,
-                             stdout=(run / "out.txt").open("w"), stderr=subprocess.STDOUT, preexec_fn=preexec)
+        p = subprocess.Popen(
+            [sys.executable, str(ROOT / "solution.py"), str(run / "task" / "task.md")],
+            env=env,
+            cwd=run,
+            stdout=(run / "out.txt").open("w"),
+            stderr=subprocess.STDOUT,
+            preexec_fn=preexec,
+        )
         try:
             p.wait(timeout=budget + 120)
             hung = False
