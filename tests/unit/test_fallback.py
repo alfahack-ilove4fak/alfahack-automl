@@ -41,11 +41,12 @@ BASE = [40.0, 41.0, 42.0, 43.0, 44.0]
 
 def test_models_and_optuna_keep_best_preprocessing(spec):
     best = (
-        hyp("best", model="lightgbm", log_target=True, _best_iteration=120, validation="time:Year"),
+        hyp("best", model="lightgbm", log_target=True, _best_iteration=120, validation="kfold"),
         result("b", BASE),
     )
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
-    models = [h.params["model"] for h in hyps if "optuna" not in h.params]
+    assert hyps[0].params == {"log_target": True, "ensemble": ["lightgbm", "xgboost"]}  # #236: ансамбль первым
+    models = [h.params["model"] for h in hyps[1:] if "optuna" not in h.params]
     assert models == ["xgboost", "catboost", "hist_gb"]
     # предобработка лучшего сохраняется, служебные ключи и схема — нет (схему добавит цикл)
     assert all(h.params.get("log_target") is True for h in hyps)
@@ -70,7 +71,7 @@ def test_optuna_for_best_model_then_lightgbm(spec):
     optuna = [h.params for h in hyps if "optuna" in h.params]
     assert [p["model"] for p in optuna] == ["catboost", "lightgbm"]
     assert optuna[0]["model_params"] == {"depth": 8} and "model_params" not in optuna[1]
-    assert "catboost" not in [h.params["model"] for h in hyps if "optuna" not in h.params]
+    assert "catboost" not in [h.params.get("model") for h in hyps if "optuna" not in h.params]
 
 
 def test_history_repeats_are_skipped(spec):
@@ -100,7 +101,7 @@ def test_accepted_optuna_not_tuned_again(spec):
     best = (tuned, result("fb-x", [30.0] * 5))
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
     assert not any(h.params.get("optuna") and h.params["model"] == "lightgbm" for h in hyps)
-    assert all("optuna" not in h.params for h in hyps if h.params["model"] != "lightgbm")
+    assert all("optuna" not in h.params for h in hyps if h.params.get("model") != "lightgbm")
 
 
 def test_near_misses_combined_on_best(spec):
@@ -160,11 +161,47 @@ def test_loop_uses_fallback_instead_of_exit(spec, monkeypatch):
     monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: [])
     reflected = []
     monkeypatch.setattr(loop, "reflect", lambda *a, **kw: reflected.append(a))
-    base = (hyp("baseline", validation="time:Year"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
+    base = (hyp("baseline", validation="kfold"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
     profile = DataProfile(n_train=500, n_test=200, numeric_features=["a"], categorical_features=[])
     loop.run_autoresearch(spec, profile, None, RunBudget(total_seconds=3600), [base], base, lambda h, r: None, llm=None)
-    assert {h.params["model"] for h in ran} >= {"xgboost", "catboost", "hist_gb"}
+    assert {h.params.get("model") for h in ran} >= {"xgboost", "catboost", "hist_gb"}
+    assert any(h.params.get("ensemble") for h in ran)
     assert any("optuna" in h.params for h in ran)
-    assert all(h.params["validation"] == "time:Year" for h in ran)  # в схеме прогона, как все гипотезы
+    assert all(h.params["validation"] == "kfold" for h in ran)  # в схеме прогона, как все гипотезы
     assert len({h.id for h in ran}) == len(ran)  # без повторов
     assert reflected == []  # пачки запасных направлений придумала не LLM — рефлексию не просим
+
+
+BEST_RES = result("b", BASE)
+BUDGET = RunBudget(total_seconds=3600)
+
+
+def test_ensemble_not_repeated_when_best_is_ensemble(spec):
+    best = (hyp("best", ensemble=["xgboost", "lightgbm"], log_target=True), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert not any(h.params.get("ensemble") for h in hyps)
+    # остальные направления не наследуют ensemble от лучшего (optuna + ensemble ml/ не поддерживает)
+    assert [h.params.get("model") for h in hyps if "optuna" not in h.params][:3] == ["xgboost", "catboost", "hist_gb"]
+    assert all(h.params.get("log_target") is True for h in hyps)
+    # участники-словари (формат ml/experiment.py) — тот же ансамбль; другой состав — не повтор
+    as_dicts = (hyp("best", ensemble=[{"model": "xgboost", "model_params": {"max_depth": 4}}, "LightGBM"]), BEST_RES)
+    assert not any(h.params.get("ensemble") for h in fallback_hypotheses(spec, [as_dicts], as_dicts, BUDGET))
+    other = (hyp("best", ensemble=["lightgbm", "catboost"]), BEST_RES)
+    assert fallback_hypotheses(spec, [other], other, BUDGET)[0].params["ensemble"] == ["lightgbm", "xgboost"]
+
+
+@pytest.mark.parametrize("scheme", ["time:Year_Factor", "group:duplicates"])
+def test_no_optuna_in_time_and_group_schemes(spec, scheme):
+    """#236: на public/regression честно Optuna 58.3 (time) против бейзлайна 50.4 — в таких схемах не запускаем."""
+    best = (hyp("baseline", validation=scheme), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert hyps and not any("optuna" in h.params for h in hyps)
+    assert hyps[0].params.get("ensemble") == ["lightgbm", "xgboost"]
+
+
+@pytest.mark.parametrize("scheme", [None, "kfold", "stratified"])
+def test_optuna_kept_in_ordinary_cv(spec, scheme):
+    params = {"validation": scheme} if scheme else {}
+    best = (hyp("baseline", **params), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert any("optuna" in h.params for h in hyps)

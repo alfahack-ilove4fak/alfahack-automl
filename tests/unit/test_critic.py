@@ -103,6 +103,13 @@ def test_slowdown_rules():
     assert estimated_seconds(lgbm(learning_rate=0.0125), 100) == pytest.approx(100 * 2.0 * TIME_SAFETY)
 
 
+def test_ensemble_costs_sum_of_members():
+    # #236: ансамбль lightgbm + xgboost стоит ≈ двух моделей, а не одной LightGBM
+    assert slowdown(hyp({"ensemble": ["lightgbm", "xgboost"]})) == pytest.approx(1.0 + 4.0)
+    assert slowdown(hyp({"ensemble": [{"model": "catboost"}, "lightgbm"], "n_folds": 10})) == pytest.approx(18.0)
+    assert slowdown(hyp({"ensemble": ["catboost"] * 4})) == MAX_SLOWDOWN
+
+
 def run_loop(spec, hyps, seconds_left, monkeypatch):
     ran = []
 

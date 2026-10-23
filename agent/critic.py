@@ -67,7 +67,11 @@ def slowdown(hyp: Hypothesis) -> float:
         return 1.0
     model = _model(hyp)
     factor = MODEL_SLOWDOWN.get(model, UNKNOWN_MODEL_SLOWDOWN)
-    if model == "lightgbm":  # learning_rate и num_leaves откалиброваны только для LightGBM
+    members = hyp.params.get("ensemble")
+    if isinstance(members, list) and members:  # ансамбль обучает всех участников по очереди (#236)
+        names = [str((m.get("model") if isinstance(m, dict) else m) or "lightgbm").lower() for m in members]
+        factor = sum(MODEL_SLOWDOWN.get(name, UNKNOWN_MODEL_SLOWDOWN) for name in names)
+    elif model == "lightgbm":  # learning_rate и num_leaves откалиброваны только для LightGBM
         factor *= lightgbm_slowdown(lr, leaves, BASE_PARAMS["learning_rate"], BASE_PARAMS["num_leaves"])
     factor *= max(1.0, folds / DEFAULT_FOLDS)
     return min(max(factor, 1.0), MAX_SLOWDOWN)

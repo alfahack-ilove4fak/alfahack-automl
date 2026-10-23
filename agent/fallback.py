@@ -2,9 +2,11 @@
 
 Без них агент выходил из цикла через 4–8 минут из 180: «Гипотезы закончились». Направления — по убыванию пользы,
 все строятся от текущего лучшего (его предобработка сохраняется) и работают без LLM:
-  1. другие модели из ml/ (xgboost, catboost, hist_gb) — с предобработкой лучшего;
-  2. Optuna (скрытый ключ params.optuna, ml/tuning.py) на схеме валидации прогона, с лимитом по остатку бюджета;
-  3. комбинации «почти прошедших»: лучше текущего лучшего на ≥ NEAR_MIN_WINS фолдах, но правило принятия
+  1. ансамбль lightgbm + xgboost (params.ensemble, ml/experiment.py) — с предобработкой лучшего (#236);
+  2. другие модели из ml/ (xgboost, catboost, hist_gb) — с предобработкой лучшего;
+  3. Optuna (скрытый ключ params.optuna, ml/tuning.py) на схеме валидации прогона, с лимитом по остатку бюджета.
+     В схемах time: и group: не запускаем: на public/regression честно она хуже бейзлайна (#236);
+  4. комбинации «почти прошедших»: лучше текущего лучшего на ≥ NEAR_MIN_WINS фолдах, но правило принятия
      их не взяло (t < 2) — накладываем на лучшего по одной и попарно (#87).
 Порог принятия не меняется: каждая запасная гипотеза проходит тот же accept() с t ≥ 2.
 id зависит от params, поэтому после нового лучшего направления строятся заново, а повторы истории отсекаются.
@@ -18,16 +20,21 @@ import os
 from itertools import combinations
 
 from agent.acceptance import fold_gains
-from agent.hypotheses import DEFAULT_MODEL, params_key
+from agent.hypotheses import DEFAULT_MODEL, params_key, run_scheme
 from interfaces.schemas import ExperimentResult, ExperimentStatus, Hypothesis, HypothesisKind, RunBudget, TaskSpec
 
+FALLBACK_ENSEMBLE = (
+    "lightgbm",
+    "xgboost",
+)  # честно лучше бейзлайна на 9 из 12 задач стенда, + extra_trees — потери (#236)
 FALLBACK_MODELS = ("xgboost", "catboost", "hist_gb")
+NO_OPTUNA_SCHEMES = ("time:", "group:")  # схемы, где Optuna переобучается под фолды (#236)
 NEAR_MIN_WINS = 3  # «почти прошла»: лучше лучшего хотя бы на 3 фолдах из 5
 MAX_NEAR = 3  # сколько почти прошедших комбинируем: 3 по одной + 3 пары
 OPTUNA_MAX_SECONDS = 600.0  # как DEFAULTS["timeout"] в ml/tuning.py
 OPTUNA_BUDGET_SHARE = 0.3  # как BUDGET_SHARE в ml/tuning.py: подбор не съедает весь остаток
 OPTUNA_MIN_SECONDS = 30.0  # меньше — подбор не успеет ни одного осмысленного испытания
-OWN_KEYS = ("model", "model_params", "optuna")  # то, что запасная гипотеза задаёт сама
+OWN_KEYS = ("model", "model_params", "optuna", "ensemble")  # то, что запасная гипотеза задаёт сама
 FALLBACK_ENV = "AGENT_FALLBACK"  # "0" — без запасных направлений
 PREFIX = "fb-"  # id запасных гипотез
 
@@ -80,6 +87,14 @@ def _model(params: dict) -> str:
     return str(params.get("model") or DEFAULT_MODEL).lower()
 
 
+def _ensemble_models(params: dict) -> list[str]:
+    """Модели ансамбля по именам (участник — строка или {"model": …, "model_params": …}), по алфавиту."""
+    members = params.get("ensemble")
+    if not isinstance(members, list):
+        return []
+    return sorted(str((m.get("model") if isinstance(m, dict) else m) or DEFAULT_MODEL).lower() for m in members)
+
+
 def near_misses(
     history: list[tuple[Hypothesis, ExperimentResult]], best: tuple[Hypothesis, ExperimentResult], gib: bool
 ) -> list[Hypothesis]:
@@ -113,6 +128,17 @@ def fallback_hypotheses(
     common = {k: v for k, v in base.items() if k not in OWN_KEYS}  # предобработка лучшего: признаки, веса, log
     out: list[Hypothesis] = []
 
+    if _ensemble_models(base) != sorted(FALLBACK_ENSEMBLE):
+        out.append(
+            _hyp(
+                HypothesisKind.MODEL,
+                f"ансамбль {' + '.join(FALLBACK_ENSEMBLE)} с предобработкой лучшего",
+                "среднее двух семейств бустинга устойчивее одной модели: на стенде лучше бейзлайна на 9 из 12 (#236)",
+                {**common, "ensemble": list(FALLBACK_ENSEMBLE)},
+                best_hyp,
+            )
+        )
+
     for model in FALLBACK_MODELS:
         if model != _model(base):
             out.append(
@@ -126,7 +152,7 @@ def fallback_hypotheses(
             )
 
     timeout = min(OPTUNA_MAX_SECONDS, budget.seconds_left() * OPTUNA_BUDGET_SHARE)
-    if timeout >= OPTUNA_MIN_SECONDS:
+    if timeout >= OPTUNA_MIN_SECONDS and not (run_scheme(history) or "").startswith(NO_OPTUNA_SCHEMES):
         for model in dict.fromkeys((_model(base), DEFAULT_MODEL)):  # лучшая модель, затем LightGBM
             params = {**common, "model": model, "optuna": {"timeout": round(timeout)}}
             if model == _model(base) and base.get("model_params"):
