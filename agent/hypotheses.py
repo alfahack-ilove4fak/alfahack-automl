@@ -15,6 +15,7 @@ import yaml
 
 from agent.llm_client import LLMClient
 from agent.memory import ResearchMemory
+from evaluation.metrics import METRICS
 from interfaces.schemas import (
     DataProfile,
     ExperimentResult,
@@ -28,14 +29,50 @@ from interfaces.schemas import (
 PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "research" / "playbook.yaml"
 
 
-def baseline_hypothesis() -> Hypothesis:
+# Метрики по меткам, которым помогает подбор множителей классов (proba_weights, #191): чувствительные к балансу
+# классов. Accuracy — нет: её максимизирует argmax откалиброванных вероятностей, множители на OOF добавляют только шум
+# (харнесс 23.10: digits accuracy 0.9873 → 0.9841)
+PROBA_WEIGHTS_SKIP = {"accuracy"}
+
+
+def wants_proba_weights(spec: TaskSpec | None) -> bool:
+    """Подбирать ли множители классов в этой задаче: классификация + метрика по меткам, кроме accuracy."""
+    if spec is None or spec.task_type == TaskType.REGRESSION or spec.metric.name in PROBA_WEIGHTS_SKIP:
+        return False
+    try:
+        metric = METRICS[spec.metric.name]  # не .get(): параметрические (fbeta@2, pinball@0.9) собирает __missing__
+    except KeyError:
+        return False
+    return metric.prediction == "label"
+
+
+def baseline_hypothesis(spec: TaskSpec | None = None) -> Hypothesis:
+    """Бейзлайн — LightGBM по умолчанию; для метрик по меткам — с подбором множителей классов (#191).
+
+    Без подбора ответ — argmax, то есть порог 0.5: при редком классе это лотерея (payments: F1 0.09 против 0.34).
+    """
+    params = {"model": "lightgbm"}
+    if wants_proba_weights(spec):
+        params["proba_weights"] = True
     return Hypothesis(
         id="baseline",
         kind=HypothesisKind.BASELINE,
         title="LightGBM с параметрами по умолчанию",
-        params={"model": "lightgbm"},
+        params=params,
         source="baseline",
     )
+
+
+def with_task_defaults(params: dict, spec: TaskSpec) -> dict:
+    """params гипотезы + то, что у бейзлайна включено для этой задачи (#191).
+
+    Бейзлайн подбирает множители классов, если метрика по меткам (wants_proba_weights). Гипотезы playbook и LLM —
+    отдельные наборы params, не наследуют их от лучшего; без этого каждая сравнивалась бы с бейзлайном без множителей
+    и проигрывала бы заведомо. Явное значение в гипотезе (proba_weights: false) не трогаем.
+    """
+    if "proba_weights" in params or not wants_proba_weights(spec):
+        return params
+    return {**params, "proba_weights": True}
 
 
 def load_playbook(path: Path = PLAYBOOK_PATH) -> list[dict]:
@@ -152,13 +189,14 @@ def propose_hypotheses(
         from agent.llm_hypotheses import llm_hypotheses  # здесь: llm_hypotheses сам импортирует этот модуль
 
         out = llm_hypotheses(spec, profile, history, k, llm, memory, budget)
+        out = [h.model_copy(update={"params": with_task_defaults(h.params, spec)}) for h in out]
     tried = {h.id for h, _ in history} | {h.id for h in out}
     scheme = run_scheme(history)
     seen_params = {params_key(h.params, scheme) for h, _ in history} | {params_key(h.params, scheme) for h in out}
     for item in load_playbook():
         if len(out) >= k:
             break
-        params = item.get("params", {})
+        params = with_task_defaults(item.get("params", {}), spec)
         if item["id"] in tried or params_key(params, scheme) in seen_params or not _applies(item, spec, profile):
             continue
         out.append(

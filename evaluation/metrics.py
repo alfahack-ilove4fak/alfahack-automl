@@ -12,6 +12,8 @@
 
 Параметрические метрики: «pinball@0.9» — pinball (квантильная) потеря для квантиля 0.9. В реестре только
 «pinball» (квантиль 0.5), остальные уровни METRICS собирает по имени; find_metric_in_text берёт уровень из текста.
+То же для F-beta: «fbeta@2» — F2 (полнота важнее точности), «fbeta@0.5»; в реестре его нет (F1 — это «f1»),
+find_metric_in_text находит «F2 score», «F-beta with beta = 2», «F0.5-мера».
 
 Ранжирование (ndcg, map) — приближение: в метрику приходят только y и прогноз, без групп (query_id), поэтому
 считаем по всей таблице как по одному запросу. Честное «NDCG@10 внутри запроса» требует групп в контракте (#186).
@@ -150,18 +152,30 @@ def _pinball_metric(alpha: float) -> Metric:
     return Metric(f"pinball@{alpha:g}", partial(_pinball, alpha=alpha), False, "value")
 
 
+def _fbeta(y, p, beta: float):
+    """F-beta; бинарная — по положительному классу (код 1), если классов больше двух — macro."""
+    average = "binary" if len(np.union1d(np.unique(y), np.unique(p))) <= 2 else "macro"
+    return float(skm.fbeta_score(y, p, beta=beta, average=average, zero_division=0))
+
+
+def _fbeta_metric(beta: float) -> Metric:
+    return Metric(f"fbeta@{beta:g}", partial(_fbeta, beta=beta), True, "label")
+
+
 class _Registry(dict):
-    """Реестр метрик; имена вида «pinball@0.9» собираются по запросу и в реестр не записываются."""
+    """Реестр метрик; имена вида «pinball@0.9», «fbeta@2» собираются по запросу и в реестр не записываются."""
 
     def __missing__(self, name: str) -> Metric:
         base, sep, param = name.partition("@")
-        if sep and base == "pinball":
+        if sep and base in ("pinball", "fbeta"):
             try:
-                alpha = float(param)
+                value = float(param)
             except ValueError:
                 raise KeyError(name) from None
-            if 0 < alpha < 1:
-                return _pinball_metric(alpha)
+            if base == "pinball" and 0 < value < 1:
+                return _pinball_metric(value)
+            if base == "fbeta" and 0 < value <= 100 and value != 1:
+                return _fbeta_metric(value)
         raise KeyError(name)
 
 
@@ -370,7 +384,17 @@ METRICS: dict[str, Metric] = _Registry(
             lambda y, p: float(skm.cohen_kappa_score(y, p, weights="quadratic")),
             True,
             "label",
-            ("quadratic weighted kappa", "qwk", "cohen", "квадратичн* взвешенн* капп*"),
+            (
+                "quadratic weighted kappa",
+                "quadratically weighted kappa",
+                "quadratic kappa",
+                "qwk",
+                "cohen",
+                "квадратичн* взвешенн* капп*",
+                "квадратичн* капп*",
+                "капп* коэн*",
+                "коэн* капп*",
+            ),
         ),
         # --- классификация по вероятностям
         Metric(
@@ -532,15 +556,48 @@ def find_metric_in_text(text: str) -> str | None:
     for marker in MARKERS:
         pos = low.find(marker)
         if pos != -1:
-            found = _first_metric(low, pos, pos + 200)
+            found = _first_metric(low, pos, pos + 200, bare_fbeta=True)
             if found:
                 break
     found = found or _first_metric(low, 0, len(low))
+    if found == "mae" and _PERCENT_OF_ACTUAL.search(low):
+        found = "mape"  # «среднее абсолютное отклонение … в процентах от факта» — это MAPE, а не MAE
     if found == "pinball":
         level = _quantile_level(low)
         if level is not None and level != 0.5:
             return f"pinball@{level:g}"
     return found
+
+
+# MAE, описанная словами «…отклонение… в процентах от факта» (или percent of actual), — на самом деле MAPE
+_PERCENT_OF_ACTUAL = re.compile(
+    r"(?:средн\w*\s+абсолютн\w*\s+(?:отклонени|ошибк)\w*|mean\s+absolute\s+(?:error|deviation))"
+    r"[^.!?]{0,120}?(?:в\s+процент\w*\s+от\s+(?:факт|истин|фактическ|реальн|значени)|(?:percent|%)\s+of\s+(?:the\s+)?(?:actual|true))"
+)
+
+# F-beta (beta ≠ 1: F1 уже в реестре). Уверенные формы работают везде, голое «F2» — только рядом с «метрика/metric»
+# (иначе анонимные признаки f1, f2, f3 в описании данных приняли бы за метрику).
+_BETA_NUMBER = r"(\d+(?:[.,]\d+)?)"
+_FBETA_EXPLICIT = re.compile(
+    r"\b(?:f[\s_-]?(?:beta|β|мер\w*)|fβ)\b[^.\n]{0,40}?(?:beta|β|бета)\s*(?:=|is|равн\w*)?\s*" + _BETA_NUMBER
+)
+_FBETA_WITH_WORD = re.compile(r"\bf[\s_-]?" + _BETA_NUMBER + r"[\s-]*(?:score|measure|мер\w*|метрик\w*)")
+_FBETA_BARE = re.compile(r"\bf(2|0[.,]5)(?![\d.,]?\d)")
+
+
+def _fbeta_matches(text: str, start: int, end: int, bare: bool):
+    """(начало, конец, beta) всех F-beta с beta ≠ 1 в text[start:end] по позиции."""
+    patterns = [_FBETA_EXPLICIT, _FBETA_WITH_WORD, *([_FBETA_BARE] if bare else [])]
+    found = []
+    for pattern in patterns:
+        for match in pattern.finditer(text, start, end):
+            try:
+                beta = float(match.group(1).replace(",", "."))
+            except ValueError:
+                continue
+            if 0 < beta <= 100 and beta != 1:
+                found.append((match.start(), match.end(), beta))
+    return sorted(found)
 
 
 _QUANTILE_WORD = re.compile(r"quantile|percentile|квантил|перцентил|alpha|α|tau|τ")
@@ -561,9 +618,13 @@ def _quantile_level(text: str) -> float | None:
     return None
 
 
-def _first_metric(text: str, start: int, end: int) -> str | None:
+def _first_metric(text: str, start: int, end: int, bare_fbeta: bool = False) -> str | None:
     """Первая (по позиции) метрика без отрицания в text[start:end]; контекст отрицаний — весь text."""
     best: tuple[int, str] | None = None
+    for pos, stop, beta in _fbeta_matches(text, start, end, bare_fbeta):
+        if not _is_negated(text, pos, stop):
+            best = (pos, f"fbeta@{beta:g}")
+            break
     for name in SEARCH_ORDER:
         for alias in METRICS[name].aliases:
             for pos, stop in _find_words(text, alias, start, end):
