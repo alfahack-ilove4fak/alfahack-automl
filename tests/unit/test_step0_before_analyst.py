@@ -129,21 +129,21 @@ def test_ambiguous_target_falls_back_to_analyst_parse(tmp_path, monkeypatch):
     assert (tmp_path / "submission.csv").exists()
 
 
-def test_analyst_changes_id_step0_is_rewritten(tmp_path, monkeypatch):
-    """Аналитик уточнил id (колонка row_id вместо угаданной первой) — шаг 0 перезаписан по новому разбору."""
-    task_md = make_task(tmp_path, test_cols=("a", "b", "row_id"))
+def test_analyst_changes_metric_step0_is_rewritten(tmp_path, monkeypatch):
+    """Аналитик уточнил метрику (в тексте её нет — эвристика взяла rmse) — шаг 0 перезаписан по новому разбору."""
+    task_md = make_task(tmp_path)
     keeper, spec, train, test = ready_keeper(task_md)
-    assert spec.id_column == "a"  # без LLM угадана первая колонка test
-    fake = FakeLLM({"target": "y", "id_column": "row_id"})
+    assert spec.metric.name == "rmse"  # без LLM метрика по умолчанию для регрессии
+    fake = FakeLLM({"target": "y", "id_column": "id", "metric": "mae"})
     monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
 
     new_spec, new_train, new_test = refine_with_analyst(task_md, spec, train, test, keeper, log)
 
     assert fake.requests == 1
-    assert new_spec.id_column == "row_id"
+    assert new_spec.metric.name == "mae"
     assert keeper.spec is new_spec and keeper.test is new_test
     answer = pd.read_csv(keeper.path)
-    assert list(answer.columns) == ["row_id", "y"]
+    assert list(answer.columns) == ["id", "y"]
     assert len(answer) == len(new_test)
 
 
@@ -175,9 +175,9 @@ def test_second_parse_failure_keeps_step0(tmp_path, monkeypatch):
 
 def test_invalid_answer_by_analyst_spec_is_rolled_back(tmp_path, monkeypatch):
     """Ответ по разбору аналитика не прошёл проверку — возвращаем прежний spec и тесты keeper."""
-    task_md = make_task(tmp_path, test_cols=("a", "b", "row_id"))
+    task_md = make_task(tmp_path)
     keeper, spec, train, test = ready_keeper(task_md)
-    fake = FakeLLM({"target": "y", "id_column": "row_id"})
+    fake = FakeLLM({"target": "y", "id_column": "id", "metric": "mae"})
     monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
     monkeypatch.setattr(keeper, "write", lambda answer: ["проверка не прошла"])
 
