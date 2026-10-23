@@ -39,27 +39,39 @@ def spec():
 BASE = [40.0, 41.0, 42.0, 43.0, 44.0]
 
 
+def _short(h):
+    """Коротко, что за направление: модель, ансамбль или Optuna."""
+    if "ensemble" in h.params:
+        return "ensemble:" + "+".join(m if isinstance(m, str) else m["model"] for m in h.params["ensemble"])
+    return ("optuna:" if "optuna" in h.params else "") + h.params["model"]
+
+
 def test_models_and_optuna_keep_best_preprocessing(spec):
     best = (
         hyp("best", model="lightgbm", log_target=True, _best_iteration=120, validation="time:Year"),
         result("b", BASE),
     )
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
-    models = [h.params["model"] for h in hyps if "optuna" not in h.params]
-    assert models == ["xgboost", "catboost", "hist_gb"]
+    # порядок danil по стенду (#200): xgboost → ансамбль из двух → catboost → Optuna → ансамбль из трёх → hist_gb
+    assert [_short(h) for h in hyps[:5]] == [
+        "xgboost",
+        "ensemble:lightgbm+xgboost",
+        "catboost",
+        "optuna:lightgbm",
+        "ensemble:lightgbm+xgboost+catboost",
+    ]
+    assert _short(hyps[5]) == "hist_gb"
     # предобработка лучшего сохраняется, служебные ключи и схема — нет (схему добавит цикл)
     assert all(h.params.get("log_target") is True for h in hyps)
     assert not any("_best_iteration" in h.params or "validation" in h.params for h in hyps)
-    optuna = [h for h in hyps if "optuna" in h.params]
-    assert [h.params["model"] for h in optuna] == ["lightgbm"]
-    assert optuna[0].params["optuna"]["timeout"] == 600
+    assert hyps[3].params["optuna"] == {"timeout": 600}
     assert all(h.id.startswith("fb-") and h.parent_id == "best" for h in hyps)
 
 
 def test_optuna_limited_by_budget_and_skipped_when_no_time(spec):
     best = (hyp("best"), result("b", BASE))
     short = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=200, safety_seconds=0))
-    assert [h.params["optuna"]["timeout"] for h in short if "optuna" in h.params] == [60]  # 0.3 остатка
+    assert {h.params["optuna"]["timeout"] for h in short if "optuna" in h.params} == {60}  # 0.3 остатка
     none = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=60, safety_seconds=0))
     assert not any("optuna" in h.params for h in none)
 
@@ -67,10 +79,15 @@ def test_optuna_limited_by_budget_and_skipped_when_no_time(spec):
 def test_optuna_for_best_model_then_lightgbm(spec):
     best = (hyp("best", model="catboost", model_params={"depth": 8}), result("b", BASE))
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
-    optuna = [h.params for h in hyps if "optuna" in h.params]
-    assert [p["model"] for p in optuna] == ["catboost", "lightgbm"]
+    optuna = [h.params for h in hyps if "optuna" in h.params and "trials" not in h.params["optuna"]]
+    assert [p["model"] for p in optuna] == ["catboost", "lightgbm", "xgboost"]
     assert optuna[0]["model_params"] == {"depth": 8} and "model_params" not in optuna[1]
-    assert "catboost" not in [h.params["model"] for h in hyps if "optuna" not in h.params]
+    assert "catboost" not in [h.params.get("model") for h in hyps if "optuna" not in h.params]
+    # ансамбль начинается с лучшей модели и её параметров
+    assert next(h for h in hyps if "ensemble" in h.params).params["ensemble"] == [
+        {"model": "catboost", "model_params": {"depth": 8}},
+        "lightgbm",
+    ]
 
 
 def test_history_repeats_are_skipped(spec):
@@ -99,8 +116,13 @@ def test_accepted_optuna_not_tuned_again(spec):
     tuned = hyp("fb-x", model="lightgbm", optuna={"timeout": 600}, model_params={"num_leaves": 17}, _optuna_best={})
     best = (tuned, result("fb-x", [30.0] * 5))
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
-    assert not any(h.params.get("optuna") and h.params["model"] == "lightgbm" for h in hyps)
-    assert all("optuna" not in h.params for h in hyps if h.params["model"] != "lightgbm")
+    same = [h.params["optuna"] for h in hyps if h.params.get("optuna") and h.params["model"] == "lightgbm"]
+    assert same == [{"timeout": 600, "trials": t} for t in (60, 120, 240)]  # только подбор глубже
+    seeds = [h for h in hyps if h.title.startswith("запасное: усреднение")]
+    assert seeds[0].params["ensemble"][0] == {
+        "model": "lightgbm",
+        "model_params": {"num_leaves": 17, "random_state": 42},
+    }
 
 
 def test_near_misses_combined_on_best(spec):
@@ -163,8 +185,90 @@ def test_loop_uses_fallback_instead_of_exit(spec, monkeypatch):
     base = (hyp("baseline", validation="time:Year"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
     profile = DataProfile(n_train=500, n_test=200, numeric_features=["a"], categorical_features=[])
     loop.run_autoresearch(spec, profile, None, RunBudget(total_seconds=3600), [base], base, lambda h, r: None, llm=None)
-    assert {h.params["model"] for h in ran} >= {"xgboost", "catboost", "hist_gb"}
+    assert {h.params.get("model") for h in ran} >= {"xgboost", "catboost", "hist_gb"}
+    assert any("ensemble" in h.params for h in ran)
     assert any("optuna" in h.params for h in ran)
     assert all(h.params["validation"] == "time:Year" for h in ran)  # в схеме прогона, как все гипотезы
     assert len({h.id for h in ran}) == len(ran)  # без повторов
     assert reflected == []  # пачки запасных направлений придумала не LLM — рефлексию не просим
+
+
+def test_playbook_on_best_keeps_accepted_preprocessing(spec):
+    """Идеи playbook поверх лучшего: своя модель — слияние с его params, чужая — только его предобработка."""
+    best = (hyp("best", model="lightgbm", log_target=True, model_params={"learning_rate": 0.02}), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    on_best = {h.title.removeprefix("запасное: ").split()[0]: h.params for h in hyps if "поверх лучшего" in h.title}
+    assert on_best["freq_encoding"] == {
+        "model": "lightgbm",
+        "log_target": True,
+        "model_params": {"learning_rate": 0.02},
+        "feature_ops": ["freq_encoding"],
+    }
+    # чужие model_params на другую модель не тянем (catboost поверх лучшего совпал с направлением «модели» — повтор)
+    assert "catboost" not in on_best
+    assert all("model_params" not in p for p in on_best.values() if p.get("model") != "lightgbm")
+    assert "balanced_classes" not in on_best  # классификационные гипотезы на регрессии не берём
+
+
+def test_tuned_best_overlays_without_new_tuning(spec):
+    """Лучший после Optuna: наложения берут подобранные model_params, но не запускают подбор снова."""
+    tuned = hyp("fb-x", model="lightgbm", optuna={"timeout": 600}, model_params={"num_leaves": 17}, _optuna_best={})
+    best = (tuned, result("fb-x", [30.0] * 5))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    overlays = [h.params for h in hyps if "поверх лучшего" in h.title]
+    assert overlays and not any("optuna" in p for p in overlays)
+    assert {"model": "lightgbm", "model_params": {"num_leaves": 17}, "feature_ops": ["pair_ops"]} in overlays
+
+
+@pytest.mark.parametrize("model", ["linear", "hist_gb"])
+def test_no_seed_bagging_for_deterministic_models(spec, model):
+    best = (hyp("best", model=model), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert not any("усреднение" in h.title for h in hyps)
+
+
+def test_ensemble_best_gets_no_model_directions(spec):
+    """Лучший — ансамбль: модели «с предобработкой лучшего» ещё имеют смысл, ансамбли из ансамбля и seed — нет."""
+    best = (hyp("best", ensemble=["lightgbm", "xgboost"], log_target=True), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert not any("ensemble" in h.params or "усреднение" in h.title for h in hyps)
+    assert all("ensemble" not in h.params for h in hyps)
+    assert {"model": "lightgbm", "log_target": True} in [h.params for h in hyps]
+
+
+def test_best_code_carried_to_fallback(spec):
+    best_hyp = Hypothesis(
+        id="feat", kind=HypothesisKind.FEATURES, title="f", code="def add_features(df): return df", source="llm"
+    )
+    best = (best_hyp, result("feat", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert hyps and all(h.code == best_hyp.code for h in hyps)
+
+
+def test_ensemble_cost_is_sum_of_members():
+    assert estimated_seconds(hyp("e", ensemble=["lightgbm", "xgboost"]), 10) == pytest.approx(10 * (1 + 4) * 1.5)
+    slow = {"model": "lightgbm", "model_params": {"learning_rate": 0.0125}}  # ×2 по калибровке lr
+    assert estimated_seconds(hyp("e", ensemble=[slow, "lightgbm"]), 10) == pytest.approx(10 * 3 * 1.5)
+
+
+def test_loop_rebuilds_fallback_from_new_best(spec, monkeypatch):
+    """Запасные берутся порциями; после принятой запасной следующая порция строится от нового лучшего."""
+    ran = []
+
+    def fake_experiment(spec, profile, h, train, budget):
+        ran.append(h)
+        if h.params.get("model") == "xgboost" and len(ran) == 1:
+            return result(h.id, [30.0, 31.0, 32.0, 33.0, 34.0])  # xgboost явно лучше — новый лучший
+        return result(h.id, [50.0] * 5)
+
+    monkeypatch.setattr(loop, "run_experiment", fake_experiment)
+    monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: [])
+    base = (hyp("baseline"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
+    profile = DataProfile(n_train=500, n_test=200, numeric_features=["a"], categorical_features=[])
+    best = loop.run_autoresearch(
+        spec, profile, None, RunBudget(total_seconds=3600), [base], base, lambda h, r: None, llm=None
+    )
+    assert best[0].params["model"] == "xgboost"
+    # второй шёл уже от xgboost: ансамбль начинается с него, а не с LightGBM прошлого лучшего
+    assert ran[1].params["ensemble"][0] == "xgboost"
+    assert len(ran) > loop.FALLBACK_CHUNK  # порций было несколько

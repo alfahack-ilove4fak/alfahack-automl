@@ -34,8 +34,14 @@ def _items(raw) -> list:
     return raw if isinstance(raw, list) else []
 
 
-def parse_hypotheses(raw, history: list[tuple[Hypothesis, ExperimentResult]], k: int) -> list[Hypothesis]:
-    """Ответ LLM (уже JSON) → не более k новых гипотез. Мусорные элементы пропускаются по одному."""
+def parse_hypotheses(
+    raw, history: list[tuple[Hypothesis, ExperimentResult]], k: int, rejected: list[str] | None = None
+) -> list[Hypothesis]:
+    """Ответ LLM (уже JSON) → не более k новых гипотез. Мусорные элементы пропускаются по одному.
+
+    rejected — сюда дописываются отброшенные «id: причина» (итог решений LLM в agent.log).
+    """
+    rejected = rejected if rejected is not None else []
     allowed_params = allowed_param_keys()
     seen_ids = {h.id for h, _ in history}
     scheme = run_scheme(history)
@@ -43,21 +49,26 @@ def parse_hypotheses(raw, history: list[tuple[Hypothesis, ExperimentResult]], k:
     out: list[Hypothesis] = []
     for item in _items(raw):
         if not isinstance(item, dict):
+            rejected.append("?: не объект JSON")
             continue
         try:
             hyp = Hypothesis.model_validate({f: item[f] for f in LLM_FIELDS if f in item} | {"source": "llm"})
         except ValidationError as exc:
             log.info("Гипотеза LLM отброшена — не по схеме: %s", exc.errors()[0]["msg"])
+            rejected.append(f"{item.get('id', '?')}: не по схеме")
             continue
         unknown = set(hyp.params) - allowed_params
         if hyp.kind not in ALLOWED_KINDS or unknown:
             log.info("Гипотеза LLM %s отброшена: kind=%s, неизвестные params=%s", hyp.id, hyp.kind.value, unknown)
+            rejected.append(f"{hyp.id}: kind={hyp.kind.value}, неизвестные params={sorted(unknown)}")
             continue
         if not isinstance(hyp.params.get("model_params", {}), dict):
+            rejected.append(f"{hyp.id}: model_params не словарь")
             continue
         key = params_key(hyp.params, scheme)
         if key in seen_params:
             log.info("Гипотеза LLM %s отброшена — повтор уже проверенных params", hyp.id)
+            rejected.append(f"{hyp.id}: повтор проверенных params")
             continue
         hyp_id = re.sub(r"\W+", "_", hyp.id, flags=re.ASCII).strip("_")[:MAX_ID_LEN] or "llm"
         base_id, n = hyp_id, 2
@@ -93,7 +104,10 @@ def llm_hypotheses(
         if raw is None:  # не звали (мало времени), сбой или пустой/невалидный ответ — причина уже в логе клиента
             log.info("LLM гипотез не дала — гипотезы из playbook")
             return []
-        out = parse_hypotheses(raw, history, k)
+        rejected: list[str] = []
+        out = parse_hypotheses(raw, history, k, rejected)
+        if memory is not None:
+            memory.llm_rejected += rejected
     except Exception:  # noqa: BLE001 — сбой LLM-части не должен останавливать цикл
         log.exception("Гипотезы от LLM не получены")
         return []

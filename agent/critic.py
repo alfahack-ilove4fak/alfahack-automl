@@ -57,20 +57,40 @@ def _model(hyp: Hypothesis) -> str:
 
 
 def slowdown(hyp: Hypothesis) -> float:
-    """Во сколько раз эксперимент дольше бейзлайна-LightGBM (без запаса). Не меньше 1: дешевле не считаем."""
-    model_params = hyp.params.get("model_params", {})
+    """Во сколько раз эксперимент дольше бейзлайна-LightGBM (без запаса). Не меньше 1: дешевле не считаем.
+
+    Ансамбль (params.ensemble) обучает каждого участника отдельно — его цена складывается из цен участников.
+    """
     try:
-        lr = float(model_params.get("learning_rate", BASE_PARAMS["learning_rate"]))
-        leaves = float(model_params.get("num_leaves", BASE_PARAMS["num_leaves"]))
         folds = float(hyp.params.get("n_folds", DEFAULT_FOLDS))
     except (TypeError, ValueError):
         return 1.0
-    model = _model(hyp)
-    factor = MODEL_SLOWDOWN.get(model, UNKNOWN_MODEL_SLOWDOWN)
-    if model == "lightgbm":  # learning_rate и num_leaves откалиброваны только для LightGBM
-        factor *= lightgbm_slowdown(lr, leaves, BASE_PARAMS["learning_rate"], BASE_PARAMS["num_leaves"])
+    members = hyp.params.get("ensemble")
+    if isinstance(members, list) and members:
+        factor = sum(_model_slowdown(*_ensemble_member(m)) for m in members)
+    else:
+        factor = _model_slowdown(_model(hyp), hyp.params.get("model_params", {}))
     factor *= max(1.0, folds / DEFAULT_FOLDS)
     return min(max(factor, 1.0), MAX_SLOWDOWN)
+
+
+def _ensemble_member(member) -> tuple[str, dict]:
+    if isinstance(member, dict):
+        return str(member.get("model") or "lightgbm").lower(), member.get("model_params") or {}
+    return str(member).lower(), {}
+
+
+def _model_slowdown(model: str, model_params) -> float:
+    """Замедление одной модели относительно бейзлайна-LightGBM."""
+    factor = MODEL_SLOWDOWN.get(model, UNKNOWN_MODEL_SLOWDOWN)
+    if model == "lightgbm" and isinstance(model_params, dict):  # lr и num_leaves откалиброваны только для LightGBM
+        try:
+            lr = float(model_params.get("learning_rate", BASE_PARAMS["learning_rate"]))
+            leaves = float(model_params.get("num_leaves", BASE_PARAMS["num_leaves"]))
+        except (TypeError, ValueError):
+            return factor
+        factor *= lightgbm_slowdown(lr, leaves, BASE_PARAMS["learning_rate"], BASE_PARAMS["num_leaves"])
+    return factor
 
 
 def lightgbm_slowdown(lr: float, leaves: float, base_lr: float, base_leaves: float) -> float:
