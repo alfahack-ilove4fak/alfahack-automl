@@ -8,8 +8,8 @@ from agent.llm_client import (
     DEFAULT_REASONING_TOKENS,
     MAX_CALL_SECONDS,
     MIN_CALL_SECONDS,
-    STREAM_STALL_SECONDS,
-    TIMEOUTS_TO_DISABLE,
+    TIMEOUT_COOLDOWN_SECONDS,
+    TIMEOUTS_TO_PAUSE,
     LLMClient,
 )
 
@@ -238,11 +238,11 @@ def test_short_time_uses_short_timeout(client):
 
 
 def test_plenty_of_time_still_capped(client):
-    """#239: даже при 3 ч бюджета запрос не ждёт дольше потолка; у потока пауза между кусками — не дольше 30 с."""
+    """#239: даже при 3 ч бюджета запрос не ждёт дольше потолка. Первый кусок потока ждём весь остаток срока:
+    под нагрузкой рассуждающая модель может молчать дольше 30 с (ревью #244)."""
     fake = client._client = FakeOpenAI(["{}"])
     assert client.chat(MESSAGES, seconds_left=10800) == "{}"
-    timeout = fake.options["timeout"]
-    assert timeout.read == STREAM_STALL_SECONDS and timeout.pool == pytest.approx(MAX_CALL_SECONDS, abs=0.5)
+    assert fake.options["timeout"] == pytest.approx(MAX_CALL_SECONDS, abs=0.5)
 
 
 def test_cache_served_even_without_time(client, tmp_path):
@@ -626,16 +626,26 @@ def test_trickle_stream_cut_at_deadline(client, monkeypatch):
     assert client.timeouts == 1 and client.available()
 
 
-def test_llm_disabled_after_timeouts_in_row(client, caplog):
+def test_long_pause_after_timeouts_then_llm_comes_back(client, monkeypatch, caplog):
+    """3 запроса подряд по таймауту — пауза TIMEOUT_COOLDOWN_SECONDS (не обычные 120 с), потом LLM снова пробуем.
+
+    Ревью #244: Qwen общая, перегрузка в начале не должна навсегда лишить задачу LLM.
+    """
     import openai
 
-    timeout = openai.APITimeoutError(request=None)
-    client._client = FakeOpenAI([timeout] * 20)
-    for _ in range(TIMEOUTS_TO_DISABLE):
+    clock = [1000.0]
+    monkeypatch.setattr("agent.llm_client.time.monotonic", lambda: clock[0])
+    # 1 + 3 повтора на запрос: часы стоят, срок не выходит — как таймаут чтения раньше срока
+    client._client = FakeOpenAI([openai.APITimeoutError(request=None)] * 4 * TIMEOUTS_TO_PAUSE + ["{}"])
+    for _ in range(TIMEOUTS_TO_PAUSE):
         client.chat(MESSAGES, max_wait=60)
-    assert not client.available() and "выключена до конца прогона" in caplog.text
-    client._paused_until = 0.0  # пауза после сбоев прошла — но таймауты выключили LLM насовсем
+    assert "не уложились" in caplog.text
+    clock[0] += 130  # обычная пауза после сбоев прошла бы, а за таймауты — длиннее
     assert not client.available()
+    clock[0] += TIMEOUT_COOLDOWN_SECONDS
+    assert client.available()
+    assert client.chat(MESSAGES) == "{}"
+    assert client.timeouts == 0 and client.failures == 0
 
 
 def test_success_resets_timeouts(client):

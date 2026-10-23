@@ -8,8 +8,8 @@
 
   * Запрос знает остаток бюджета (ADR 0008, D3): ждём ответа не дольше LLM_TIME_SHARE оставшегося времени
     и не дольше MAX_CALL_SECONDS на весь запрос с повторами; если это меньше MIN_CALL_SECONDS — не зовём LLM совсем.
-    Срок проверяется и внутри потока (медленная «струйка» не рвётся таймаутом чтения), а после TIMEOUTS_TO_DISABLE
-    запросов подряд, упёршихся в срок, LLM выключается до конца прогона (#239).
+    Срок проверяется и внутри потока (медленная «струйка» не рвётся таймаутом чтения), а после TIMEOUTS_TO_PAUSE
+    запросов подряд, упёршихся в срок, LLM отдыхает TIMEOUT_COOLDOWN_SECONDS и пробует снова (#239).
 
   * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (2–2.5 тыс. токенов
     на промпт гипотез) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
@@ -28,7 +28,8 @@
 LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
 LLM_REASONING_EFFORT (low по умолчанию; пусто — не передавать), LLM_COOLDOWN_SEC (пауза после 3 сбоев, 120 с),
 LLM_STREAM (1 по умолчанию: потоковый ответ — прокси рвёт обычный запрос через ~10 с),
-LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 6000), LLM_MAX_CALL_SEC (потолок на запрос, 90 с).
+LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 6000), LLM_MAX_CALL_SEC (потолок на запрос, 90 с),
+LLM_TIMEOUT_COOLDOWN_SEC (пауза после 3 запросов подряд по таймауту, 600 с).
 """
 
 from __future__ import annotations
@@ -69,10 +70,10 @@ MIN_CALL_SECONDS = 60.0
 # Потолок на весь запрос вместе с повторами (#239): ночной аудит (#230) — зависший сервер держал запрос 497 с,
 # а медленный поток («струйка», символ раз в 3 с) — до сторожа, без даже тривиального ответа. LLM_MAX_CALL_SEC.
 MAX_CALL_SECONDS = float(os.getenv("LLM_MAX_CALL_SEC", 90))
-# Между кусками потока: нормальный поток Qwen идёт без пауз дольше 2.3 с (22.10), тишина дольше — сервер завис
-STREAM_STALL_SECONDS = 30.0
-# Столько запросов подряд упёрлись в потолок времени — сервер не успевает отвечать, дальше без LLM (#193 п. 3)
-TIMEOUTS_TO_DISABLE = 3
+# Столько запросов подряд упёрлись в потолок времени — сервер не успевает отвечать: длинная пауза, потом снова.
+# Не выключаем навсегда (ревью #244): Qwen общая, перегрузка в начале не должна лишить LLM всю задачу (вебинар)
+TIMEOUTS_TO_PAUSE = 3
+TIMEOUT_COOLDOWN_SECONDS = float(os.getenv("LLM_TIMEOUT_COOLDOWN_SEC", 600))
 
 
 class LLMTimeout(TimeoutError):
@@ -110,7 +111,6 @@ class LLMClient:
         self._paused_until = 0.0  # после серии сбоев LLM «отдыхает» до этого момента (time.monotonic)
         self.max_call_seconds = MAX_CALL_SECONDS
         self.timeouts = 0  # запросов подряд, упёршихся в потолок времени
-        self.disabled_reason = ""  # непусто — LLM выключена до конца прогона
         cache = os.getenv("LLM_CACHE_DIR")
         self.cache_dir = Path(cache) if cache else None
         self._client = None
@@ -134,7 +134,7 @@ class LLMClient:
         self._client = OpenAI(api_key=self._api_key, base_url=base_url, timeout=timeout, max_retries=0)
 
     def available(self) -> bool:
-        if self._client is None or self.disabled_reason:
+        if self._client is None:
             return False
         if self.failures >= FAILURES_TO_PAUSE and time.monotonic() < self._paused_until:
             return False  # серия сбоев — пауза; после неё пробуем снова (сервер часто оживает через минуту-две)
@@ -193,12 +193,15 @@ class LLMClient:
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
             self.failures += 1
-            if _timed_out(exc):
-                self.timeouts += 1
-                if self.timeouts >= TIMEOUTS_TO_DISABLE:
-                    self.disabled_reason = f"{self.timeouts} запроса подряд не уложились в {limit:.0f} с"
-                    log.warning("LLM выключена до конца прогона: %s — дальше playbook и правила", self.disabled_reason)
-            if self.failures >= FAILURES_TO_PAUSE:
+            self.timeouts = self.timeouts + 1 if _timed_out(exc) else 0
+            if self.timeouts >= TIMEOUTS_TO_PAUSE:
+                # сервер не успевает отвечать — пауза длиннее обычной, но LLM не выключаем насовсем (ревью #244)
+                self._paused_until = time.monotonic() + TIMEOUT_COOLDOWN_SECONDS
+                log.warning(
+                    "LLM: %d запроса подряд не уложились в %.0f с — пауза %.0f с, пока гипотезы из playbook",
+                    self.timeouts, limit, TIMEOUT_COOLDOWN_SECONDS,
+                )  # fmt: skip
+            elif self.failures >= FAILURES_TO_PAUSE:
                 self._paused_until = time.monotonic() + COOLDOWN_SECONDS
                 log.warning("LLM: %d сбоев подряд — пауза %.0f с, потом пробуем снова", self.failures, COOLDOWN_SECONDS)
             self.errors += 1
@@ -287,10 +290,9 @@ class LLMClient:
         while True:
             attempt += 1
             remaining = max(deadline - time.monotonic(), 1.0)
-            # timeout httpx — на каждое чтение, а не на весь ответ: для потока ограничиваем паузу между кусками,
-            # а общий срок проверяет _collect_stream (иначе «струйка» читается бесконечно — #239)
-            timeout = _stream_timeout(remaining) if self.stream else remaining
-            client = self._client.with_options(timeout=timeout, max_retries=0)
+            # timeout httpx — на каждое чтение (в том числе ожидание первого куска), а не на весь ответ: общий срок
+            # потока проверяет _collect_stream между кусками (иначе «струйка» читается бесконечно — #239)
+            client = self._client.with_options(timeout=remaining, max_retries=0)
             try:
                 response = client.chat.completions.create(**request)
                 # обрыв посреди потока — тоже исключение здесь, и его повторяем так же
@@ -447,14 +449,6 @@ def _timed_out(exc: BaseException) -> bool:
     except ImportError:  # pragma: no cover
         return False
     return isinstance(exc, openai.APITimeoutError | httpx.TimeoutException)
-
-
-def _stream_timeout(remaining: float):
-    """Таймаут потокового запроса: соединение и первый кусок — в пределах остатка, пауза между кусками ≤ 30 с."""
-    import httpx
-
-    read = min(remaining, STREAM_STALL_SECONDS)
-    return httpx.Timeout(remaining, connect=min(remaining, 10.0), read=read)
 
 
 def _collect_stream(stream, deadline: float | None = None):
