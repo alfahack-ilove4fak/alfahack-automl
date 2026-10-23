@@ -59,8 +59,12 @@ def find_task_files(task_md: Path) -> dict[str, Path]:
     return {key: standard_csv(path) for key, path in found.items()}
 
 
-def parse_task(task_md: Path, llm=None) -> TaskSpec:
-    """task.md → TaskSpec. llm — LLMClient для аналитика; None — создать свой (без ключа он сразу недоступен)."""
+def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
+    """task.md → TaskSpec. llm — LLMClient для аналитика; None — создать свой (без ключа он сразу недоступен).
+
+    use_analyst=False — только разбор по данным, без LLM (клиент не создаётся): так `solution.py` пишет шаг 0 до
+    любого запроса к LLM, а аналитика зовёт вторым разбором (#239).
+    """
     task_md = task_md.resolve()
     text = read_text_any(task_md)
     files = find_task_files(task_md)
@@ -94,9 +98,10 @@ def parse_task(task_md: Path, llm=None) -> TaskSpec:
     if metric_name is None:
         guessed.add("metric")
 
-    target, id_column, metric_name = _ask_analyst(
-        text, files, train_cols, test_cols, target, id_column, metric_name, guessed, notes, llm
-    )
+    if use_analyst:
+        target, id_column, metric_name = _ask_analyst(
+            text, files, train_cols, test_cols, target, id_column, metric_name, guessed, notes, llm
+        )
     if target is None:
         raise ValueError(f"Не удалось определить target: колонки только в train = {_train_only(train_cols, test_cols)}")
     if "sample_submission" not in files:

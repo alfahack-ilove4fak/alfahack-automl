@@ -87,7 +87,7 @@ def fit_extra_targets(spec: TaskSpec, train, test) -> list[pd.DataFrame]:
     for target in spec.extra_targets:
         sub = spec_for_target(spec, target, train[target])
         try:
-            parts.append(fit_predict_final(sub, profile_data(sub, train, test), baseline_hypothesis(), train, test))
+            parts.append(fit_predict_final(sub, profile_data(sub, train, test), baseline_hypothesis(sub), train, test))
             log.info("Таргет %s (%s): модель обучена", target, sub.task_type.value)
         except Exception:  # noqa: BLE001 — один таргет не должен стоить ответа по остальным
             log.exception("Таргет %s: модель не обучилась — тривиальный ответ", target)
@@ -134,7 +134,7 @@ def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: R
     except Exception:  # noqa: BLE001 — без выбранной схемы работаем в обычной CV
         log.exception("Схема валидации не выбрана — обычная CV")
         validation = None  # сам выбор схемы пишет её в лог с причиной
-    base = baseline_hypothesis()
+    base = baseline_hypothesis(spec)
     rungs = []
     if validation not in PLAIN_SCHEMES:
         rungs.append((base.model_copy(update={"params": {**base.params, "validation": validation}}), train))
@@ -236,15 +236,64 @@ class AnswerKeeper:
             log.exception("Финал (%s): не удалось проверить или восстановить submission.csv", reason)
 
 
+_SPEC_KEYS = ("target", "extra_targets", "id_column", "submission_columns", "task_type", "class_labels")
+
+
+def spec_changed(old: TaskSpec, new: TaskSpec) -> bool:
+    """Поменял ли аналитик то, от чего зависит ответ: таргеты, id, колонки ответа, тип задачи, метрику."""
+    return old.metric.name != new.metric.name or any(getattr(old, key) != getattr(new, key) for key in _SPEC_KEYS)
+
+
+def refine_with_analyst(task_md: Path, spec: TaskSpec, train, test, keeper: AnswerKeeper, log):
+    """Второй разбор — с LLM-аналитиком, когда шаг 0 уже на диске (#239). Любой сбой — остаёмся на разборе по данным.
+
+    Аналитик поменял target/id/метрику — перечитываем данные и перезаписываем шаг 0 по новому spec; ответ по нему
+    не прошёл проверку — возвращаем прежний spec. → (spec, train, test), с которыми идём дальше.
+    """
+    try:
+        refined = parse_task(task_md)
+    except Exception:  # noqa: BLE001 — шаг 0 уже записан, разбор по данным надёжнее
+        log.exception("Разбор с LLM-аналитиком упал — остаёмся на разборе по данным")
+        return spec, train, test
+    if not spec_changed(spec, refined):
+        return spec, train, test
+    old_spec, old_test = keeper.spec, keeper.test
+    try:
+        new_train, new_test = load_data(refined)
+        keeper.spec, keeper.test = refined, new_test
+        problems = keeper.write(trivial_answer(refined, new_train, new_test))
+    except Exception:  # noqa: BLE001
+        keeper.spec, keeper.test = old_spec, old_test
+        log.exception("Не удалось пересчитать шаг 0 по разбору аналитика — остаёмся на разборе по данным")
+        return spec, train, test
+    if problems:
+        keeper.spec, keeper.test = old_spec, old_test
+        log.warning("Ответ по разбору аналитика не прошёл проверку (%s) — остаёмся на разборе по данным", problems)
+        return spec, train, test
+    log.info(
+        "Аналитик уточнил разбор: target %s → %s, метрика %s → %s — шаг 0 перезаписан",
+        spec.target, refined.target, spec.metric.name, refined.metric.name,
+    )  # fmt: skip
+    return refined, new_train, new_test
+
+
 def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: AnswerKeeper, started: float) -> None:
     log = setup_logging()
-    spec = parse_task(task_md)
+    analyst_asked = False
+    try:
+        spec = parse_task(task_md, use_analyst=False)  # быстрый разбор по данным: шаг 0 не ждёт LLM (#239)
+    except Exception as exc:  # noqa: BLE001 — по данным не разобрать (например, неоднозначный target): решает аналитик
+        log.warning("Разбор по данным не справился (%s) — зовём LLM-аналитика до шага 0, как раньше", exc)
+        spec = parse_task(task_md)
+        analyst_asked = True
     keeper.spec = spec
     train, test = load_data(spec)
     keeper.test = test
     trivial = trivial_answer(spec, train, test)
     problems = keeper.write(trivial)
     log.info("Шаг 0: тривиальный ответ записан%s", f", но проверка: {problems}" if problems else "")
+    if not analyst_asked:
+        spec, train, test = refine_with_analyst(task_md, spec, train, test, keeper, log)
 
     def save(hyp: Hypothesis, res: ExperimentResult, profile: DataProfile) -> float:
         """Финальное обучение на всём train + запись ответа. Возвращает, сколько секунд это заняло."""

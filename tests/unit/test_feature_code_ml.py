@@ -164,3 +164,13 @@ def test_loop_without_feature_code_when_disabled(spec, profile, monkeypatch):
     monkeypatch.setenv(FEATURE_ENV, "0")
     seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER))
     assert all(h.kind != HypothesisKind.FEATURES for h in seen)
+
+
+def test_feature_code_only_after_playbook_exhausted(spec, profile, monkeypatch):
+    """ADR 0014: пока в пачке есть гипотезы playbook, код признаков у LLM не просим — он идёт после playbook."""
+    monkeypatch.delenv(FEATURE_ENV, raising=False)
+    seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER), n_batches=3)
+    kinds = [h.kind for h in seen]
+    first_feature = kinds.index(HypothesisKind.FEATURES)
+    assert all(h.source == "playbook" for h in seen[:first_feature])
+    assert first_feature == 3  # все три пачки playbook прошли раньше кода признаков
