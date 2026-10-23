@@ -1,0 +1,58 @@
+… multiclass: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 52.7
+… regression: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 11.3
+… batches_ordinal_qwk: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 72.6
+… cancer_binary_auc: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 98.6
+… claims_regression_mape_rowno: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 51.9
+… diabetes_regression_mae: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 21.1
+… digits_multiclass_accuracy: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 98.6
+… network_binary_logloss_crooked: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 83.4
+… payments_binary_f1_rare: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 31.9
+… sales_regression_dates_rmsle: бюджет 5.0 мин
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+LLM выключена (нет ключа/модели или LLM_MOCK=1) — работаем на playbook
+  OK: балл 54.7
+
+| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному | Статус | Время, с | Пик RAM, МБ | LLM: запросов (ошибок) | Токены LLM | ₽ |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| tasks/public/multiclass | stratified_groups | f1_macro | 0.55028 | 0.048261 | 52.7 | 0.51443 | 7.4 | OK | 220 | 336 | 0 (0) | 0 | 0.00 |
+| tasks/public/regression | time:Year_Factor>=5 | rmse | 50.406 | 56.799 | 11.3 | 56.799 | 11.3 | OK | 212 | 294 | 0 (0) | 0 | 0.00 |
+| tasks/practice/batches_ordinal_qwk | stratified_groups | qwk | 0.72593 | 0 | 72.6 | 0.72433 | 0.6 | OK | 228 | 215 | 0 (0) | 0 | 0.00 |
+| tasks/practice/cancer_binary_auc | stratified_groups | roc_auc | 0.99292 | 0.5 | 98.6 | 0.98792 | 41.4 | OK | 159 | 377 | 0 (0) | 0 | 0.00 |
+| tasks/practice/claims_regression_mape_rowno | groups | mape | 0.48887 | 1.0172 | 51.9 | 0.59118 | 17.3 | OK | 169 | 236 | 0 (0) | 0 | 0.00 |
+| tasks/practice/diabetes_regression_mae | groups | mae | 48.98 | 62.103 | 21.1 | 47.6 | 0.0 | OK | 166 | 268 | 0 (0) | 0 | 0.00 |
+| tasks/practice/digits_multiclass_accuracy | stratified_groups | accuracy | 0.9873 | 0.095238 | 98.6 | 0.97143 | 55.6 | OK | 264 | 375 | 0 (0) | 0 | 0.00 |
+| tasks/practice/network_binary_logloss_crooked | stratified_groups | logloss | 0.10544 | 0.63356 | 83.4 | 0.10758 | 2.0 | OK | 252 | 234 | 0 (0) | 0 | 0.00 |
+| tasks/practice/payments_binary_f1_rare | time:date>=2024-07-24 | f1 | 0.31864 | 0 | 31.9 | 0.25 | 9.2 | OK | 197 | 323 | 0 (0) | 0 | 0.00 |
+| tasks/practice/sales_regression_dates_rmsle | time:date>=2024-07-02 | rmsle | 0.46989 | 1.0381 | 54.7 | 0.48306 | 2.7 | OK | 240 | 223 | 0 (0) | 0 | 0.00 |
+
+Средний балл: **57.7** (платформа берёт среднее по задачам)
+Средний балл к сильному бейзлайну (лучший из LightGBM и тривиального): **14.7** — ближе к платформе, сверяем с public
+
+Строки дописаны в /home/user/alfahack-automl/runs/harness/leaderboard.csv
