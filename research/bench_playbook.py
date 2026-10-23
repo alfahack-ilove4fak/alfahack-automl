@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import sys
 import time
 from pathlib import Path
@@ -156,6 +157,7 @@ def bench_task(task_md: Path, only: set[str] | None) -> list[dict]:
         try:
             res, honest = evaluate(spec, hyp, part, hold)
             row = {"status": res.status.value, "cv_mean": res.mean_score, "cv_std": res.std_score, "error": res.error}
+            row["fold_scores"] = json.dumps([round(v, 6) for v in res.fold_scores])  # для разбора правила принятия
         except Exception as exc:  # noqa: BLE001 — стенд не должен падать из-за одной гипотезы
             honest, row = None, {"status": "failed", "cv_mean": None, "cv_std": None, "error": f"{exc!r}"[:200]}
         if hyp.id == "baseline":
