@@ -93,7 +93,10 @@ def test_prompt_size_bounded_on_long_run(spec, profile):
         memory.add_lesson("длинный вывод " * 50)
     messages = prompting.build_hypothesis_messages(spec, profile, history, k=3, memory=memory)
     size = sum(len(m["content"]) for m in messages)
-    assert size < 8000, size
+    empty = prompting.build_hypothesis_messages(spec, profile, [], k=3, memory=ResearchMemory())
+    # история и выводы сжаты (сейчас +2.2 тыс. знаков); постоянная часть растёт с ключами params — у неё свой потолок
+    assert size - sum(len(m["content"]) for m in empty) < 3000, size
+    assert size < 10000, size
 
 
 def test_lessons_in_hypothesis_prompt(spec, profile):
