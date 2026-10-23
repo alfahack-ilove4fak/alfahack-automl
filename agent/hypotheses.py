@@ -99,8 +99,9 @@ def canonical_params(params: dict) -> dict:
 
     {model: lightgbm, class_weight: balanced, n_folds: 5, log_target: false, model_params: {learning_rate: 0.05}}
     и {class_weight: balanced} — один и тот же эксперимент.
+    Служебные ключи исполнителя (_best_iteration, _proba_weights, _optuna_best…) — результат прогона, а не идея.
     """
-    out = {k: _norm(v, k) for k, v in params.items() if not _is_off(v)}
+    out = {k: _norm(v, k) for k, v in params.items() if not _is_off(v) and not str(k).startswith("_")}
     model = out.get("model", DEFAULT_MODEL)
     if model == DEFAULT_MODEL:
         out.pop("model", None)
