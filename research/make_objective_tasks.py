@@ -116,6 +116,24 @@ def demand(task_dir: Path) -> None:
     )
 
 
+@task("cost_pinball10")
+def cost(task_dir: Path) -> None:
+    """Нижний квантиль: оценка «не дороже чем» — недооценка дешёвая, переоценка в 9 раз дороже (α = 0.1)."""
+    rng = np.random.default_rng(SEED + 5)
+    df = _features(rng)
+    level = np.exp(1.2 + _effect(df, rng))
+    df["cost"] = (level * rng.lognormal(0, 0.5, N)).round(2)
+    _save(
+        task_dir,
+        df,
+        "cost",
+        "Нижняя граница стоимости",
+        "Оцените стоимость ремонта снизу: завысить оценку в 9 раз дороже, чем занизить.",
+        "Стоимость ремонта, тыс. ₽",
+        "pinball loss (квантильная потеря) для квантиля 0.1 (меньше — лучше)",
+    )
+
+
 @task("visits_poisson")
 def visits(task_dir: Path) -> None:
     """Счётные данные: число визитов ~ Пуассон с лог-линейной интенсивностью."""
