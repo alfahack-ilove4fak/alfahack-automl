@@ -16,6 +16,8 @@
 # (цифры, ложные принятия и что не вошло — docs/research/playbook-v2.md). Новое: модели xgboost / catboost / hist_gb,
 # lgbm_default (страховка, #206) и комбинации с xgboost. xgboost_balanced_proba_weights — строго после
 # balanced_proba_weights: против бейзлайна на payments её принимают зря, против balanced_proba_weights — нет.
+# objective_* (#237): цель обучения под метрику, только регрессия; стенд на 8 задачах — ложных принятий нет
+# (неподходящая цель видна в CV хуже и отклоняется). Порядок блока — по стенду (docs/research/objective-metric.md).
 # Цикл проверяет гипотезы по отдельности и не складывает выигрыши (issue #87), поэтому есть комбинации.
 # Проверка: uv run pytest tests/unit/test_playbook.py; стенд: uv run python research/bench_playbook.py
 
@@ -56,6 +58,48 @@ hypotheses:
     rationale: Цикл не складывает выигрыши (#87); XGBoost и log1p по отдельности честно лучше на регрессии
     task_types: [regression]
     params: {model: xgboost, log_target: true}
+
+  - id: objective_poisson
+    kind: hyperparams
+    title: LightGBM с целью Poisson
+    rationale: Счётный неотрицательный таргет — лог-линейная интенсивность; на отрицательном таргете гипотеза честно падает (FAILED)
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {objective: poisson}}
+
+  - id: objective_tweedie
+    kind: hyperparams
+    title: LightGBM с целью Tweedie
+    rationale: Много нулей и скошенные положительные значения (убытки, продажи)
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {objective: tweedie}}
+
+  - id: objective_mape
+    kind: hyperparams
+    title: LightGBM с целью MAPE
+    rationale: При MAPE/WAPE ошибка на маленьких значениях дороже — L2 их недооценивает
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {objective: mape}}
+
+  - id: objective_quantile_90
+    kind: hyperparams
+    title: LightGBM с целью quantile α=0.9
+    rationale: Квантильная метрика с уровнем 0.9 — нужна верхняя граница, а не среднее
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {objective: quantile, alpha: 0.9}}
+
+  - id: objective_huber
+    kind: hyperparams
+    title: LightGBM с целью Huber
+    rationale: Тяжёлые хвосты и выбросы в таргете — квадрат ошибки гоняется за ними, Huber — нет
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {objective: huber}}
+
+  - id: objective_l1
+    kind: hyperparams
+    title: LightGBM с целью L1 (медиана)
+    rationale: Метрика MAE или pinball@0.5 оптимизируется медианой, а не средним; L1 устойчивее к выбросам
+    task_types: [regression]
+    params: {model: lightgbm, model_params: {objective: l1}}
 
   - id: lgbm_slow_regularized
     kind: hyperparams
