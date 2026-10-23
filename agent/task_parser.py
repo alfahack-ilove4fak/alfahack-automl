@@ -296,7 +296,7 @@ def _guess_id(test_cols, dictionary, test_path: Path | None = None) -> str:
                 return unique[0]
         except Exception:  # noqa: BLE001 — проверка уникальности не обязательна
             pass
-    return candidates[0] if candidates else test_cols[0]
+    return test_cols[0]  # неуникальный «store_id» не лучше первой колонки (ревью #246)
 
 
 def _primary_target(train_path: Path, targets: list[str], metric_name: str | None) -> str:

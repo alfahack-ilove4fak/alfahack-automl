@@ -112,3 +112,5 @@ def test_guess_id_without_template_prefers_unique_id_named_column(tmp_path):
     assert _guess_id(["tenure", "group_id", "txn_id"], {}, test) == "txn_id"  # group_id не уникален
     assert _guess_id(["tenure", "x"], {}, test) == "tenure"  # кандидатов по имени нет — как раньше
     assert _guess_id(["tenure", "id", "txn_id"], {}, test) == "id"
+    # id-имена есть, но ни одно не уникально — как раньше, первая колонка (ревью #246)
+    assert _guess_id(["tenure", "group_id"], {}, test) == "tenure"
