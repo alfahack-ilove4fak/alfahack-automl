@@ -45,3 +45,29 @@ def test_other_column_names_match_by_order(tmp_path):
     answer = trivial_answer(spec, train, test)
     assert list(answer.columns) == ["id", "p0", "p1", "p2"]
     assert np.allclose(answer[["p0", "p1", "p2"]].sum(axis=1), 1)
+
+
+def test_prefixed_columns_in_semantic_order_match_by_name(tmp_path):
+    """#238: колонки proba_<класс> идут в смысловом порядке, class_labels — по алфавиту: доли — в свои колонки."""
+    labels = ["low"] * 50 + ["mid"] * 30 + ["high"] * 20
+    spec, train, test = _task(tmp_path, labels, ["proba_low", "proba_mid", "proba_high"])
+    assert spec.class_labels == ["high", "low", "mid"]  # по алфавиту — порядок колонок другой
+    answer = trivial_answer(spec, train, test)
+    assert list(answer.columns) == ["id", "proba_low", "proba_mid", "proba_high"]
+    assert answer.iloc[0][["proba_low", "proba_mid", "proba_high"]].tolist() == pytest.approx([0.5, 0.3, 0.2], abs=1e-4)
+
+
+def test_suffixed_and_cased_columns_match_by_name(tmp_path):
+    """Окончание и регистр не мешают: <класс>_prob, «Low» — класс low."""
+    labels = ["low"] * 50 + ["mid"] * 30 + ["high"] * 20
+    spec, train, test = _task(tmp_path, labels, ["Mid_prob", "High_prob", "Low_prob"])
+    answer = trivial_answer(spec, train, test)
+    assert answer.iloc[0][["Low_prob", "Mid_prob", "High_prob"]].tolist() == pytest.approx([0.5, 0.3, 0.2], abs=1e-4)
+
+
+def test_unmatched_names_still_fall_back_to_order(tmp_path):
+    """Имена не похожи на классы — как раньше, по порядку class_labels (отсортированных)."""
+    labels = ["x"] * 80 + ["y"] * 20
+    spec, train, test = _task(tmp_path, labels, ["alpha", "beta"])
+    answer = trivial_answer(spec, train, test)
+    assert answer.iloc[0][["alpha", "beta"]].tolist() == pytest.approx([0.8, 0.2], abs=1e-4)
