@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from agent.acceptance import MIN_REL_GAIN, T_MIN, accept, corrected_t, fold_gains
+from agent.acceptance import MIN_REL_GAIN, T_MIN, TIME_MIN_REL_GAIN, accept, corrected_t, fold_gains
 from interfaces.schemas import ExperimentResult, ExperimentStatus
 
 
@@ -149,3 +149,24 @@ def test_time_scheme_incomparable_folds_use_mean_rule():
     assert fold_gains(new, best, greater_is_better=False) is None
     ok, reason = accept(new, best, greater_is_better=False)
     assert ok and "несравнимы" in reason
+
+
+# Регрессия после #259: на public/regression Optuna (подбор на тех же time-фолдах) дала +0.6% на CV, t=1.16,
+# лучше на последнем периоде — и была принята; holdout RMSE 44.5 → 53.1. Poisson (+3.5%) — честное улучшение.
+def test_time_scheme_small_gain_below_time_threshold_rejected():
+    gains = [0.7, 0.0, 0.2]  # +0.6% от среднего TIME_BEST, на последнем периоде лучше
+    new, best = time_pair(gains)
+    mean_gain = sum(gains) / len(gains)
+    assert mean_gain < TIME_MIN_REL_GAIN * best.mean_score
+    assert corrected_t(fold_gains(new, best, greater_is_better=False)) < T_MIN
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert not ok and "последнем периоде" not in reason
+
+
+def test_time_scheme_gain_above_time_threshold_accepted():
+    gains = [0.2, 1.8, 3.2]  # +3.5%, как objective_poisson на public/regression
+    new, best = time_pair(gains)
+    assert sum(gains) / len(gains) >= TIME_MIN_REL_GAIN * best.mean_score
+    assert corrected_t(fold_gains(new, best, greater_is_better=False)) < T_MIN
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert ok and "последнем периоде" in reason
