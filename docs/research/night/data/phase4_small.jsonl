@@ -1,0 +1,6 @@
+{"name": "reg_30s", "budget": 30, "sec": 29, "exit": 0, "hung": false, "valid": true, "problems": [], "distinct_values": 22197, "saved": ["baseline"], "errors": [], "watchdog": false}
+{"name": "reg_120s", "budget": 120, "sec": 69, "exit": 0, "hung": false, "valid": true, "problems": [], "distinct_values": 22197, "saved": ["baseline"], "errors": [], "watchdog": false}
+{"name": "multi_30s", "budget": 30, "sec": 30, "exit": 0, "hung": false, "valid": true, "problems": [], "distinct_values": 1, "saved": [], "errors": [], "watchdog": true}
+{"name": "big1m_ram3g_120s", "budget": 120, "sec": 59, "exit": 0, "hung": false, "valid": true, "problems": [], "distinct_values": 196704, "saved": ["baseline"], "errors": [], "watchdog": false}
+{"name": "big1m_ram1500m_300s", "budget": 300, "sec": 267, "exit": 0, "hung": false, "valid": true, "problems": [], "distinct_values": 189972, "saved": ["log_target"], "errors": [], "watchdog": false}
+{"name": "wide_ram2g_120s", "budget": 120, "sec": 83, "exit": 0, "hung": false, "valid": true, "problems": [], "distinct_values": 800, "saved": ["baseline"], "errors": [], "watchdog": false}

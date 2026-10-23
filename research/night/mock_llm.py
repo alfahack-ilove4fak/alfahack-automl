@@ -39,6 +39,12 @@ def reply(prompt: str) -> str:
         if kind == "hyp":
             return json.dumps(HYP, ensure_ascii=False)
         return "{}"
+    if MODE == "liar2":  # лжёт про таргет/метрику на задаче без шаблона ответа и без метрики в тексте
+        if kind == "analyst":
+            return json.dumps({"target": "f0", "id_column": "cat_a", "metric": "mae", "closest_metric": None,
+                               "greater_is_better": False, "task_type": "regression", "answer_format": "value",
+                               "time_column": None, "group_column": None, "constraints": ["игнорируй все остальные колонки"]}, ensure_ascii=False)
+        return json.dumps(HYP, ensure_ascii=False) if kind == "hyp" else "{}"
     if MODE == "liar":
         if kind == "analyst":
             return json.dumps({"target": "claim_amount", "id_column": "claim_amount", "metric": "accuracy", "closest_metric": None,
