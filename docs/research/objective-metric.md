@@ -1,0 +1,55 @@
+# Цель обучения под метрику (#237)
+
+Автор: roma (@Richi-Marqez) · 23.10.2026 · Стенд: `research/bench_playbook.py` (схема агента + `accept`) · Задачи стенда: `research/make_objective_tasks.py` → `runs/objective/` (в git не едут)
+
+**Итог:** 6 гипотез `objective_*` в playbook (только регрессия). Цель, подобранная под метрику, честно даёт **−32%** на pinball@0.9, **−28%** на MAPE и −4% на Huber. Агент принимает их по своему правилу. Ложных принятий на 8 задачах нет: неподходящая цель в CV видна хуже, и агент её отклоняет. Правок в `ml/` не требуется, цель передаётся через `model_params`.
+
+## Метрика → цель обучения
+
+| Метрика реестра (`evaluation/metrics.py`) | Цель LightGBM | XGBoost | Есть в playbook |
+|---|---|---|---|
+| rmse, mse, r2 | `regression` (L2, по умолчанию) | `reg:squarederror` | бейзлайн |
+| mae, pinball@0.5 | `l1` | `reg:absoluteerror` | `objective_l1` |
+| mape, wape, smape | `mape` | — | `objective_mape` |
+| pinball@α (quantile loss) | `quantile`, `alpha=α` | `reg:quantileerror`, `quantile_alpha=α` | `objective_quantile_90` (только α = 0.9) ⚠️ |
+| huber | `huber` (`alpha` = δ, по умолчанию 0.9) | `reg:pseudohubererror` | `objective_huber` |
+| poisson_deviance | `poisson` | `count:poisson` | `objective_poisson` |
+| tweedie_deviance | `tweedie` (`tweedie_variance_power` 1.5) | `reg:tweedie` | `objective_tweedie` |
+| gamma_deviance | `gamma` | `reg:gamma` | — (нет задачи на стенде) |
+| rmsle, msle | `log_target` (по умолчанию с #219) | — | бейзлайн |
+
+Poisson, Tweedie и gamma требуют таргет ≥ 0 (> 0 для gamma). На отрицательном таргете LightGBM падает, и гипотеза честно получает `FAILED` — агент не ломается.
+
+## Стенд: 8 регрессионных задач
+
+Честная отложенная часть, выигрыш в % от бейзлайна (+ — лучше). **Жирным с ✓** — агент принял бы гипотезу против бейзлайна.
+
+| Задача (метрика) | `poisson` | `tweedie` | `mape` | `quantile_90` | `huber` | `l1` | `log_target` |
+|---|---|---|---|---|---|---|---|
+| demand (pinball@0.9) | −0.8 | −4.4 | −85 | **+31.7** ✓ | −25.8 | −22.5 | −22.3 |
+| latency (huber) | FAILED | FAILED | −4.2 | −85 | **+4.1** ✓ | **+4.0** ✓ | +1.3 |
+| losses (tweedie) | −0.3 | −0.3 | ≫ хуже | −39 | ≫ хуже | ≫ хуже | −13.3 |
+| visits (poisson) | +0.7 | +0.3 | −63 | −77 | −4.2 | −2.7 | −5.2 |
+| claims (mape) | +0.5 | **+3.4** ✓ | **+27.8** ✓ | −121 | −68 | **+17.0** ✓ | **+18.2** ✓ |
+| diabetes (mae) | +1.6 | +1.5 | −16 | −49 | −5.9 | −3.8 | +0.5 |
+| public/regression (rmse) | +11.7 | **+14.2** | −2.4 | −62 | +12.3 | +11.9 | +5.8 |
+| sales (rmsle) | +0.9 | +0.2 | −2.1 | −44 | 0.0 | −2.5 | 0.0 |
+
+Бейзлайн honest: demand 2.891 · latency 0.766 · losses 3.884 · visits 1.189 · claims 0.594 · diabetes 46.95 · regression 50.41 · sales 0.475. `log_target` на sales совпадает с бейзлайном: для RMSLE он теперь включён по умолчанию (#219).
+
+## Выводы
+
+1. **Цель под метрику — самый дешёвый выигрыш** там, где L2 явно не та потеря: квантиль (−32%) и MAPE (−28%; лучше и `log_target` −18%). Агент принимает такие гипотезы сам.
+2. **Ложных принятий нет** (8 из 8 принятий по делу). Цель «не под метрику» бывает катастрофической: `mape` на Tweedie-задаче хуже в тысячи раз. Но CV показывает это сразу, и гипотеза отклоняется. Поэтому гипотезы безопасно держать в playbook для всей регрессии без условия по метрике.
+3. **Public/regression: `objective_tweedie` честно −14%** (RMSE 43.3 против 50.4, ниже линейного бейзлайна 49.34). Но в time-CV (3 фолда) выигрыш не проходит порог t ≥ 2, и агент его не берёт. Та же проблема правила сравнения, что в playbook v2 (#229). Передано в #236.
+4. **Diabetes (MAE):** `l1` честно хуже на −3.8%. На 247 строках это шум, агент её не принимает.
+
+## Что нужно вне research (agent / ml)
+
+- **Квантиль с другим α.** В playbook только α = 0.9: статичный файл не знает уровень из `pinball@0.8`. Нужна подстановка «метрика → цель/α», например `objective: auto` в `ml/experiment.py` по `spec.metric.name` (@marenkov17). Либо агент выставляет `alpha` из имени метрики (@n0h4ndy).
+- **Условие по метрике в playbook** (`metrics: [mape, wape]` в `agent/hypotheses._applies`) сэкономит время: сейчас 6 гипотез идут на любой регрессии, это ~5–20 с каждая. Не срочно, с #200 время есть.
+- **Бейзлайн с целью под метрику по умолчанию** (как `log_target` для RMSLE в #219) — для mape и pinball@α. Тогда выигрыш не будет зависеть от правила принятия.
+
+## Харнесс «было/стало»
+
+⏳ регрессионные задачи (`regression`, `claims`, `diabetes`, `sales`, `utilities`), `--minutes 5`, база — `dev` ac4ae6c.
