@@ -109,6 +109,19 @@ def test_public_tasks_parsed(folder, task_type, target, metric, n_classes):
         ("Evaluation metric: quantile loss with alpha = 0,1", "pinball@0.1"),
         ("Метрика — квантильная потеря, прогнозируем 95-й квантиль спроса", "pinball@0.95"),
         ("Метрика — квантильная потеря для медианы (квантиль 0.5)", "pinball"),
+        # MAPE и QWK словами, F-beta (ночной аудит #230, #238)
+        ("Среднее абсолютное отклонение прогноза от факта в процентах от факта. Чем меньше, тем лучше.", "mape"),
+        ("Mean absolute error as a percent of the actual value", "mape"),
+        ("Метрика — MAE, ошибка в процентах от задержки не считается", "mae"),
+        ("Согласованность измеряют каппой Коэна с квадратичными весами", "qwk"),
+        ("Метрика — квадратичная каппа", "qwk"),
+        ("Submissions are scored with the F2 score (F-beta with beta = 2) for the positive class.", "fbeta@2"),
+        ("Метрика — F2.", "fbeta@2"),
+        ("Metric: F0.5 score", "fbeta@0.5"),
+        ("Метрика: F-мера с β = 2", "fbeta@2"),
+        ("Метрика — F1-мера", "f1"),
+        ("Metric: macro F1 (not F2)", "f1_macro"),
+        ("Признаки f1, f2, f3 анонимны. Метрика — RMSE", "rmse"),
     ],
 )
 def test_find_metric_in_text(text, expected):

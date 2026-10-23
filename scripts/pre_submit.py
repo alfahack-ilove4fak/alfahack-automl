@@ -70,6 +70,10 @@ FOREIGN_PARTS = ("site-packages/", ".dist-info/", ".egg-info/")
 # Ответ бейзлайна сохранён: полная CV — «baseline», облегчённая ступень лестницы (solution.LIGHT_ID) — «baseline_light»
 BASELINE_SAVED = re.compile(r"Сохранён ответ «(baseline(?:_light)?)» \(([^)]*)\)")
 GRACE_SEC = 60  # сколько ждём сверх бюджета, прежде чем считать, что агент «завис»
+# Почему цикл гипотез закончился (agent/loop.py): время вышло — штатно, гипотезы кончились — бюджет простаивает (#200)
+LOOP_END = re.compile(r"(Время на исходе|Гипотезы закончились)")
+UNDERUSED_BELOW = 0.5  # доля бюджета, ниже которой при длинном прогоне считаем, что агент простаивает
+UNDERUSED_MIN_BUDGET_SEC = 1200  # на коротких прогонах (< 20 мин) простой не показатель
 
 
 @dataclass
@@ -78,10 +82,29 @@ class TaskRun:
     ok: bool = False
     seconds: float = 0.0
     peak_ram_mb: float = 0.0
+    budget_sec: int = 0
+    loop_end: str = ""  # почему закончился цикл гипотез: «время» или «гипотезы закончились»
     baseline: str = ""  # какая ступень бейзлайна сохранила ответ и с какой CV — для отчёта репетиции
     problems: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     stderr_tail: str = ""
+
+
+def time_usage(seconds: float, budget_sec: int, stderr: str) -> tuple[str, list[str]]:
+    """(почему закончился цикл, замечания) — сколько бюджета агент реально использовал и не ушёл ли за него (#240)."""
+    ends = LOOP_END.findall(stderr)
+    loop_end = {"Время на исходе": "время вышло", "Гипотезы закончились": "гипотезы закончились"}.get(
+        ends[-1] if ends else "", ""
+    )
+    warnings = []
+    if budget_sec and seconds > budget_sec:
+        warnings.append(f"ушёл за бюджет: {seconds:.0f} с при {budget_sec} с (платформа остановит ровно в срок)")
+    elif budget_sec >= UNDERUSED_MIN_BUDGET_SEC and seconds < UNDERUSED_BELOW * budget_sec:
+        warnings.append(
+            f"бюджет простаивает: работал {seconds / budget_sec:.0%} ({seconds:.0f} из {budget_sec} с)"
+            + (f", цикл закончился: {loop_end}" if loop_end else "")
+        )
+    return loop_end, warnings
 
 
 # --- 1–2. Архив и код внутри него
@@ -259,6 +282,9 @@ def run_task(task_md: Path, zip_path: Path, workdir: Path, minutes: float, rows:
         [sys.executable, "solution.py", "task.md"], task_dir, run_env(budget, use_llm), budget + GRACE_SEC
     )
     result.stderr_tail = stderr[-3000:]
+    result.budget_sec = budget
+    result.loop_end, time_warnings = time_usage(result.seconds, budget, stderr)
+    result.warnings += time_warnings
     if code is None:
         result.problems.append(f"не уложился в бюджет {budget} с + {GRACE_SEC} с запаса — платформа его остановит")
     elif code != 0:
@@ -309,14 +335,16 @@ def render_report(zip_path: Path, archive_problems: list[str], notes: list[str],
         *([f"- {OK} структура, размер, requirements.txt, импорты"] if not archive_problems else []),
         "",
         "## Запуск как на платформе",
-        "| Задача | Итог | Время, с | Пик RAM, МБ | Бейзлайн | Что не так |",
-        "|---|---|---|---|---|---|",
+        "| Задача | Итог | Время, с | Из бюджета | Цикл закончился | Пик RAM, МБ | Бейзлайн | Что не так |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in runs:
         issues = "; ".join([*r.problems, *[f"{WARN} {w}" for w in r.warnings]]) or "—"
         status = OK if r.ok else FAIL
+        used = f"{r.seconds / r.budget_sec:.0%} ({r.budget_sec} с)" if r.budget_sec else "—"
         lines.append(
-            f"| {r.name} | {status} | {r.seconds:.0f} | {r.peak_ram_mb:.0f} | {r.baseline or '—'} | {issues} |"
+            f"| {r.name} | {status} | {r.seconds:.0f} | {used} | {r.loop_end or '—'} | {r.peak_ram_mb:.0f} "
+            f"| {r.baseline or '—'} | {issues} |"
         )
     for r in runs:
         if not r.ok:
