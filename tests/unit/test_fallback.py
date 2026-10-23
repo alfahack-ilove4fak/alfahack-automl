@@ -52,19 +52,19 @@ def test_models_and_optuna_keep_best_preprocessing(spec):
         result("b", BASE),
     )
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
-    # стенд danil (ревью #274): ансамбли → одиночные модели → Optuna
-    assert [_short(h) for h in hyps[:6]] == [
-        "ensemble:lightgbm+catboost+xgboost",
-        "ensemble:lightgbm+catboost",
+    # порядок danil по стенду (#200): xgboost → ансамбль из двух → catboost → Optuna → ансамбль из трёх → hist_gb
+    assert [_short(h) for h in hyps[:5]] == [
         "xgboost",
+        "ensemble:lightgbm+xgboost",
         "catboost",
-        "hist_gb",
         "optuna:lightgbm",
+        "ensemble:lightgbm+xgboost+catboost",
     ]
+    assert _short(hyps[5]) == "hist_gb"
     # предобработка лучшего сохраняется, служебные ключи и схема — нет (схему добавит цикл)
     assert all(h.params.get("log_target") is True for h in hyps)
     assert not any("_best_iteration" in h.params or "validation" in h.params for h in hyps)
-    assert hyps[5].params["optuna"] == {"timeout": 600}
+    assert hyps[3].params["optuna"] == {"timeout": 600}
     assert all(h.id.startswith("fb-") and h.parent_id == "best" for h in hyps)
 
 
@@ -87,7 +87,6 @@ def test_optuna_for_best_model_then_lightgbm(spec):
     assert next(h for h in hyps if "ensemble" in h.params).params["ensemble"] == [
         {"model": "catboost", "model_params": {"depth": 8}},
         "lightgbm",
-        "xgboost",
     ]
 
 
@@ -260,8 +259,8 @@ def test_loop_rebuilds_fallback_from_new_best(spec, monkeypatch):
 
     def fake_experiment(spec, profile, h, train, budget):
         ran.append(h)
-        if len(ran) == 1:  # первая запасная — ансамбль из трёх — явно лучше: новый лучший
-            return result(h.id, [30.0, 31.0, 32.0, 33.0, 34.0])
+        if h.params.get("model") == "xgboost" and len(ran) == 1:
+            return result(h.id, [30.0, 31.0, 32.0, 33.0, 34.0])  # xgboost явно лучше — новый лучший
         return result(h.id, [50.0] * 5)
 
     monkeypatch.setattr(loop, "run_experiment", fake_experiment)
@@ -271,7 +270,7 @@ def test_loop_rebuilds_fallback_from_new_best(spec, monkeypatch):
     best = loop.run_autoresearch(
         spec, profile, None, RunBudget(total_seconds=3600), [base], base, lambda h, r: None, llm=None
     )
-    assert "ensemble" in best[0].params
-    # вторая шла уже от нового лучшего-ансамбля: ансамбли из ансамбля не строим — дальше одиночные модели
-    assert "ensemble" not in ran[1].params and ran[1].params["model"] == "xgboost"
+    assert best[0].params["model"] == "xgboost"
+    # второй шёл уже от xgboost: ансамбль начинается с него, а не с LightGBM прошлого лучшего
+    assert ran[1].params["ensemble"][0] == "xgboost"
     assert len(ran) > loop.FALLBACK_CHUNK  # порций было несколько

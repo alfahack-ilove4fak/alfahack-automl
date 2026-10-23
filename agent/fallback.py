@@ -3,9 +3,8 @@
 Без них агент выходил из цикла через 4–8 минут из 180: «Гипотезы закончились». Набор и порядок — список danil
 (стенд на 10 задачах, комментарий в #200), дальше — направления без предела по числу, чтобы время не простаивало.
 Все строятся от текущего лучшего (его предобработка и код признаков сохраняются) и работают без LLM:
-  1. ансамбль из трёх [лучшая, LightGBM, CatBoost, XGBoost] → ансамбль из двух → xgboost → catboost → hist_gb →
-     Optuna лучшей модели → Optuna LightGBM (стенд danil в ревью #274: ансамбли устойчивее одиночных моделей,
-     Optuna во time-схеме честно хуже — поэтому после всех моделей);
+  1. другие модели и ансамбли: xgboost → ансамбль [лучшая, LightGBM/XGBoost] → catboost → Optuna лучшей модели →
+     ансамбль из трёх → hist_gb → Optuna LightGBM;
   2. комбинации «почти прошедших»: лучше текущего лучшего на ≥ NEAR_MIN_WINS фолдах, но правило принятия
      их не взяло (t < 2) — накладываем на лучшего по одной и попарно (#87);
   3. playbook поверх лучшего: гипотезы playbook проверялись против бейзлайна по отдельности, а после нового
@@ -173,7 +172,7 @@ class _Directions:
     def ensemble(self, size: int) -> None:
         if not self.single:
             return
-        models = list(dict.fromkeys((self.model, "lightgbm", "catboost", "xgboost")))[:size]
+        models = list(dict.fromkeys((self.model, "lightgbm", "xgboost", "catboost")))[:size]
         self.add(
             HypothesisKind.ENSEMBLE,
             f"ансамбль {' + '.join(models)}",
@@ -253,15 +252,13 @@ def fallback_hypotheses(
     if os.getenv(FALLBACK_ENV, "1") == "0":
         return []
     d = _Directions(best[0], budget)
-    # 1. ансамбли, затем модели, затем Optuna — стенд danil на 15 задачах (ревью #274, честная отложенная часть):
-    # тройка lightgbm + catboost + xgboost +1.28%, лучше бейзлайна в 84% разбиений; пара с catboost +1.07%;
-    # одиночные xgboost/catboost хуже бейзлайна в 38–44%; Optuna во time-схеме честно хуже (public regression)
-    d.ensemble(3)
-    d.ensemble(2)
+    # 1. модели и ансамбли — порядок danil по стенду (#200): дешёвые и сильные раньше
     d.other_model("xgboost")
+    d.ensemble(2)
     d.other_model("catboost")
-    d.other_model("hist_gb")
     d.optuna(d.model)
+    d.ensemble(3)
+    d.other_model("hist_gb")
     d.optuna(DEFAULT_MODEL)
     # 2. почти прошедшие (#87)
     near = near_misses(history, best, spec.metric.greater_is_better)
