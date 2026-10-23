@@ -10,6 +10,10 @@
 Значимость — t-статистика Nadeau–Bengio: обычный парный t-тест на CV переоценивает уверенность,
 потому что обучающие части фолдов пересекаются; поправка увеличивает дисперсию на n_test/n_train.
 
+Схема `time:` (#236, docs/research/accept-rule.md): фолдов там 2–3, и t ≥ 2 почти недостижим. Фолды идут
+по возрастанию периода (ml/validation._time_folds), последний — ближайший к test. Поэтому там принимаем ещё и так:
+лучше на последнем периоде и в среднем по фолдам. Остальные схемы (kfold, stratified, group:) — только t ≥ 2.
+
 Если фолды несравнимы (другое n_folds, упавшие фолды) — старое правило: среднее лучше на NOISE_FACTOR·std.
 """
 
@@ -62,4 +66,6 @@ def accept(new: ExperimentResult, best: ExperimentResult, greater_is_better: boo
     t = corrected_t(gains)
     wins = sum(g > 0 for g in gains)
     reason = f"улучшение {mean_gain:.4g}, лучше на {wins}/{len(gains)} фолдах, t={t:.2f} (порог {T_MIN})"
+    if t < T_MIN and (new.validation or "").startswith("time:") and gains[-1] > 0:
+        return True, f"{reason}; лучше на последнем периоде ({gains[-1]:.4g}) и в среднем — time-схема"
     return t >= T_MIN, reason
