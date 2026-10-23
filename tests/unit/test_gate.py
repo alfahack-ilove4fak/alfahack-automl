@@ -87,3 +87,33 @@ def test_summarize_public_and_render():
     public = gate.summarize_public(board)
     assert public["regression"]["score"] == 12.0
     assert "проходит" in gate.render(_base(), _alien(), public, [], [])
+
+
+def test_llm_problem_lists_missing_variables():
+    assert gate.llm_problem({"OPENAI_API_KEY": "k", "OPENAI_MODEL": "m"}) is None
+    problem = gate.llm_problem({"OPENAI_API_KEY": "k"})
+    assert problem and "OPENAI_MODEL" in problem and "OPENAI_API_KEY" not in problem
+
+
+def test_llm_totals_sum_alien_and_public():
+    board = pd.DataFrame(
+        [
+            {"task": "a", "llm_calls": 1, "llm_errors": 0, "llm_tokens": 10, "llm_rub": 0.5},
+            {"task": "a", "llm_calls": 3, "llm_errors": 1, "llm_tokens": 30, "llm_rub": 1.5},  # берём последнюю строку
+        ]
+    )
+    total = gate.llm_totals({"x": {"llm_calls": 2, "llm_errors": 0, "llm_tokens": 20, "llm_rub": 1.0}}, board)
+    assert total == {"llm_calls": 5, "llm_errors": 1, "llm_tokens": 50, "llm_rub": 2.5}
+
+
+def test_llm_checks_fail_when_qwen_never_answered():
+    assert gate.llm_checks(None) == []
+    assert gate.llm_checks({"llm_calls": 4, "llm_errors": 1, "llm_tokens": 1, "llm_rub": 0.1}) == []
+    fails = gate.llm_checks({"llm_calls": 0, "llm_errors": 7, "llm_tokens": 0, "llm_rub": 0})
+    assert fails and "Qwen" in fails[0]
+
+
+def test_render_shows_llm_usage():
+    llm = {"llm_calls": 5, "llm_errors": 1, "llm_tokens": 50, "llm_rub": 2.5}
+    report = gate.render(None, _alien(), _public(), [], [], llm)
+    assert "Qwen" in report and "2.50 ₽" in report
