@@ -215,6 +215,7 @@ def summarize(rows: pd.DataFrame) -> pd.DataFrame:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка гипотез playbook на задачах")
     parser.add_argument("--tasks", nargs="*", type=Path, help="папки задач (по умолчанию все public и practice)")
+    parser.add_argument("--tag", default="", help="метка в имени CSV (параллельные прогоны не перетирают друг друга)")
     parser.add_argument("--only", nargs="*", help="id гипотез (бейзлайн считается всегда)")
     parser.add_argument("--from-csv", nargs="*", type=Path, help="не считать, а свести сохранённые прогоны стенда")
     args = parser.parse_args()
@@ -223,11 +224,18 @@ def main() -> int:
         out = None
     else:
         tasks = [t / "task.md" for t in args.tasks] if args.tasks else find_tasks()
-        rows = pd.DataFrame([r for t in tasks for r in bench_task(t, set(args.only) if args.only else None)])
         out_dir = ROOT / "runs" / "bench"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"playbook-{time.strftime('%Y%m%d-%H%M%S')}.csv"
-        rows.to_csv(out, index=False)
+        out = out_dir / f"playbook-{args.tag + '-' if args.tag else ''}{time.strftime('%Y%m%d-%H%M%S')}.csv"
+        found = []
+        for t in tasks:
+            try:
+                found += bench_task(t, set(args.only) if args.only else None)
+            except Exception as exc:  # noqa: BLE001 — задача, которую агент не разобрал, не роняет весь стенд
+                print(f"\n== {t.parent.name}: пропуск — {exc!r}"[:300], flush=True)
+            if found:  # после каждой задачи: долгий стенд, прерванный на середине, не теряет готовое
+                pd.DataFrame(found).to_csv(out, index=False)
+        rows = pd.DataFrame(found)
     summary = summarize(rows)
     if not summary.empty:
         print(

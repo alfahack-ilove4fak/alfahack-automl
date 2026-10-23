@@ -200,3 +200,27 @@ hypotheses:
     title: LightGBM с более точной сеткой порогов
     rationale: Для непрерывных признаков 1023 бина вместо 255 позволяют найти более точные пороги разбиения
     params: {model: lightgbm, model_params: {max_bin: 1023}}
+
+  - id: lgbm_extra_trees_slow
+    kind: hyperparams
+    title: Случайные пороги + медленный шаг и регуляризация (комбинация)
+    rationale: Две «почти прошедшие» по отдельности (честно лучше на 7/10 задачах, приняты редко) — цикл выигрыши не складывает (#87)
+    params: {model: lightgbm, model_params: {extra_trees: true, learning_rate: 0.02, num_leaves: 31, min_child_samples: 50, reg_lambda: 1.0, colsample_bytree: 0.5}}
+
+  - id: xgboost_slow
+    kind: model
+    title: XGBoost с медленным шагом и половиной признаков (комбинация)
+    rationale: XGBoost и медленный шаг с подвыборкой признаков — честно лучше бейзлайна по отдельности; вместе — меньше переобучения
+    params: {model: xgboost, model_params: {learning_rate: 0.02, colsample_bytree: 0.5}}
+
+  - id: ensemble_lgbm_xgb
+    kind: ensemble
+    title: Среднее LightGBM и XGBoost
+    rationale: Два бустинга с разным ростом деревьев ошибаются по-разному; среднее страхует там, где одна модель проваливается
+    params: {ensemble: [lightgbm, xgboost]}
+
+  - id: ensemble_lgbm_xgb_cat
+    kind: ensemble
+    title: Среднее LightGBM, XGBoost и CatBoost
+    rationale: Три реализации бустинга — самый устойчивый вариант в стенде ml (#200), дороже по времени
+    params: {ensemble: [lightgbm, xgboost, catboost]}
