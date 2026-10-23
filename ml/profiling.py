@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from scipy.stats import ks_2samp
 
 from interfaces.schemas import DataProfile, TaskSpec, TaskType
 from runtime.log import get_logger
@@ -43,12 +44,92 @@ def _skew_warning(skew: float, metric: str, non_negative: bool) -> str:
     )
 
 
+# Утечка / признак, которого нет на момент прогноза (#240, чужая задача leak_column_auc: CV 0.988 против test 0.729)
+TEST_EMPTY_SHARE = 0.95  # колонка пуста почти во всём test …
+TRAIN_FILLED_SHARE = 0.5  # … а в train заполнена хотя бы наполовину — модель выучит то, чего в test не будет
+LEAK_SIGNAL = 0.9  # одиночный сигнал: |ρ Спирмена| с target (регрессия) или |2·AUC−1| (бинарная)
+LEAK_SHIFT_KS = 0.5  # и распределение в test другое (статистика Колмогорова — Смирнова)
+LEAK_SAMPLE = 100_000  # строк для оценки сигнала и сдвига — больше не нужно
+
+
+def _single_signal(x: pd.Series, y: pd.Series, task_type: TaskType) -> float:
+    """Сила одиночного признака: |ρ Спирмена| (регрессия) или |2·AUC−1| (бинарная); мультикласс и мало данных — 0."""
+    ok = x.notna()
+    if task_type == TaskType.MULTICLASS or ok.sum() < 50:
+        return 0.0
+    xr = x[ok].rank().to_numpy()
+    if task_type == TaskType.REGRESSION:
+        yr = pd.to_numeric(y[ok], errors="coerce").rank().to_numpy()
+        if np.isnan(yr).any() or xr.std() == 0 or yr.std() == 0:
+            return 0.0
+        return float(abs(np.corrcoef(xr, yr)[0, 1]))
+    codes = y[ok].astype(str)
+    positive = codes == codes.max()  # для |2·AUC−1| неважно, какой класс «положительный»
+    n_pos, n_neg = int(positive.sum()), int((~positive).sum())
+    if n_pos == 0 or n_neg == 0:
+        return 0.0
+    auc = (xr[positive.to_numpy()].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+    return float(abs(2 * auc - 1))
+
+
+def leak_check(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> tuple[list, list]:
+    """Признаки, которых не будет на момент прогноза: (что выбросить, предупреждения).
+
+    1. Колонка почти пуста в test, а в train заполнена — на ней нельзя предсказывать: модель выучит зависимость, а в
+       test увидит только пропуски (часто это поле, которое заполняют после события — утечка target).
+    2. Числовой признак с почти идеальным одиночным сигналом и другим распределением в test — та же утечка, но
+       test заполнен иначе (нулями, заглушкой). Сильный признак с тем же распределением в test — честный: только
+       предупреждение.
+    Пустой test (нечего сравнивать) — ничего не выбрасываем.
+    """
+    if len(test) == 0:
+        return [], []
+    drop, warnings, strong = [], [], []
+    tr = train.sample(LEAK_SAMPLE, random_state=0) if len(train) > LEAK_SAMPLE else train
+    te = test.sample(LEAK_SAMPLE, random_state=0) if len(test) > LEAK_SAMPLE else test
+    for col in features:
+        empty_test, empty_train = float(te[col].isna().mean()), float(tr[col].isna().mean())
+        if empty_test >= TEST_EMPTY_SHARE and empty_train <= 1 - TRAIN_FILLED_SHARE:
+            drop.append(col)
+            warnings.append(
+                f"Признак {col} пуст в {empty_test:.0%} test, а в train заполнен на {1 - empty_train:.0%} — "
+                "на нём нельзя предсказывать (похоже на поле, которое заполняют после события), выброшен"
+            )
+            continue
+        if not pd.api.types.is_numeric_dtype(tr[col]) or pd.api.types.is_bool_dtype(tr[col]):
+            continue
+        signal = _single_signal(tr[col], tr[spec.target], spec.task_type)
+        if signal < LEAK_SIGNAL:
+            continue
+        a, b = tr[col].dropna(), te[col].dropna()
+        shift = float(ks_2samp(a, b).statistic) if len(a) > 20 and len(b) > 20 else 0.0
+        if shift >= LEAK_SHIFT_KS:
+            drop.append(col)
+            warnings.append(
+                f"Признак {col} почти повторяет target в train (сила {signal:.2f}), а в test распределён иначе "
+                f"(KS={shift:.2f}) — похоже на утечку, выброшен"
+            )
+        else:
+            strong.append(f"{col} ({signal:.2f})")
+    if strong:
+        # Одна строка на все: её читает LLM, пять одинаковых предупреждений — только шум в промпте
+        warnings.append(
+            f"Очень сильные в одиночку признаки, в test распределены так же — оставлены: {', '.join(strong[:5])}"
+            f"{' …' if len(strong) > 5 else ''}; если поле заполняют после события, это утечка"
+        )
+    return drop, warnings
+
+
 def profile_data(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> DataProfile:
     features = [c for c in train.columns if c not in (spec.target, spec.id_column) and c in test.columns]
     numeric, categorical, dropped, warnings = [], [], [], []
+    leaks, leak_warnings = leak_check(spec, train, test, features)
+    for warning in leak_warnings:
+        log.warning(warning)
+    warnings.extend(leak_warnings)
     for col in features:
         series = train[col]
-        if series.nunique(dropna=False) <= 1:
+        if col in leaks or series.nunique(dropna=False) <= 1:
             dropped.append(col)
             continue
         if series.dtype == object or str(series.dtype) in ("category", "bool", "string"):
