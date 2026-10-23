@@ -13,7 +13,7 @@ import pandas as pd
 
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
-from agent.fallback import fallback_hypotheses
+from agent.fallback import fallback_hypotheses, is_fallback
 from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
@@ -30,6 +30,9 @@ BATCH = 3  # гипотез за один запрос к LLM: дешевле, �
 # LLM зовём после playbook (ADR 0014), но к этой доле времени цикла она должна сделать хотя бы один ход: решения
 # должна принимать LLM (вебинар), а на больших данных playbook может занять весь бюджет (ревью #257)
 LLM_TURN_SHARE = 0.5
+# запасные направления (#200) берём порциями: между порциями LLM снова получает ход (если доступна), а порция
+# после нового лучшего строится заново от него
+FALLBACK_CHUNK = 2 * BATCH
 
 
 def run_autoresearch(
@@ -98,9 +101,12 @@ def run_autoresearch(
             queue = [h for h in queue if h.id not in rejected]
         if not queue:
             # playbook и LLM пусты, а время есть — не выходим, а берём запасные направления (#200)
-            queue = fallback_hypotheses(spec, history, best, budget)
+            directions = fallback_hypotheses(spec, history, best, budget, profile)
+            queue = directions[:FALLBACK_CHUNK]
             if queue:
-                log.info("Playbook и LLM исчерпаны — запасные направления: %d гипотез", len(queue))
+                log.info(
+                    "Playbook и LLM исчерпаны — запасные направления: %d из %d гипотез", len(queue), len(directions)
+                )
         if not queue:
             log.info("Гипотезы закончились — завершаю цикл")
             break
@@ -131,6 +137,8 @@ def run_autoresearch(
             log.info("  ✓ лучше: %.5f → %.5f — %s", best[1].mean_score, result.mean_score, reason)
             best = (run_hyp, result)
             on_new_best(run_hyp, result)
+            # запасные в очереди построены от прошлого лучшего — следующая порция строится от нового
+            queue = [h for h in queue if not is_fallback(h)]
         else:
             log.info("  · не лучше: %.5f (лучший %.5f) — %s", result.mean_score, best[1].mean_score, reason)
     llm.log_summary()  # токены и время LLM — тай-брейк при равном балле; журнал вызовов — llm_calls.jsonl
@@ -139,23 +147,40 @@ def run_autoresearch(
 
 
 def llm_decisions(history: list[tuple[Hypothesis, ExperimentResult]], memory: ResearchMemory) -> str:
-    """Итог решений LLM за прогон: что предложила и что из этого вышло.
+    """Итог решений LLM за прогон: что предложила и что из этого вышло — по каждой гипотезе.
 
-    Вебинар: детерминированный агент «не имеет смысла», топ проверят вручную — по этой строке в agent.log видно,
-    какие гипотезы придумала LLM (включая код признаков) и какие из них агент принял.
+    Вебинар: детерминированный агент «не имеет смысла», топ проверят вручную — по этому блоку в agent.log видно,
+    какие гипотезы придумала LLM (включая код признаков), какие агент принял, а какие и почему — нет:
+    «предложено → принято / не лучше / пропущено / упало», плюс отброшенные ещё при разборе ответа.
     """
     ran = [(h, r) for h, r in history if h.source == "llm"]
-    if not ran:
+    if not ran and not memory.llm_rejected:
         return "Решения LLM: гипотез от LLM не было — работали playbook и правила"
     accepted = [h.id for h, _ in ran if memory.verdicts.get(h.id, "").startswith("принята")]
     skipped = sum(r.status == ExperimentStatus.SKIPPED for _, r in ran)
     failed = sum(r.status in (ExperimentStatus.FAILED, ExperimentStatus.TIMEOUT) for _, r in ran)
     worse = len(ran) - len(accepted) - skipped - failed
     taken = f"принято {len(accepted)} ({', '.join(accepted)})" if accepted else "принято 0"
-    return (
+    lines = [
         f"Решения LLM: предложено {len(ran)} → {taken}, не лучше {worse}, "
         f"пропущено критиком {skipped}, упало {failed}"
-    )
+        + (f"; отброшено при разборе ответа {len(memory.llm_rejected)}" if memory.llm_rejected else "")
+    ]
+    for hyp, result in ran:
+        lines.append(f"  {hyp.id} «{hyp.title[:60]}» → {_outcome(hyp, result, memory)}")
+    lines += [f"  {item} → отброшена при разборе" for item in memory.llm_rejected]
+    return "\n".join(lines)
+
+
+def _outcome(hyp: Hypothesis, result: ExperimentResult, memory: ResearchMemory) -> str:
+    verdict = memory.verdicts.get(hyp.id, "")
+    if verdict.startswith("принята"):
+        return verdict
+    if result.status == ExperimentStatus.SKIPPED:
+        return f"пропущена: {result.error or verdict}"
+    if result.status in (ExperimentStatus.FAILED, ExperimentStatus.TIMEOUT):
+        return f"упала ({result.status.value}): {(result.error or '')[:120]}"
+    return "не лучше" + (f": {verdict.split(': ', 1)[1]}" if ": " in verdict else "")
 
 
 def _skipped(hyp: Hypothesis, spec: TaskSpec, reason: str) -> ExperimentResult:
