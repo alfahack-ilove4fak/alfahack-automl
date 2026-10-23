@@ -4,7 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.llm_client import DEFAULT_REASONING_TOKENS, MAX_RETRIES, MIN_CALL_SECONDS, LLMClient
+from agent.llm_client import (
+    DEFAULT_REASONING_TOKENS,
+    MAX_CALL_SECONDS,
+    MIN_CALL_SECONDS,
+    TIMEOUT_COOLDOWN_SECONDS,
+    TIMEOUTS_TO_PAUSE,
+    LLMClient,
+)
 
 MESSAGES = [{"role": "user", "content": "предложи гипотезы"}]
 
@@ -206,14 +213,13 @@ def test_truncated_answer_not_cached(client, tmp_path):
 @pytest.mark.parametrize(
     "seconds_left, expected",
     [
-        (None, None),  # бюджет не передан — как раньше
-        (3600, None),  # четверть остатка больше полного таймаута с повторами — не ограничиваем
-        (400, 100.0),  # ждём не дольше четверти остатка
+        (None, MAX_CALL_SECONDS),  # бюджет не передан — всё равно не дольше потолка на запрос (#239)
+        (3600, MAX_CALL_SECONDS),  # бюджета много — потолок, а не четверть остатка
+        (300, 75.0),  # ждём не дольше четверти остатка
         (4 * MIN_CALL_SECONDS - 1, 0.0),  # меньше MIN_CALL_SECONDS на ответ — не зовём
     ],
 )
 def test_time_limit(client, seconds_left, expected):
-    assert client.timeout * (1 + MAX_RETRIES) < 0.25 * 3600
     assert client.time_limit(seconds_left) == expected
 
 
@@ -225,15 +231,18 @@ def test_no_time_no_request(client):
 
 
 def test_short_time_uses_short_timeout(client):
+    client.stream = False
     fake = client._client = FakeOpenAI(["{}"])
-    assert client.chat(MESSAGES, seconds_left=400) == "{}"
-    assert fake.options["max_retries"] == 0 and fake.options["timeout"] == pytest.approx(100.0, abs=0.5)
+    assert client.chat(MESSAGES, seconds_left=300) == "{}"
+    assert fake.options["max_retries"] == 0 and fake.options["timeout"] == pytest.approx(75.0, abs=0.5)
 
 
-def test_plenty_of_time_default_timeout(client):
+def test_plenty_of_time_still_capped(client):
+    """#239: даже при 3 ч бюджета запрос не ждёт дольше потолка. Первый кусок потока ждём весь остаток срока:
+    под нагрузкой рассуждающая модель может молчать дольше 30 с (ревью #244)."""
     fake = client._client = FakeOpenAI(["{}"])
-    assert client.chat(MESSAGES, seconds_left=3600) == "{}"
-    assert fake.options is None
+    assert client.chat(MESSAGES, seconds_left=10800) == "{}"
+    assert fake.options["timeout"] == pytest.approx(MAX_CALL_SECONDS, abs=0.5)
 
 
 def test_cache_served_even_without_time(client, tmp_path):
@@ -473,7 +482,8 @@ def test_no_retry_when_time_is_short(client, monkeypatch):
 def test_pause_after_failures_then_llm_comes_back(client, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("agent.llm_client.time.monotonic", lambda: clock[0])
-    client._client = FakeOpenAI([TimeoutError("нет сети")] * 3 + ["{}"])
+    disconnect, _ = _openai_errors()
+    client._client = FakeOpenAI([disconnect] * 12 + ["{}"])  # 1 + 3 повтора на запрос
     for _ in range(3):
         client.chat(MESSAGES)
     assert not client.available()  # пауза после трёх сбоев подряд
@@ -588,3 +598,79 @@ def test_raw_httpx_cut_midstream_is_retried(client):
     fake = client._client = StreamOpenAI([[_chunk("{"), cut], [_chunk("{}", "stop")]])
     assert client.chat(MESSAGES) == "{}"
     assert fake.requests == 2
+
+
+# ---------------------------------------------------------------- потолок времени на запрос (#239, ночной аудит #230)
+
+
+def test_trickle_stream_cut_at_deadline(client, monkeypatch):
+    """«Струйка» (символ раз в 3 с) не рвётся таймаутом чтения — срок проверяем между кусками и не повторяем."""
+    clock = [1000.0]
+    monkeypatch.setattr("agent.llm_client.time.monotonic", lambda: clock[0])
+
+    class Trickle(StreamOpenAI):
+        def _create(self, **kwargs):
+            self.requests += 1
+
+            def gen():
+                while True:
+                    clock[0] += 3
+                    yield _chunk("x")
+
+            return gen()
+
+    fake = client._client = Trickle([])
+    assert client.chat(MESSAGES, seconds_left=10800) is None
+    assert fake.requests == 1  # срок вышел — повтор бессмысленен
+    assert clock[0] - 1000.0 <= MAX_CALL_SECONDS + 3
+    assert client.timeouts == 1 and client.available()
+
+
+def test_long_pause_after_timeouts_then_llm_comes_back(client, monkeypatch, caplog):
+    """3 запроса подряд по таймауту — пауза TIMEOUT_COOLDOWN_SECONDS (не обычные 120 с), потом LLM снова пробуем.
+
+    Ревью #244: Qwen общая, перегрузка в начале не должна навсегда лишить задачу LLM.
+    """
+    import openai
+
+    clock = [1000.0]
+    monkeypatch.setattr("agent.llm_client.time.monotonic", lambda: clock[0])
+    # 1 + 3 повтора на запрос: часы стоят, срок не выходит — как таймаут чтения раньше срока
+    client._client = FakeOpenAI([openai.APITimeoutError(request=None)] * 4 * TIMEOUTS_TO_PAUSE + ["{}"])
+    for _ in range(TIMEOUTS_TO_PAUSE):
+        client.chat(MESSAGES, max_wait=60)
+    assert "не уложились" in caplog.text
+    clock[0] += 130  # обычная пауза после сбоев прошла бы, а за таймауты — длиннее
+    assert not client.available()
+    clock[0] += TIMEOUT_COOLDOWN_SECONDS
+    assert client.available()
+    assert client.chat(MESSAGES) == "{}"
+    assert client.timeouts == 0 and client.failures == 0
+
+
+def test_success_resets_timeouts(client):
+    import openai
+
+    client._client = FakeOpenAI([openai.APITimeoutError(request=None)] * 4 + ["{}"])
+    client.chat(MESSAGES, max_wait=60)
+    assert client.timeouts == 1
+    assert client.chat(MESSAGES) == "{}"
+    assert client.timeouts == 0
+
+
+def test_stream_options_dropped_if_server_rejects(client, no_pause):
+    """#224: сервер не понимает stream_options — один повтор без него, текст получен, дальше без параметра."""
+    _, status = _openai_errors()
+
+    class Picky(StreamOpenAI):
+        def _create(self, **kwargs):
+            if "stream_options" in kwargs:
+                self.requests += 1
+                raise status(400, "unsupported parameter: stream_options")
+            return super()._create(**kwargs)
+
+    fake = client._client = Picky([[_chunk("{}", "stop")], [_chunk("{}", "stop")]])
+    assert client.chat(MESSAGES) == "{}"
+    assert fake.requests == 2 and client.stream_usage is False
+    client.chat(MESSAGES + [{"role": "user", "content": "ещё"}])
+    assert "stream_options" not in fake.kwargs[-1]
