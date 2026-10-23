@@ -1,7 +1,7 @@
 """Откуда берутся гипотезы. Владелец — LLM/agent-инженер (playbook — Research/DS).
 
-Если LLM доступна — она смотрит на DataProfile и историю экспериментов и предлагает новые гипотезы
-(agent/llm_hypotheses.py). Недостающие и все гипотезы без LLM — из research/playbook.yaml по порядку.
+Сначала — research/playbook.yaml по порядку. Когда применимые гипотезы playbook кончились и LLM доступна, она
+смотрит на DataProfile и историю экспериментов и предлагает новые (agent/llm_hypotheses.py; ADR 0014).
 Повторы (тот же id или те же params, что уже проверялись) отсекаются. params сравниваются в каноническом виде
 (canonical_params): значения по умолчанию и «выключенные» ключи не делают гипотезу новой.
 """
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import yaml
@@ -132,6 +133,9 @@ def run_scheme(history: list[tuple[Hypothesis, ExperimentResult]]) -> str | None
     return history[0][0].params.get("validation") if history else None
 
 
+LLM_FIRST_ENV = "AGENT_LLM_FIRST"  # "1" — прежний порядок: сначала LLM, потом playbook (для сравнения, ADR 0014)
+
+
 def propose_hypotheses(
     spec: TaskSpec,
     profile: DataProfile,
@@ -141,26 +145,57 @@ def propose_hypotheses(
     llm: LLMClient | None = None,
     memory: ResearchMemory | None = None,
 ) -> list[Hypothesis]:
-    """Сначала гипотезы от LLM (если она доступна), недостающие — из playbook. Повторы истории отсекаются.
+    """Сначала playbook, недостающие — от LLM (ADR 0014). Повторы истории отсекаются.
 
-    budget (контракт 1.1, D3): по остатку времени LLM-клиент решает, звать ли модель и сколько ждать;
-    playbook бюджет не требует.
+    Playbook бесплатен и мгновенен, а LLM на замере (#179) выигрыша не дала, но стоила времени и токенов
+    (тай-брейки платформы). Поэтому LLM зовём, когда применимые гипотезы playbook кончились: она видит всю их
+    историю и предлагает то, чего в playbook нет. AGENT_LLM_FIRST=1 — прежний порядок.
+    budget (контракт 1.1, D3): по остатку времени LLM-клиент решает, звать ли модель и сколько ждать.
     """
-    out: list[Hypothesis] = []
-    if llm is not None:
-        from agent.llm_hypotheses import llm_hypotheses  # здесь: llm_hypotheses сам импортирует этот модуль
+    llm_first = os.getenv(LLM_FIRST_ENV, "0") == "1"
+    out: list[Hypothesis] = _llm_part(spec, profile, history, k, llm, memory, budget) if llm_first else []
+    out += _playbook_part(spec, profile, history, k - len(out), out)
+    if not llm_first and len(out) < k:
+        out += _dedup(_llm_part(spec, profile, history, k - len(out), llm, memory, budget), history, out)
+    return out
 
-        out = llm_hypotheses(spec, profile, history, k, llm, memory, budget)
+
+def _llm_part(spec, profile, history, k, llm, memory, budget) -> list[Hypothesis]:
+    if llm is None or k <= 0:
+        return []
+    from agent.llm_hypotheses import llm_hypotheses  # здесь: llm_hypotheses сам импортирует этот модуль
+
+    return llm_hypotheses(spec, profile, history, k, llm, memory, budget)
+
+
+def _dedup(hyps: list[Hypothesis], history, out: list[Hypothesis]) -> list[Hypothesis]:
+    """Гипотезы без повторов истории и уже выбранных (по id и по сути params)."""
+    scheme = run_scheme(history)
+    seen_ids = {h.id for h, _ in history} | {h.id for h in out}
+    seen = {params_key(h.params, scheme) for h, _ in history} | {params_key(h.params, scheme) for h in out}
+    fresh = []
+    for hyp in hyps:
+        key = params_key(hyp.params, scheme)
+        if hyp.id not in seen_ids and key not in seen:
+            fresh.append(hyp)
+            seen_ids.add(hyp.id)
+            seen.add(key)
+    return fresh
+
+
+def _playbook_part(spec, profile, history, k, out: list[Hypothesis]) -> list[Hypothesis]:
+    """До k применимых гипотез playbook, которых ещё не было в истории и среди out."""
+    picked: list[Hypothesis] = []
     tried = {h.id for h, _ in history} | {h.id for h in out}
     scheme = run_scheme(history)
     seen_params = {params_key(h.params, scheme) for h, _ in history} | {params_key(h.params, scheme) for h in out}
     for item in load_playbook():
-        if len(out) >= k:
+        if len(picked) >= k:
             break
         params = item.get("params", {})
         if item["id"] in tried or params_key(params, scheme) in seen_params or not _applies(item, spec, profile):
             continue
-        out.append(
+        picked.append(
             Hypothesis(
                 id=item["id"],
                 kind=HypothesisKind(item["kind"]),
@@ -171,4 +206,4 @@ def propose_hypotheses(
             )
         )
         seen_params.add(params_key(params, scheme))
-    return out
+    return picked

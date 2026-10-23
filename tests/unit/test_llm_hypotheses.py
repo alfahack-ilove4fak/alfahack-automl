@@ -71,7 +71,8 @@ def playbook_ids(spec, profile, k):
     return [h.id for h in propose_hypotheses(spec, profile, baseline_history(), k=k)]
 
 
-def test_good_answer_goes_first(spec, profile):
+def test_good_answer_goes_first(spec, profile, monkeypatch):
+    monkeypatch.setenv("AGENT_LLM_FIRST", "1")  # механика LLM-части; порядок ADR 0014 — в test_playbook_first
     out = propose_hypotheses(spec, profile, baseline_history(), k=3, llm=FakeLLM([GOOD]))
     assert out[0].id == "lgbm_l2" and out[0].source == "llm"
     assert [h.source for h in out[1:]] == ["playbook", "playbook"]  # недостающие — из playbook
@@ -139,6 +140,7 @@ def test_playbook_skips_params_already_proposed_by_llm(spec, profile):
 
 
 def test_real_client_json_in_markdown(spec, profile, monkeypatch):
+    monkeypatch.setenv("AGENT_LLM_FIRST", "1")  # механика LLM-части; порядок ADR 0014 — в test_playbook_first
     monkeypatch.setenv("LLM_MOCK", "1")
     client = LLMClient()
     monkeypatch.setattr(client, "available", lambda: True)
@@ -154,6 +156,7 @@ def test_real_client_json_in_markdown(spec, profile, monkeypatch):
 
 @pytest.mark.parametrize("answer", [[GOOD], None, "мусор"])
 def test_loop_survives_any_llm_answer(spec, profile, monkeypatch, answer):
+    monkeypatch.setenv("AGENT_LLM_FIRST", "1")  # механика LLM-части; порядок ADR 0014 — в test_playbook_first
     monkeypatch.setenv("AGENT_FEATURE_CODE", "0")  # считаем только запросы гипотез и рефлексии
 
     def fake_experiment(spec, profile, hyp, train, budget):
@@ -180,7 +183,8 @@ def test_loop_survives_any_llm_answer(spec, profile, monkeypatch, answer):
     assert llm.requests == 2  # 4 итерации по 3 гипотезы за запрос
 
 
-def test_budget_positional_as_in_protocol(spec, profile):
+def test_budget_positional_as_in_protocol(spec, profile, monkeypatch):
+    monkeypatch.setenv("AGENT_LLM_FIRST", "1")  # механика LLM-части; порядок ADR 0014 — в test_playbook_first
     # контракт 1.1 (D3): propose_hypotheses(spec, profile, history, k, budget)
     llm = FakeLLM([GOOD])
     budget = RunBudget(total_seconds=1000, safety_seconds=0)
@@ -253,7 +257,8 @@ def test_baseline_equivalent_is_a_repeat():
     assert canonical_params({"model": "lightgbm", "model_params": {"n_estimators": 3000}}) == {}
 
 
-def test_playbook_skips_llm_repeat_written_differently(spec, profile):
+def test_playbook_skips_llm_repeat_written_differently(spec, profile, monkeypatch):
+    monkeypatch.setenv("AGENT_LLM_FIRST", "1")  # механика LLM-части; порядок ADR 0014 — в test_playbook_first
     spec = spec.model_copy(update={"task_type": TaskType.MULTICLASS})
     profile = profile.model_copy(update={"target_summary": {"imbalance_ratio": 10}})
     same = {**GOOD, "id": "llm_balanced", "params": {"model": "lightgbm", "class_weight": "balanced", "n_folds": 5}}
@@ -281,3 +286,32 @@ def test_zero_seed_survives_with_off_keys():
 
 def test_validation_column_name_is_stripped_not_lowered():
     assert params_key({"validation": " time:Year "}) == params_key({"validation": "time:Year"})
+
+
+# ---------------------------------------------------------------- ADR 0014: сначала playbook, LLM — когда он исчерпан
+
+
+def test_playbook_first_llm_not_asked_while_playbook_has_hypotheses(spec, profile):
+    llm = FakeLLM([GOOD])
+    out = propose_hypotheses(spec, profile, baseline_history(), k=3, llm=llm)
+    assert [h.id for h in out] == playbook_ids(spec, profile, 3) and llm.requests == 0
+
+
+def test_llm_fills_when_playbook_exhausted(spec, profile, monkeypatch):
+    from agent import hypotheses
+
+    first = playbook_ids(spec, profile, 1)[0]
+    items = [item for item in load_playbook() if item["id"] == first]
+    monkeypatch.setattr(hypotheses, "load_playbook", lambda: items)  # в playbook осталась одна применимая гипотеза
+    llm = FakeLLM([GOOD])
+    out = propose_hypotheses(spec, profile, baseline_history(), k=3, llm=llm)
+    assert [h.source for h in out] == ["playbook", "llm"] and llm.requests == 1
+
+
+def test_llm_repeat_of_playbook_in_same_batch_dropped(spec, profile, monkeypatch):
+    from agent import hypotheses
+
+    item = {"id": "pb", "kind": "hyperparams", "title": "t", "params": GOOD["params"]}
+    monkeypatch.setattr(hypotheses, "load_playbook", lambda: [item])
+    out = propose_hypotheses(spec, profile, baseline_history(), k=3, llm=FakeLLM([GOOD]))
+    assert [h.id for h in out] == ["pb"]  # LLM повторила гипотезу playbook той же пачки — не берём

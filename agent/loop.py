@@ -12,7 +12,7 @@ import pandas as pd
 
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
-from agent.fallback import fallback_hypotheses, is_fallback
+from agent.fallback import fallback_hypotheses
 from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
 from agent.llm_client import LLMClient
@@ -61,12 +61,13 @@ def run_autoresearch(
         if not queue:
             batch = history[batch_start:]
             missed = batch and not any(memory.verdicts.get(h.id, "").startswith("принята") for h, _ in batch)
-            # пачку запасных направлений придумали правила, а не LLM — рефлексия по ней тратит токены впустую
-            if missed and not all(is_fallback(h) for h, _ in batch):
+            # рефлексия — только по пачкам с гипотезами LLM (ADR 0014): playbook и запасные направления придумала
+            # не она, разбор их неудач тратит токены впустую
+            if missed and any(h.source == "llm" for h, _ in batch):
                 reflect(spec, best, batch, llm, memory, budget)  # вся пачка мимо — спросим LLM, почему
             queue = propose_hypotheses(spec, profile, history, k=BATCH, budget=budget, llm=llm, memory=memory)
-            if batch and feature_tries < MAX_FEATURE_TRIES:
-                # после первой пачки, когда лучший известен: LLM пишет код признаков (A-L3-1), он идёт в песочнице
+            if batch and feature_tries < MAX_FEATURE_TRIES and not any(h.source == "playbook" for h in queue):
+                # когда playbook исчерпан (ADR 0014) и лучший известен: LLM пишет код признаков (A-L3-1) для песочницы
                 feature_tries += 1
                 feature_hyp = propose_feature_hypothesis(spec, profile, history, llm, best[0], budget)
                 if feature_hyp is not None:
