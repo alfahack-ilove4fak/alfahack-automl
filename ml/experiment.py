@@ -33,6 +33,10 @@
   ensemble       — список моделей, прогноз — среднее их прогнозов (вероятностей у классификации): ["lightgbm", "xgboost"]
                    или [{model: xgboost, model_params: {...}}, ...]; у каждой своя ранняя остановка и число деревьев.
                    Остальные params (log_target, class_weight, feature_ops, proba_weights…) — общие для всех моделей
+  objective      — "metric": цель обучения под метрику задачи для выбранной модели (регрессия; #186, #237): MAE/MedAE/
+                   WAPE → L1, pinball@α → квантиль α, Huber → Huber δ=1, MAPE → MAPE, девиансы → Poisson/Gamma/Tweedie
+                   (METRIC_OBJECTIVES). Нет своей цели у метрики или модели, обучение на log1p(y), цель задана в
+                   model_params явно или таргет ей не подходит (Poisson на отрицательных) — L2, как без ключа
 
 """
 
@@ -146,8 +150,109 @@ def _encode_target(spec: TaskSpec, y: pd.Series) -> np.ndarray:
     return y.to_numpy(dtype=float)
 
 
-def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis):
-    params = {**BASE_PARAMS, **hypothesis.params.get("model_params", {})}
+# Цель обучения под метрику (#186, #237): метрика → вид цели. Метрик здесь нет — учимся на L2, как раньше.
+# WAPE = Σ|e| / Σ|y| и MedAE оптимизируются медианой (L1), как MAE
+METRIC_OBJECTIVES = {
+    "mae": "l1",
+    "medae": "l1",
+    "wape": "l1",
+    "pinball": "quantile",
+    "huber": "huber",
+    "mape": "mape",
+    "poisson_deviance": "poisson",
+    "gamma_deviance": "gamma",
+    "tweedie_deviance": "tweedie",
+}
+HUBER_DELTA = 1.0  # как в evaluation.metrics._huber
+TWEEDIE_POWER = 1.5  # как в метрике tweedie_deviance (evaluation/metrics.py)
+OBJECTIVE_KEYS = ("objective", "loss_function", "loss")  # цель, заданная в model_params явно, важнее подстановки
+
+
+def _objective_by_model(kind: str, alpha: float) -> dict[str, dict]:
+    """Параметры цели вида kind для каждой модели; модели без подходящей цели в словаре нет (учится на L2)."""
+    return {
+        "l1": {
+            "lightgbm": {"objective": "l1"},
+            "xgboost": {"objective": "reg:absoluteerror"},
+            "catboost": {"loss_function": "MAE"},
+            "hist_gb": {"loss": "absolute_error"},
+        },
+        "quantile": {
+            "lightgbm": {"objective": "quantile", "alpha": alpha},
+            "xgboost": {"objective": "reg:quantileerror", "quantile_alpha": alpha},
+            "catboost": {"loss_function": f"Quantile:alpha={alpha}"},
+            "hist_gb": {"loss": "quantile", "quantile": alpha},
+        },
+        "huber": {
+            "lightgbm": {"objective": "huber", "alpha": HUBER_DELTA},  # у LightGBM alpha — это δ Huber
+            "xgboost": {"objective": "reg:pseudohubererror", "huber_slope": HUBER_DELTA},
+            "catboost": {"loss_function": f"Huber:delta={HUBER_DELTA}"},
+        },
+        "mape": {"lightgbm": {"objective": "mape"}, "catboost": {"loss_function": "MAPE"}},
+        "poisson": {
+            "lightgbm": {"objective": "poisson"},
+            "xgboost": {"objective": "count:poisson"},
+            "catboost": {"loss_function": "Poisson"},
+            "hist_gb": {"loss": "poisson"},
+        },
+        "gamma": {
+            "lightgbm": {"objective": "gamma"},
+            "xgboost": {"objective": "reg:gamma"},
+            "hist_gb": {"loss": "gamma"},
+        },
+        "tweedie": {
+            "lightgbm": {"objective": "tweedie", "tweedie_variance_power": TWEEDIE_POWER},
+            "xgboost": {"objective": "reg:tweedie", "tweedie_variance_power": TWEEDIE_POWER},
+            "catboost": {"loss_function": f"Tweedie:variance_power={TWEEDIE_POWER}"},
+        },
+    }[kind]
+
+
+def metric_objective_kind(spec: TaskSpec, params: dict) -> tuple[str, float] | None:
+    """(вид цели, α квантиля) под метрику задачи, если гипотеза просит params.objective="metric", иначе None.
+
+    None и для классификации, и при обучении на log1p(y) (метрика тогда уже на другой шкале), и для метрик без
+    своей цели (RMSE, R² — L2 по умолчанию и так под них).
+    """
+    objective = params.get("objective")
+    if objective is None:
+        return None
+    if objective != "metric":
+        raise ValueError(f"params.objective={objective!r}: поддерживается только 'metric'")
+    if spec.task_type != TaskType.REGRESSION or _use_log_target(spec, params):
+        return None
+    base, _, level = spec.metric.name.partition("@")
+    kind = METRIC_OBJECTIVES.get(base)
+    if kind is None:
+        return None
+    return kind, float(level) if level else 0.5
+
+
+def _objective_params(spec: TaskSpec, hypothesis: Hypothesis, model: str, y: np.ndarray | None) -> dict:
+    """Параметры цели под метрику для модели model (или {}): см. params.objective в шапке модуля.
+
+    Таргет не подходит цели (Poisson/Tweedie — отрицательные значения, Gamma — неположительные) — {} (L2), а не
+    падение гипотезы: на другой задаче та же гипотеза полезна.
+    """
+    if any(key in hypothesis.params.get("model_params", {}) for key in OBJECTIVE_KEYS):
+        return {}
+    resolved = metric_objective_kind(spec, hypothesis.params)
+    if resolved is None:
+        return {}
+    kind, alpha = resolved
+    if y is not None and len(y):
+        low = float(np.nanmin(y))
+        if (kind in ("poisson", "tweedie") and low < 0) or (kind == "gamma" and low <= 0):
+            return {}
+    return dict(_objective_by_model(kind, alpha).get(model, {}))
+
+
+def _make_lightgbm(spec: TaskSpec, hypothesis: Hypothesis, y: np.ndarray | None = None):
+    params = {
+        **BASE_PARAMS,
+        **_objective_params(spec, hypothesis, "lightgbm", y),
+        **hypothesis.params.get("model_params", {}),
+    }
     if _is_classification(spec):
         return lgb.LGBMClassifier(class_weight=hypothesis.params.get("class_weight"), **params)
     return lgb.LGBMRegressor(**params)
@@ -170,7 +275,7 @@ def _fit_lightgbm(
     С eval_set — ранняя остановка на валидации фолда (CV).
     Без eval_set — ровно n_estimators деревьев (финальное обучение на всём train).
     """
-    model = _make_lightgbm(spec, hypothesis)
+    model = _make_lightgbm(spec, hypothesis, y)
     if n_estimators is not None:
         model.set_params(n_estimators=n_estimators)
     if eval_set is None:
@@ -196,7 +301,11 @@ def _fit_catboost(
     # Импорт здесь, а не в начале файла: catboost — из группы full, без него падает только эта гипотеза
     from catboost import CatBoostClassifier, CatBoostRegressor
 
-    params = {**CATBOOST_PARAMS, **hypothesis.params.get("model_params", {})}
+    params = {
+        **CATBOOST_PARAMS,
+        **_objective_params(spec, hypothesis, "catboost", y),
+        **hypothesis.params.get("model_params", {}),
+    }
     if n_estimators is not None:
         params["iterations"] = n_estimators
     params["cat_features"] = [c for c in x.columns if isinstance(x[c].dtype, pd.CategoricalDtype)]
@@ -226,7 +335,11 @@ def _fit_xgboost(
     # Импорт здесь: xgboost — из группы full, без него падает только эта гипотеза
     from xgboost import XGBClassifier, XGBRegressor
 
-    params = {**XGBOOST_PARAMS, **hypothesis.params.get("model_params", {})}
+    params = {
+        **XGBOOST_PARAMS,
+        **_objective_params(spec, hypothesis, "xgboost", y),
+        **hypothesis.params.get("model_params", {}),
+    }
     if n_estimators is not None:
         params["n_estimators"] = n_estimators
     if eval_set is not None:
@@ -312,6 +425,7 @@ def _fit_hist_gb(
         # Внутренняя валидация делится со стратификацией: класс из 1 объекта её ломает — тогда без остановки
         if _is_classification(spec) and np.unique(y, return_counts=True)[1].min() < 2:
             params.update(early_stopping=False, max_iter=300)
+    params.update(_objective_params(spec, hypothesis, "hist_gb", y))
     params.update(hypothesis.params.get("model_params", {}))
     if _is_classification(spec):
         estimator = HistGradientBoostingClassifier(class_weight=hypothesis.params.get("class_weight"), **params)
@@ -711,8 +825,51 @@ def run_experiment(
 PROBA_EPS = 1e-6  # вероятности 0 и 1 logloss штрафует бесконечно — слегка отодвигаем от краёв
 
 
+def _label_key(value: str) -> str:
+    """Имя класса без регистра и пробелов по краям; число — в одном виде («1», «1.0» → «1»)."""
+    text = str(value).strip().lower()
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return str(int(number)) if number.is_integer() else repr(number)
+
+
+def _name_variants(columns: list[str]):
+    """Имена колонок как есть, затем без общей приставки и окончания — от самой длинной обрезки к короткой.
+
+    «proba_low», «proba_long» → общая приставка «proba_lo», но нужна «proba_»: поэтому перебираем все длины,
+    а какая верная — решает сопоставление с классами. Имя целиком не обрезаем («p1», «p10» → «1», «10»).
+    """
+    yield columns  # точное совпадение — раньше любой обрезки
+    shortest = min(len(c) for c in columns)
+    prefix = os.path.commonprefix(columns)
+    suffix = os.path.commonprefix([c[::-1] for c in columns])
+    for p in range(min(len(prefix), shortest - 1), -1, -1):
+        for s in range(min(len(suffix), shortest - p - 1), -1, -1):
+            yield [c[p : len(c) - s] for c in columns]
+
+
+def match_class_columns(columns: list[str], class_labels: list[str]) -> list[str] | None:
+    """Колонка ответа → класс по имени (#238): без регистра и без общей приставки/окончания («proba_<класс>»).
+
+    None — по имени однозначно не сопоставить (тогда вызывающий сопоставляет по порядку). Сопоставление только
+    взаимно однозначное: два класса с одним ключом, колонка без класса или две колонки на класс — None.
+    """
+    labels: dict[str, list[str]] = {}
+    for label in class_labels:
+        labels.setdefault(_label_key(label), []).append(label)
+    if not columns or any(len(same) > 1 for same in labels.values()):
+        return None
+    for names in _name_variants(list(map(str, columns))):
+        matched = [labels.get(_label_key(name), [None])[0] for name in names]
+        if None not in matched and len(set(matched)) == len(matched) == len(class_labels):
+            return matched
+    return None
+
+
 def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.ndarray) -> dict[str, np.ndarray]:
-    """Колонки ответа → вероятности классов. Имена совпадают с классами — по имени, иначе — по порядку (с записью в лог).
+    """Колонки ответа → вероятности классов: по имени (match_class_columns), иначе — по порядку (с записью в лог).
 
     Столбцы proba идут в порядке class_labels (так кодируется target). Строки нормируются к сумме 1.
     """
@@ -720,9 +877,12 @@ def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.nd
         raise ValueError(f"колонок ответа {len(columns)}, а классов {proba.shape[1]}: {columns} / {class_labels}")
     proba = np.clip(proba, PROBA_EPS, 1 - PROBA_EPS)
     proba = proba / proba.sum(axis=1, keepdims=True)
-    if set(columns) == set(class_labels):
+    matched = match_class_columns(columns, class_labels)
+    if matched is not None:
         index = {label: i for i, label in enumerate(class_labels)}
-        return {col: proba[:, index[col]] for col in columns}
+        if matched != list(columns):
+            log.info("Колонки ответа ↔ классы по имени: %s", dict(zip(columns, matched, strict=True)))
+        return {col: proba[:, index[label]] for col, label in zip(columns, matched, strict=True)}
     log.warning("Колонки ответа %s не совпадают с классами %s — сопоставляю по порядку", columns, class_labels)
     return {col: proba[:, i] for i, col in enumerate(columns)}
 

@@ -87,7 +87,7 @@ def fit_extra_targets(spec: TaskSpec, train, test) -> list[pd.DataFrame]:
     for target in spec.extra_targets:
         sub = spec_for_target(spec, target, train[target])
         try:
-            parts.append(fit_predict_final(sub, profile_data(sub, train, test), baseline_hypothesis(), train, test))
+            parts.append(fit_predict_final(sub, profile_data(sub, train, test), baseline_hypothesis(sub), train, test))
             log.info("Таргет %s (%s): модель обучена", target, sub.task_type.value)
         except Exception:  # noqa: BLE001 — один таргет не должен стоить ответа по остальным
             log.exception("Таргет %s: модель не обучилась — тривиальный ответ", target)
@@ -134,7 +134,7 @@ def baseline_ladder(spec: TaskSpec, profile: DataProfile, train, test, budget: R
     except Exception:  # noqa: BLE001 — без выбранной схемы работаем в обычной CV
         log.exception("Схема валидации не выбрана — обычная CV")
         validation = None  # сам выбор схемы пишет её в лог с причиной
-    base = baseline_hypothesis()
+    base = baseline_hypothesis(spec)
     rungs = []
     if validation not in PLAIN_SCHEMES:
         rungs.append((base.model_copy(update={"params": {**base.params, "validation": validation}}), train))
