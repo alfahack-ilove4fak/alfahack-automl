@@ -134,3 +134,10 @@ def test_unknown_placeholder_returns_none(spec, profile, monkeypatch, tmp_path):
 def test_prompt_asks_for_diverse_batch(spec, profile):
     # прогон с настоящим Qwen: 2 из 3 гипотез были про log1p — пачка должна быть из разных направлений
     assert "разных направлений" in user_prompt(spec, profile)
+
+
+def test_prompt_points_beyond_playbook(spec, profile):
+    # ADR 0014: LLM зовём после playbook — промпт ведёт к тому, чего в нём нет
+    text = user_prompt(spec, profile)
+    for key in ("objective", "ensemble", "optuna"):
+        assert key in text.split("## Куда смотреть")[1].split("## Формат ответа")[0]
