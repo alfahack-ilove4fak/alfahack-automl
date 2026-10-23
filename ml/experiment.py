@@ -711,8 +711,51 @@ def run_experiment(
 PROBA_EPS = 1e-6  # вероятности 0 и 1 logloss штрафует бесконечно — слегка отодвигаем от краёв
 
 
+def _label_key(value: str) -> str:
+    """Имя класса без регистра и пробелов по краям; число — в одном виде («1», «1.0» → «1»)."""
+    text = str(value).strip().lower()
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return str(int(number)) if number.is_integer() else repr(number)
+
+
+def _name_variants(columns: list[str]):
+    """Имена колонок как есть, затем без общей приставки и окончания — от самой длинной обрезки к короткой.
+
+    «proba_low», «proba_long» → общая приставка «proba_lo», но нужна «proba_»: поэтому перебираем все длины,
+    а какая верная — решает сопоставление с классами. Имя целиком не обрезаем («p1», «p10» → «1», «10»).
+    """
+    yield columns  # точное совпадение — раньше любой обрезки
+    shortest = min(len(c) for c in columns)
+    prefix = os.path.commonprefix(columns)
+    suffix = os.path.commonprefix([c[::-1] for c in columns])
+    for p in range(min(len(prefix), shortest - 1), -1, -1):
+        for s in range(min(len(suffix), shortest - p - 1), -1, -1):
+            yield [c[p : len(c) - s] for c in columns]
+
+
+def match_class_columns(columns: list[str], class_labels: list[str]) -> list[str] | None:
+    """Колонка ответа → класс по имени (#238): без регистра и без общей приставки/окончания («proba_<класс>»).
+
+    None — по имени однозначно не сопоставить (тогда вызывающий сопоставляет по порядку). Сопоставление только
+    взаимно однозначное: два класса с одним ключом, колонка без класса или две колонки на класс — None.
+    """
+    labels: dict[str, list[str]] = {}
+    for label in class_labels:
+        labels.setdefault(_label_key(label), []).append(label)
+    if not columns or any(len(same) > 1 for same in labels.values()):
+        return None
+    for names in _name_variants(list(map(str, columns))):
+        matched = [labels.get(_label_key(name), [None])[0] for name in names]
+        if None not in matched and len(set(matched)) == len(matched) == len(class_labels):
+            return matched
+    return None
+
+
 def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.ndarray) -> dict[str, np.ndarray]:
-    """Колонки ответа → вероятности классов. Имена совпадают с классами — по имени, иначе — по порядку (с записью в лог).
+    """Колонки ответа → вероятности классов: по имени (match_class_columns), иначе — по порядку (с записью в лог).
 
     Столбцы proba идут в порядке class_labels (так кодируется target). Строки нормируются к сумме 1.
     """
@@ -720,9 +763,12 @@ def _per_class_columns(columns: list[str], class_labels: list[str], proba: np.nd
         raise ValueError(f"колонок ответа {len(columns)}, а классов {proba.shape[1]}: {columns} / {class_labels}")
     proba = np.clip(proba, PROBA_EPS, 1 - PROBA_EPS)
     proba = proba / proba.sum(axis=1, keepdims=True)
-    if set(columns) == set(class_labels):
+    matched = match_class_columns(columns, class_labels)
+    if matched is not None:
         index = {label: i for i, label in enumerate(class_labels)}
-        return {col: proba[:, index[col]] for col in columns}
+        if matched != list(columns):
+            log.info("Колонки ответа ↔ классы по имени: %s", dict(zip(columns, matched, strict=True)))
+        return {col: proba[:, index[label]] for col, label in zip(columns, matched, strict=True)}
     log.warning("Колонки ответа %s не совпадают с классами %s — сопоставляю по порядку", columns, class_labels)
     return {col: proba[:, i] for i, col in enumerate(columns)}
 
