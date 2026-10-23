@@ -741,6 +741,106 @@ id,relevance
     return {"answers": answers}
 
 
+@task("utilities_multitarget_mae", "mae", False)
+def utilities(task_dir: Path) -> dict:
+    """Два таргета в одном ответе (вебинар: «мультитаргет, несколько колонок ответа»; #174, #185).
+
+    Тепло и вода по дому за месяц: оба числа зависят от одних признаков, но по-разному (тепло — от площади
+    и температуры, вода — от жильцов). Агент должен найти оба таргета по шаблону ответа и обучить модель
+    на каждый; ответ по одному столбцу — невалидный сабмит. Метрика — MAE, усреднённая по столбцам.
+    """
+    rng = np.random.default_rng(SEED + 4)
+    n = 6000
+    districts = np.array([f"D{i}" for i in range(12)])
+    district_effect = dict(zip(districts, rng.normal(0, 0.15, 12), strict=True))
+    heating = {"central": 1.0, "individual": 0.8, "electric": 0.6}
+    df = pd.DataFrame(
+        {
+            "district": rng.choice(districts, n),
+            "heating": rng.choice(list(heating), n, p=[0.6, 0.25, 0.15]),
+            "area_m2": np.clip(rng.lognormal(4.0, 0.35, n), 18, 250).round(1),
+            "floors": rng.integers(1, 26, n),
+            "year_built": rng.integers(1955, 2024, n),
+            "residents": rng.poisson(2.4, n) + 1,
+            "outdoor_temp": rng.normal(-6, 7, n).round(1),
+        }
+    )
+    age = 2024 - df["year_built"]
+    heat = (
+        0.018
+        * df["area_m2"]
+        * df["heating"].map(heating)
+        * (1 + 0.004 * age)
+        * (1 - 0.03 * df["outdoor_temp"])
+        * np.exp(df["district"].map(district_effect))
+        * rng.lognormal(0, 0.12, n)
+    )
+    water = (2.6 * df["residents"] + 0.02 * df["area_m2"]) * rng.lognormal(0, 0.18, n)
+    df["heat_gcal"], df["water_m3"] = heat.round(3), water.round(2)
+    df.loc[rng.random(n) < 0.04, "year_built"] = np.nan
+    df.insert(0, "id", rng.permutation(n) + 70000)
+    train, test_full = train_test_split(df, test_size=0.25, random_state=SEED)
+    train, test_full = train.reset_index(drop=True), test_full.sort_values("id").reset_index(drop=True)
+    answers = test_full[["id", "heat_gcal", "water_m3"]]
+    test = test_full.drop(columns=["heat_gcal", "water_m3"])
+    dictionary = _dictionary(
+        [
+            ("id", "id", "int", "Идентификатор квартиры"),
+            ("district", "feature", "category", "Район"),
+            ("heating", "feature", "category", "Тип отопления"),
+            ("area_m2", "feature", "numeric", "Площадь, м²"),
+            ("floors", "feature", "int", "Этажность дома"),
+            ("year_built", "feature", "int", "Год постройки; бывают пропуски"),
+            ("residents", "feature", "int", "Число жильцов"),
+            ("outdoor_temp", "feature", "numeric", "Средняя температура месяца, °C"),
+            ("heat_gcal", "target", "numeric", "Потребление тепла за месяц, Гкал"),
+            ("water_m3", "target", "numeric", "Потребление воды за месяц, м³"),
+        ]
+    )
+    md = f"""
+# Тепло и вода за месяц
+
+## Задача
+
+Управляющая компания хочет заранее оценить, сколько тепла и воды потребит каждая квартира за месяц.
+Нужны **оба** числа: по ним планируют закупку и проверяют показания счётчиков.
+
+## Данные
+
+- `train.csv` — {len(train)} квартир с признаками и обоими ответами;
+- `test.csv` — {len(test)} квартир без ответов;
+- `data_dictionary.csv` — описание полей;
+- `sample_submission.csv` — шаблон ответа; значения в нём не являются правильными ответами.
+
+## Что предсказать
+
+Для каждой квартиры из `test.csv` — `heat_gcal` (тепло, Гкал) и `water_m3` (вода, м³).
+
+Метрика — **MAE**, mean absolute error, считается по каждому столбцу отдельно и усредняется (меньше — лучше).
+
+## Формат результата
+
+Файл `submission.csv` в каталоге этого файла, три столбца:
+
+```csv
+id,heat_gcal,water_m3
+```
+
+Для каждого `id` из `test.csv` — одна строка, порядок как в `test.csv`.
+"""
+    _write(
+        task_dir,
+        {
+            "train.csv": train,
+            "test.csv": test,
+            "data_dictionary.csv": dictionary,
+            "sample_submission.csv": answers.assign(heat_gcal=0.0, water_m3=0.0),
+        },
+        md,
+    )
+    return {"answers": answers}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Пересоздать тренировочные задачи tasks/practice/")
     parser.add_argument("--only", nargs="*", choices=sorted(TASKS), help="какие задачи (по умолчанию все)")
@@ -760,6 +860,8 @@ def main() -> int:
             "id_column": answers.columns[0],
             "target": answers.columns[1],
         }
+        if len(answers.columns) > 2:  # несколько таргетов: основной — первый, по нему метрика в харнессе
+            manifest[name]["extra_targets"] = list(answers.columns[2:])
         print(f"✅ {name}: {metric}, test {len(answers)} строк → {task_dir.relative_to(ROOT)}")
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
