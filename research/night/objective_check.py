@@ -9,10 +9,9 @@ import os
 
 os.environ.setdefault("LLM_MOCK", "1")  # parse_task не должен звать настоящую LLM
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
-from sklearn.metrics import mean_pinball_loss
 from sklearn.model_selection import KFold
 
 from agent.task_parser import parse_task
@@ -20,8 +19,14 @@ from evaluation.metrics import compute_metric
 from ml.profiling import load_data, make_matrix, profile_data
 
 CASES = [
-    ("tasks/practice/diabetes_regression_mae/task.md", [("l2", {}), ("l1", {"objective": "l1"}), ("huber", {"objective": "huber"})]),
-    ("tasks/practice/claims_regression_mape_rowno/task.md", [("l2", {}), ("l1", {"objective": "l1"}), ("mape-obj", {"objective": "mape"})]),
+    (
+        "tasks/practice/diabetes_regression_mae/task.md",
+        [("l2", {}), ("l1", {"objective": "l1"}), ("huber", {"objective": "huber"})],
+    ),
+    (
+        "tasks/practice/claims_regression_mape_rowno/task.md",
+        [("l2", {}), ("l1", {"objective": "l1"}), ("mape-obj", {"objective": "mape"})],
+    ),
     ("tasks/practice/sales_regression_dates_rmsle/task.md", [("l2", {}), ("l2 on log1p", "log")]),
 ]
 for path, variants in CASES:

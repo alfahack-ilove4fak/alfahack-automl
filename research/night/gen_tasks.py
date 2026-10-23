@@ -209,7 +209,7 @@ def t_big_1m_rows(rng):
     df.insert(0, "rid", np.arange(n + nt))
     df["cat_a"] = rng.choice(list("ABCDEFGH"), n + nt)
     df["cat_b"] = rng.choice([f"k{i}" for i in range(300)], n + nt)
-    df["target"] = np.round(y + df["cat_a"].map(dict(zip("ABCDEFGH", range(8)))), 4)
+    df["target"] = np.round(y + df["cat_a"].map(dict(zip("ABCDEFGH", range(8), strict=False))), 4)
     tr, te = _split(df, n)
     ans = te["target"].copy()
     te = te.drop(columns=["target"])

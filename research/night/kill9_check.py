@@ -26,8 +26,14 @@ for delay in map(float, sys.argv[2:]):
     work = Path(tempfile.mkdtemp(prefix="kill9-")) / "task"
     shutil.copytree(task.parent, work, ignore=shutil.ignore_patterns("submission.csv"))
     env = {**os.environ, "AGENT_TIME_BUDGET_SEC": "600", "AGENT_RUN_DIR": str(work.parent / "run")}
-    proc = subprocess.Popen([sys.executable, str(ROOT / "solution.py"), str(work / "task.md")], env=env, cwd=work,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "solution.py"), str(work / "task.md")],
+        env=env,
+        cwd=work,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     time.sleep(delay)
     os.killpg(proc.pid, signal.SIGKILL)
     proc.wait()
@@ -38,4 +44,6 @@ for delay in map(float, sys.argv[2:]):
         continue
     spec = parse_task(work / "task.md")
     rep = validate_submission(sub, spec, pd.read_csv(spec.test_path))
-    print(f"kill через {delay:5.1f} с: файл есть, валиден={rep.ok}, строк={rep.n_rows}, проблемы={rep.problems[:2]}, хвосты записи: {[t.name for t in tmp]}")
+    print(
+        f"kill через {delay:5.1f} с: файл есть, валиден={rep.ok}, строк={rep.n_rows}, проблемы={rep.problems[:2]}, хвосты записи: {[t.name for t in tmp]}"
+    )

@@ -151,18 +151,21 @@ def independent_score(truth, answers, sub, train, test, target):
     else:
         classes = sorted(train[target].dropna().astype(str).unique())
         yc = pd.Categorical(y.astype(str), categories=classes).codes
-        prior = pd.Series(pd.Categorical(train[target].dropna().astype(str), categories=classes)).value_counts(
-            normalize=True, sort=False
-        ).to_numpy()
+        prior = (
+            pd.Series(pd.Categorical(train[target].dropna().astype(str), categories=classes))
+            .value_counts(normalize=True, sort=False)
+            .to_numpy()
+        )
         proba_lg = lgbm_baseline(truth, train, test, target, id_col, "clf", classes)
         if m == "logloss":  # колонки по классам в порядке образца
             cols = [c for c in sub.columns if c != id_col]
             P = sub[cols].to_numpy(float)
             order = [cols.index(c) for c in classes]
             P = P[:, order]
-            fn = lambda yt, p: sk.log_loss(
-                yt, np.clip(p / p.sum(1, keepdims=True), 1e-15, 1), labels=range(len(classes))
-            )  # noqa: E731
+
+            def fn(yt, p):
+                return sk.log_loss(yt, np.clip(p / p.sum(1, keepdims=True), 1e-15, 1), labels=range(len(classes)))
+
             value, trivial, lg = fn(yc, P), fn(yc, np.tile(prior, (n, 1))), fn(yc, np.clip(proba_lg, 1e-6, 1))
             greater = False
         elif m in ("roc_auc", "pr_auc"):
@@ -252,7 +255,9 @@ def main() -> None:
     ap.add_argument("--minutes", type=float, default=4)
     ap.add_argument("--only", default="")
     ap.add_argument("--llm", action="store_true")
-    ap.add_argument("--rescore", action="store_true", help="не запускать агента: пересчитать проверки по готовым runs/night/<имя>")
+    ap.add_argument(
+        "--rescore", action="store_true", help="не запускать агента: пересчитать проверки по готовым runs/night/<имя>"
+    )
     ap.add_argument("--out", type=Path, default=ROOT / "runs" / "night")
     args = ap.parse_args()
     if not args.llm:
@@ -273,7 +278,9 @@ def main() -> None:
         else:
             run = run_agent(args.tasks / name, run_dir, args.minutes, args.llm)
         row = check_one(name, args.tasks, run_dir, run)
-        with (args.out / ("results_rescored.jsonl" if args.rescore else "results.jsonl")).open("a", encoding="utf-8") as fh:
+        with (args.out / ("results_rescored.jsonl" if args.rescore else "results.jsonl")).open(
+            "a", encoding="utf-8"
+        ) as fh:
             fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         sc = row.get("score")
         print(

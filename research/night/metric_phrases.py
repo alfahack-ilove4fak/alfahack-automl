@@ -50,7 +50,10 @@ CASES = [
     ("Решения сравниваются на скрытой выборке по специальной метрике качества организаторов.", None),
     ("Predict the price. We also use accuracy only for sanity, the main score is RMSE.", "rmse"),
     ("Не используйте accuracy; оценка — ROC AUC.", "roc_auc"),
-    ("# Задача\nПредскажите отток.\n\nОценка: Recall@k по топ-10% клиентов.", None),  # нет в реестре — честный None лучше, чем recall
+    (
+        "# Задача\nПредскажите отток.\n\nОценка: Recall@k по топ-10% клиентов.",
+        None,
+    ),  # нет в реестре — честный None лучше, чем recall
     ("Evaluation metric: Brier score.", None),
     ("Метрика: ошибка в процентах MAPE, считается только по строкам, где факт > 0.", "mape"),
     ("Metric: logarithmic loss", "logloss"),
