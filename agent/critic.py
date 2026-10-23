@@ -65,6 +65,12 @@ def slowdown(hyp: Hypothesis) -> float:
         folds = float(hyp.params.get("n_folds", DEFAULT_FOLDS))
     except (TypeError, ValueError):
         return 1.0
+    ensemble = hyp.params.get("ensemble")
+    if isinstance(ensemble, list) and ensemble:
+        # ансамбль обучает участников по очереди: цена — сумма их цен (lightgbm + xgboost ≈ ×5, #236)
+        models = [str((m.get("model") if isinstance(m, dict) else m) or "lightgbm").lower() for m in ensemble]
+        factor = sum(MODEL_SLOWDOWN.get(m, UNKNOWN_MODEL_SLOWDOWN) for m in models) * max(1.0, folds / DEFAULT_FOLDS)
+        return min(max(factor, 1.0), MAX_SLOWDOWN)
     model = _model(hyp)
     factor = MODEL_SLOWDOWN.get(model, UNKNOWN_MODEL_SLOWDOWN)
     if model == "lightgbm":  # learning_rate и num_leaves откалиброваны только для LightGBM
