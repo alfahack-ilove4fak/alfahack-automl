@@ -46,5 +46,11 @@
     "id_column": "id",
     "metric": "rmsle",
     "target": "units_sold"
+  },
+  "search_ranking_ndcg": {
+    "greater_is_better": true,
+    "id_column": "id",
+    "metric": "ndcg",
+    "target": "relevance"
   }
 }
