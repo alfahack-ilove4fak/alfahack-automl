@@ -1,0 +1,11 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор пары «запрос — документ»
+query_id,group,int,Номер поискового запроса; документы одного запроса ранжируются вместе
+query_len,feature,int,Число слов в запросе
+bm25,feature,numeric,Текстовая близость документа к запросу (BM25)
+title_match,feature,numeric,Доля слов запроса в заголовке
+click_rate,feature,numeric,Доля кликов по документу в прошлом; у новых документов пусто
+doc_len,feature,numeric,"Длина документа, слов"
+age_days,feature,int,"Возраст документа, дней"
+source,feature,category,Тип источника
+relevance,target,int,Оценка асессора: 0 — нерелевантно … 3 — точный ответ
