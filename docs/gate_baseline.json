@@ -1,0 +1,110 @@
+{
+  "commit": "aad998c",
+  "date": "2026-10-23 14:53",
+  "alien": {
+    "cp1251_r2": {
+      "zero": true,
+      "score": null,
+      "seconds": 1.5,
+      "minutes": 5.0
+    },
+    "dates_text_50cls_balacc": {
+      "zero": false,
+      "score": 0.46,
+      "seconds": 171.2,
+      "minutes": 5.0
+    },
+    "english_noisy_fbeta": {
+      "zero": true,
+      "score": null,
+      "seconds": 75.3,
+      "minutes": 5.0
+    },
+    "leak_column_auc": {
+      "zero": true,
+      "score": 0.0,
+      "seconds": 81.8,
+      "minutes": 5.0
+    },
+    "mape_in_words": {
+      "zero": false,
+      "score": 65.67,
+      "seconds": 139.5,
+      "minutes": 5.0
+    },
+    "million_rows_rmsle": {
+      "zero": false,
+      "score": 7.94,
+      "seconds": 233.7,
+      "minutes": 5.0
+    },
+    "multitarget_pinball90": {
+      "zero": false,
+      "score": 11.57,
+      "seconds": 67.7,
+      "minutes": 5.0
+    },
+    "no_id_rmse": {
+      "zero": true,
+      "score": 0.0,
+      "seconds": 1.0,
+      "minutes": 5.0
+    },
+    "ordinal_kappa_words": {
+      "zero": false,
+      "score": 6.38,
+      "seconds": 199.6,
+      "minutes": 5.0
+    },
+    "per_class_proba_newcats_mlogloss": {
+      "zero": true,
+      "score": 0.0,
+      "seconds": 175.4,
+      "minutes": 5.0
+    },
+    "rare_999_prauc": {
+      "zero": false,
+      "score": 2.24,
+      "seconds": 173.4,
+      "minutes": 5.0
+    },
+    "ru_headers_bom_auc": {
+      "zero": false,
+      "score": 6.36,
+      "seconds": 35.8,
+      "minutes": 5.0
+    },
+    "semicolon_decimal_mae": {
+      "zero": true,
+      "score": null,
+      "seconds": 1.0,
+      "minutes": 5.0
+    },
+    "smape_train_ids_in_test": {
+      "zero": false,
+      "score": 1.66,
+      "seconds": 95.4,
+      "minutes": 5.0
+    },
+    "wide_1500_logloss": {
+      "zero": false,
+      "score": 0.21,
+      "seconds": 152.6,
+      "minutes": 5.0
+    }
+  },
+  "public": {
+    "regression": {
+      "score": 16.598490339070903,
+      "status": "OK",
+      "seconds": 202.7864646911621,
+      "minutes": 5.0
+    },
+    "multiclass": {
+      "score": 27.04556058577016,
+      "status": "OK",
+      "seconds": 230.5971007347107,
+      "minutes": 5.0
+    }
+  }
+}
