@@ -249,6 +249,8 @@ def test_ensemble_cost_is_sum_of_members():
     assert estimated_seconds(hyp("e", ensemble=["lightgbm", "xgboost"]), 10) == pytest.approx(10 * (1 + 4) * 1.5)
     slow = {"model": "lightgbm", "model_params": {"learning_rate": 0.0125}}  # ×2 по калибровке lr
     assert estimated_seconds(hyp("e", ensemble=[slow, "lightgbm"]), 10) == pytest.approx(10 * 3 * 1.5)
+    # 13 CatBoost — ×104, а не ×20: предел оценки — у каждого участника
+    assert estimated_seconds(hyp("e", ensemble=["catboost"] * 13), 10) == pytest.approx(10 * 8 * 13 * 1.5)
 
 
 def test_loop_rebuilds_fallback_from_new_best(spec, monkeypatch):

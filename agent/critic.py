@@ -66,12 +66,14 @@ def slowdown(hyp: Hypothesis) -> float:
     except (TypeError, ValueError):
         return 1.0
     members = hyp.params.get("ensemble")
-    if isinstance(members, list) and members:
-        factor = sum(_model_slowdown(*_ensemble_member(m)) for m in members)
+    if isinstance(members, list) and members:  # предел ×MAX_SLOWDOWN — у каждого участника, не у суммы
+        factor = sum(min(_model_slowdown(*_ensemble_member(m)), MAX_SLOWDOWN) for m in members)
+        limit = MAX_SLOWDOWN * len(members)
     else:
         factor = _model_slowdown(_model(hyp), hyp.params.get("model_params", {}))
+        limit = MAX_SLOWDOWN
     factor *= max(1.0, folds / DEFAULT_FOLDS)
-    return min(max(factor, 1.0), MAX_SLOWDOWN)
+    return min(max(factor, 1.0), limit)
 
 
 def _ensemble_member(member) -> tuple[str, dict]:
