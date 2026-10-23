@@ -94,3 +94,58 @@ def test_different_validation_scheme_rejected():
     better = res([f - 1.0 for f in BEST.fold_scores]).model_copy(update={"validation": "group-5"})
     ok, reason = accept(better, BEST, greater_is_better=False)
     assert not ok and "схема валидации" in reason
+
+
+# Схема по времени (#236): 3 фолда, последний — самый поздний период. Числа — как у ансамбля на public/regression:
+# лучше на 3/3 фолдах, но t < T_MIN (у ансамбля там t = 1.91).
+TIME_BEST = res([52.0, 48.0, 49.5])
+TIME_GAINS_ALL = [0.2, 1.5, 3.0]  # лучше на всех периодах, сильнее всего на последнем
+TIME_GAINS_NOT_LAST = [2.5, 1.5, -0.4]  # в среднем лучше, на последнем — хуже
+
+
+def time_pair(gains, scheme="time:Year_Factor"):
+    best = TIME_BEST.model_copy(update={"validation": scheme})
+    new = res([b - g for b, g in zip(TIME_BEST.fold_scores, gains, strict=True)]).model_copy(
+        update={"validation": scheme}
+    )
+    return new, best
+
+
+def test_time_scheme_better_on_last_period_and_mean_accepted():
+    new, best = time_pair(TIME_GAINS_ALL)
+    assert corrected_t(fold_gains(new, best, greater_is_better=False)) < T_MIN  # по t не прошла бы
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert ok and "последнем периоде" in reason
+
+
+def test_time_scheme_worse_on_last_period_rejected():
+    new, best = time_pair(TIME_GAINS_NOT_LAST)
+    assert sum(TIME_GAINS_NOT_LAST) > 0
+    assert not accept(new, best, greater_is_better=False)[0]
+
+
+def test_time_scheme_direction_of_metric():
+    # для «больше — лучше» те же числа означают ухудшение на всех периодах
+    new, best = time_pair(TIME_GAINS_ALL)
+    assert not accept(new, best, greater_is_better=True)[0]
+
+
+def test_time_scheme_tiny_gain_still_rejected():
+    new, best = time_pair([MIN_REL_GAIN * 50 / 4] * 3)
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert not ok and "слишком мало" in reason
+
+
+@pytest.mark.parametrize("scheme", [None, "kfold", "stratified", "group:duplicates"])
+def test_non_time_schemes_keep_t_rule(scheme):
+    new, best = time_pair(TIME_GAINS_ALL, scheme=scheme)
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert not ok and "последнем периоде" not in reason
+
+
+def test_time_scheme_incomparable_folds_use_mean_rule():
+    best = TIME_BEST.model_copy(update={"validation": "time:Year_Factor"})
+    new = res([45.0, 44.0]).model_copy(update={"validation": "time:Year_Factor"})  # упал фолд: 2 против 3
+    assert fold_gains(new, best, greater_is_better=False) is None
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert ok and "несравнимы" in reason
