@@ -5,7 +5,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd); PY="$ROOT/.venv/bin/python"
 MODE=$1; TASK=$2; BUDGET=${3:-420}; PORT=$((8700 + RANDOM % 200))
 OUT="$ROOT/runs/night/p4/llm_$MODE"; mkdir -p "$OUT"; rm -rf "${OUT:?}/task"; cp -r "$ROOT/$TASK" "$OUT/task"
-"$PY" "$ROOT/research/night/fake_llm.py" --port $PORT --mode "$MODE" --delay 400 > "$OUT/fake_llm.log" 2>&1 &
+"$PY" "$ROOT/research/night/fake_llm_marenkov.py" --port $PORT --mode "$MODE" --delay 400 > "$OUT/fake_llm.log" 2>&1 &
 SRV=$!; sleep 1
 start=$(date +%s)
 (cd "$OUT/task" && env -u LLM_MOCK OPENAI_BASE_URL=http://127.0.0.1:$PORT/v1 OPENAI_API_KEY=fake OPENAI_MODEL=fake \

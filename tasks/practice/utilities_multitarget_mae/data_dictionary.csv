@@ -1,0 +1,11 @@
+feature,role,dtype,description_ru
+id,id,int,Идентификатор квартиры
+district,feature,category,Район
+heating,feature,category,Тип отопления
+area_m2,feature,numeric,"Площадь, м²"
+floors,feature,int,Этажность дома
+year_built,feature,int,Год постройки; бывают пропуски
+residents,feature,int,Число жильцов
+outdoor_temp,feature,numeric,"Средняя температура месяца, °C"
+heat_gcal,target,numeric,"Потребление тепла за месяц, Гкал"
+water_m3,target,numeric,"Потребление воды за месяц, м³"

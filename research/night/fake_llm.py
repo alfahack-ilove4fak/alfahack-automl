@@ -1,157 +1,247 @@
-"""Ночной аудит: поддельный OpenAI-совместимый сервер для проверки устойчивости агента к плохой LLM.
+"""Поддельный OpenAI-совместимый сервер для проверки устойчивости агента к плохой LLM (ночной аудит, фаза 4).
 
-    uv run python research/night/fake_llm.py --port 8765 --mode garbage
-    OPENAI_BASE_URL=http://127.0.0.1:8765/v1 OPENAI_API_KEY=x OPENAI_MODEL=fake NO_PROXY=127.0.0.1 ...
+    uv run python research/night/fake_llm.py <режим> <порт>
+    OPENAI_BASE_URL=http://127.0.0.1:<порт>/v1 OPENAI_API_KEY=fake OPENAI_MODEL=fake python solution.py task.md
 
-Режимы: valid | garbage (не JSON) | slow (ждёт --delay с до ответа) | error500 | loopcode (код признаков —
-бесконечный цикл) | memhog (код признаков съедает память) | badparams (гипотезы с кривыми params).
-Каждый запрос пишется в stdout одной строкой (что спросили, что ответили).
+Режимы:
+  valid      — осмысленные ответы (аналитик, 3 гипотезы, код признаков)
+  garbage    — текст без JSON
+  badcode    — JSON по схеме, но внутри мусор: несуществующая модель, кривые params, код признаков с вечным циклом,
+               с чтением файлов, с огромной памятью, с синтаксической ошибкой
+  trickle    — потоковый ответ по 1 символу раз в 3 с (бесконечно долгий ответ «медленной» LLM)
+  hang       — соединение принято, ответа нет 15 минут
+  e500       — HTTP 500 на каждый запрос
+  disconnect — соединение закрывается без ответа
+Каждый запрос пишется в stderr: время, режим, о чём спросили.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import count
 
-VALID_HYPS = [
+MODE = sys.argv[1] if len(sys.argv) > 1 else "valid"
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
+_counter = count(1)
+
+ANALYST_OK = {"target": None, "id_column": None, "metric": None, "greater_is_better": None, "constraints": []}
+HYPS_OK = [
     {
-        "id": "fake_lr",
+        "id": "llm_l1",
         "kind": "hyperparams",
-        "title": "Меньше шаг",
-        "rationale": "проверка",
-        "params": {"model": "lightgbm", "model_params": {"learning_rate": 0.03}},
+        "title": "меньше листьев",
+        "rationale": "шум",
+        "params": {"model": "lightgbm", "model_params": {"num_leaves": 15, "min_child_samples": 40}},
     },
     {
-        "id": "fake_leaves",
-        "kind": "hyperparams",
-        "title": "Меньше листьев",
-        "rationale": "проверка",
-        "params": {"model": "lightgbm", "model_params": {"num_leaves": 15}},
+        "id": "llm_xgb",
+        "kind": "model",
+        "title": "xgboost",
+        "rationale": "другое семейство",
+        "params": {"model": "xgboost"},
     },
-    {"id": "fake_linear", "kind": "model", "title": "Линейная", "rationale": "проверка", "params": {"model": "linear"}},
+    {
+        "id": "llm_lr",
+        "kind": "hyperparams",
+        "title": "медленный шаг",
+        "rationale": "точнее",
+        "params": {"model": "lightgbm", "model_params": {"learning_rate": 0.02}},
+    },
 ]
-BAD_HYPS = [
-    {"id": "bad_folds", "kind": "hyperparams", "title": "x", "rationale": "x", "params": {"n_folds": "много"}},
-    {"id": "bad_model", "kind": "model", "title": "x", "rationale": "x", "params": {"model": "superboost"}},
+HYPS_BAD = [
+    {"id": "bad_model", "kind": "model", "title": "суперсеть", "rationale": "x", "params": {"model": "superboost9000"}},
+    {"id": "bad_folds", "kind": "hyperparams", "title": "фолды", "rationale": "x", "params": {"n_folds": "five"}},
     {
-        "id": "bad_lr",
+        "id": "bad_leaves",
         "kind": "hyperparams",
-        "title": "x",
+        "title": "огромные деревья",
         "rationale": "x",
-        "params": {"model": "lightgbm", "model_params": {"learning_rate": -1, "num_leaves": 0}},
+        "params": {
+            "model_params": {
+                "num_leaves": 1000000,
+                "min_child_samples": 1,
+                "n_estimators": 100000,
+                "learning_rate": 0.0001,
+            }
+        },
     },
-    {"id": "bad_ops", "kind": "preprocessing", "title": "x", "rationale": "x", "params": {"feature_ops": ["rm_rf"]}},
     {
         "id": "bad_valid",
         "kind": "hyperparams",
-        "title": "x",
+        "title": "схема",
         "rationale": "x",
-        "params": {"validation": "time:нет_такой"},
+        "params": {"validation": "time:no_such_column"},
     },
+    {
+        "id": "bad_optuna",
+        "kind": "hyperparams",
+        "title": "optuna навсегда",
+        "rationale": "x",
+        "params": {"optuna": {"trials": 100000, "timeout": 100000}},
+    },
+    {
+        "id": "bad_param_type",
+        "kind": "hyperparams",
+        "title": "строка вместо словаря",
+        "rationale": "x",
+        "params": {"model_params": "много деревьев"},
+    },
+    {"kind": "hyperparams", "title": "без id"},
+    "просто строка",
 ]
-LOOP_CODE = (
-    "import math\ndef add_features(df):\n    x = 0\n    while True:\n        x = math.sqrt(x + 1)\n    return df"
+CODES_BAD = [
+    "def add_features(df):\n    while True:\n        pass\n    return df",
+    "def add_features(df):\n    x = open('/etc/hostname').read()\n    df['h'] = len(x)\n    return df",
+    "def add_features(df):\n    import numpy as np\n    big = np.ones((200000, 200000))\n    df['b'] = big[0, 0]\n    return df",
+    "def add_features(df):\n    return df[",
+    "def add_features(df):\n    return df.iloc[:10]",
+]
+CODE_OK = (
+    "def add_features(df):\n    import numpy as np\n    num = df.select_dtypes('number')\n"
+    "    df['row_mean'] = num.mean(axis=1)\n    df['row_std'] = num.std(axis=1)\n    return df"
 )
-MEM_CODE = "import numpy as np\ndef add_features(df):\n    big = [np.ones(10**8) for _ in range(1000)]\n    return df"
+
+
+def kind_of(messages: list[dict]) -> str:
+    text = " ".join(str(m.get("content", "")) for m in messages)
+    if "add_features" in text:
+        return "features"
+    if "что именно надо предсказать" in text or "answer_format" in text:
+        return "analyst"
+    if "критик" in text.lower() or "critic" in text.lower():
+        return "critic"
+    if "Верни JSON-список" in text:
+        return "hypotheses"
+    return "other"
+
+
+def answer(kind: str, n: int) -> str:
+    if MODE == "garbage":
+        return "Думаю, стоит попробовать бустинг!!! {не json: [1, 2,"
+    if MODE == "badcode":
+        if kind == "features":
+            code = CODES_BAD[n % len(CODES_BAD)]
+            return json.dumps({"id": f"bad_code_{n}", "title": "плохой код", "rationale": "x", "code": code})
+        if kind == "hypotheses":
+            return "```json\n" + json.dumps(HYPS_BAD, ensure_ascii=False) + "\n```"
+        if kind == "analyst":
+            return json.dumps(
+                {
+                    "target": "нет_такой_колонки",
+                    "id_column": 42,
+                    "metric": "super_metric",
+                    "greater_is_better": "да",
+                    "task_type": "regression",
+                    "constraints": "x",
+                }
+            )
+        return "ok"
+    if kind == "features":
+        return json.dumps({"id": f"row_stats_{n}", "title": "статистики строки", "rationale": "x", "code": CODE_OK})
+    if kind == "hypotheses":
+        return json.dumps(HYPS_OK, ensure_ascii=False)
+    if kind == "analyst":
+        return json.dumps(ANALYST_OK)
+    return "Пачка не сработала: гипотезы слишком похожи на бейзлайн."
 
 
 class Handler(BaseHTTPRequestHandler):
-    mode = "valid"
-    delay = 0.0
+    protocol_version = "HTTP/1.1"
 
-    def log_message(self, *args):  # тихо
+    def log_message(self, fmt, *args):  # тише стандартного лога
         pass
 
     def do_POST(self):  # noqa: N802
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        text = " ".join(str(m.get("content", "")) for m in body.get("messages", []))
-        purpose = "features" if "add_features" in text else "hypotheses" if "JSON-список" in text else "other"
-        mode = self.mode
-        if mode == "error500":
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(b'{"error": "boom"}')
-            print(json.dumps({"purpose": purpose, "answer": "500"}), flush=True)
+        n = next(_counter)
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        kind = kind_of(body.get("messages", []))
+        stream = bool(body.get("stream"))
+        print(f"{time.strftime('%H:%M:%S')} #{n} {MODE} {kind} stream={stream}", file=sys.stderr, flush=True)
+        if MODE == "disconnect":
+            self.close_connection = True
+            self.connection.close()
             return
-        if mode == "slow":
-            time.sleep(self.delay)
-        if mode == "garbage":
-            answer = "Извините, я не могу помочь с этим. ```python\nprint('hi')\n``` {broken json"
-        elif purpose == "features":
-            code = (
-                LOOP_CODE
-                if mode == "loopcode"
-                else MEM_CODE
-                if mode == "memhog"
-                else (
-                    "import numpy as np\ndef add_features(df):\n    num = df.select_dtypes('number')\n"
-                    "    df['row_mean_fake'] = num.mean(axis=1)\n    return df"
-                )
-            )
-            answer = json.dumps({"id": f"feat_{mode}", "title": "тест", "rationale": "тест", "code": code})
-        elif purpose == "hypotheses":
-            answer = json.dumps(BAD_HYPS if mode == "badparams" else VALID_HYPS, ensure_ascii=False)
-        else:
-            answer = "{}"
-        print(json.dumps({"purpose": purpose, "mode": mode, "answer": answer[:80]}, ensure_ascii=False), flush=True)
-        if body.get("stream"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
+        if MODE == "hang":
+            time.sleep(900)
+            return
+        if MODE == "e500":
+            data = b'{"error": {"message": "internal error"}}'
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            for i in range(0, len(answer), 50):
-                chunk = {
-                    "id": "x",
+            self.wfile.write(data)
+            return
+        text = answer(kind, n)
+        usage = {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+        if not stream:
+            data = json.dumps(
+                {
+                    "id": f"c{n}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "fake",
+                    "choices": [
+                        {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+                    ],
+                    "usage": usage,
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def send(obj) -> None:
+            payload = ("data: " + (obj if isinstance(obj, str) else json.dumps(obj)) + "\n\n").encode()
+            self.wfile.write(f"{len(payload):X}\r\n".encode() + payload + b"\r\n")
+            self.wfile.flush()
+
+        def chunk(content: str | None, finish: str | None = None) -> dict:
+            delta = {"content": content} if content is not None else {}
+            return {
+                "id": f"c{n}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": "fake",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        try:
+            if MODE == "trickle":
+                for ch in "x" * 100000:  # бесконечно долгий ответ: символ раз в 3 с
+                    send(chunk(ch))
+                    time.sleep(3)
+            for i in range(0, len(text), 40):
+                send(chunk(text[i : i + 40]))
+            send(chunk(None, "stop"))
+            send(
+                {
+                    "id": f"c{n}",
                     "object": "chat.completion.chunk",
                     "created": 0,
                     "model": "fake",
-                    "choices": [{"index": 0, "delta": {"content": answer[i : i + 50]}, "finish_reason": None}],
+                    "choices": [],
+                    "usage": usage,
                 }
-                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-            end = {
-                "id": "x",
-                "object": "chat.completion.chunk",
-                "created": 0,
-                "model": "fake",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": len(text) // 4,
-                    "completion_tokens": len(answer) // 4,
-                    "total_tokens": (len(text) + len(answer)) // 4,
-                },
-            }
-            self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
-            return
-        resp = {
-            "id": "x",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "fake",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": len(text) // 4,
-                "completion_tokens": len(answer) // 4,
-                "total_tokens": (len(text) + len(answer)) // 4,
-            },
-        }
-        data = json.dumps(resp).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--mode", default="valid")
-    ap.add_argument("--delay", type=float, default=300)
-    args = ap.parse_args()
-    Handler.mode, Handler.delay = args.mode, args.delay
-    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+            )
+            send("[DONE]")
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            print(f"{time.strftime('%H:%M:%S')} #{n} клиент оборвал поток", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    print(f"fake LLM: режим {MODE}, порт {PORT}", file=sys.stderr, flush=True)
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
