@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from agent.csv_dialect import read_text_any, standard_csv
 from evaluation.metrics import METRICS, find_metric_in_text
 from interfaces.schemas import MetricSpec, TaskSpec, TaskType
 from runtime.log import get_logger
@@ -33,9 +34,13 @@ MAX_CLASSES_FOR_NUMERIC_TARGET = 20
 
 
 def find_task_files(task_md: Path) -> dict[str, Path]:
-    """Ищет файлы задачи: сначала по путям из текста, потом рекурсивно рядом с task.md."""
+    """Ищет файлы задачи: сначала по путям из текста, потом рекурсивно рядом с task.md.
+
+    Файлы не в обычном виде (cp1251, «;», десятичная запятая) подменяются обычной копией (agent/csv_dialect.py):
+    дальше их читают как есть все модули агента (#238).
+    """
     task_dir = task_md.parent
-    text = task_md.read_text(encoding="utf-8")
+    text = read_text_any(task_md)
     found: dict[str, Path] = {}
     # 1) пути, упомянутые в тексте (`folder/train.csv`)
     for mention in re.findall(r"`([^`\s]+\.csv)`", text):
@@ -51,13 +56,13 @@ def find_task_files(task_md: Path) -> dict[str, Path]:
         for key, pattern in FILE_PATTERNS.items():
             if key not in found and pattern.match(csv.name):
                 found[key] = csv
-    return found
+    return {key: standard_csv(path) for key, path in found.items()}
 
 
 def parse_task(task_md: Path, llm=None) -> TaskSpec:
     """task.md → TaskSpec. llm — LLMClient для аналитика; None — создать свой (без ключа он сразу недоступен)."""
     task_md = task_md.resolve()
-    text = task_md.read_text(encoding="utf-8")
+    text = read_text_any(task_md)
     files = find_task_files(task_md)
     notes: list[str] = []
     for required in ("train", "test"):
@@ -82,7 +87,7 @@ def parse_task(task_md: Path, llm=None) -> TaskSpec:
             )
     else:
         target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
-        id_column = _guess_id(test_cols, dictionary)
+        id_column = _guess_id(test_cols, dictionary, files["test"])
         guessed |= {"target", "id_column"}
         notes.append("Нет sample_submission: id и target определены по train/test/словарю")
     metric_name = find_metric_in_text(text)
@@ -263,11 +268,35 @@ def _empty_test_columns(test_path: Path, columns: list[str]) -> list[str]:
     return [c for c in columns if test[c].isna().all()]
 
 
-def _guess_id(test_cols, dictionary) -> str:
+ID_TOKENS = {"id", "uid", "key", "ид", "номер", "идентификатор"}
+
+
+def _looks_like_id(name: str) -> bool:
+    """«txn_id», «clientID», «Номер заявки», «row-key» — по словам имени, а не по подстроке («paid» — не id)."""
+    words = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(name)).lower()
+    return bool(ID_TOKENS & set(re.split(r"[^0-9a-zа-яё]+", words)))
+
+
+def _guess_id(test_cols, dictionary, test_path: Path | None = None) -> str:
+    """id без шаблона ответа: роль в словаре → «id» → колонка с id-именем и уникальными значениями в test.
+
+    Раньше без «id» бралась первая колонка test — на чужой задаче это был признак «tenure» (ночной аудит #238).
+    """
     for name, row in dictionary.items():
         if str(row.get("role", "")).lower() == "id" and name in test_cols:
             return name
-    return "id" if "id" in test_cols else test_cols[0]
+    if "id" in test_cols:
+        return "id"
+    candidates = [c for c in test_cols if _looks_like_id(c)]
+    if candidates and test_path is not None:
+        try:
+            test = pd.read_csv(test_path, usecols=candidates)
+            unique = [c for c in candidates if test[c].notna().all() and test[c].is_unique]
+            if unique:
+                return unique[0]
+        except Exception:  # noqa: BLE001 — проверка уникальности не обязательна
+            pass
+    return test_cols[0]  # неуникальный «store_id» не лучше первой колонки (ревью #246)
 
 
 def _primary_target(train_path: Path, targets: list[str], metric_name: str | None) -> str:
