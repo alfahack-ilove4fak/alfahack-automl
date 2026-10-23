@@ -3,6 +3,7 @@
     uv run python scripts/gate.py --minutes 5                      # прогнать и сравнить с docs/gate_baseline.json
     uv run python scripts/gate.py --minutes 5 --update-baseline    # после сабмита: текущий результат → новая база
     uv run python scripts/gate.py --no-run                         # только сравнить уже готовые результаты последнего прогона
+    uv run python scripts/gate.py --minutes 5 --llm                # то же, но с настоящей Qwen (тратит общий бюджет ₽!)
 
 Что проверяем (код выхода 1, если что-то из этого нарушено):
   1. «Чужие» задачи (research/night/run_alien.py, 15 штук): число нулей не выросло и ни одна задача,
@@ -10,13 +11,18 @@
      или «балл к сильному бейзлайну» ≤ 0.
   2. Public-пара (харнесс, отложенная часть train): «балл к сильному» каждой задачи не ниже базы больше чем на NOISE.
   3. Время: агент не должен уходить за бюджет (секунды задачи ≤ бюджет + запас на финальное обучение).
+С --llm агент работает с Qwen, как на платформе (по умолчанию LLM выключена: LLM_MOCK=1): нужны OPENAI_API_KEY и
+OPENAI_MODEL; в отчёте — запросы, ошибки, токены и ₽; гейт не пройден, если Qwen не ответила ни разу. База снята без
+LLM, поэтому с --llm её не обновляем.
 Результаты и отчёт — runs/gate/<время>/. База — docs/gate_baseline.json (коммитится вместе с записью в submissions.md).
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
@@ -105,13 +111,51 @@ def compare(base: dict | None, alien: dict[str, dict], public: dict[str, dict]) 
     return fails, notes
 
 
-def render(base: dict | None, alien: dict, public: dict, fails: list[str], notes: list[str]) -> str:
+def llm_problem(env: dict | os._Environ = os.environ) -> str | None:
+    """Чего не хватает для прогона с настоящей Qwen; None — всё есть."""
+    missing = [name for name in ("OPENAI_API_KEY", "OPENAI_MODEL") if not env.get(name)]
+    return f"нет переменных окружения: {', '.join(missing)}" if missing else None
+
+
+def llm_totals(alien_usage: dict[str, dict], board: pd.DataFrame) -> dict:
+    """Расход Qwen за прогон: чужие задачи (журналы агентов) + public-пара (колонки llm_* лидерборда харнесса)."""
+    keys = ("llm_calls", "llm_errors", "llm_tokens", "llm_rub")
+    total = {key: 0.0 for key in keys}
+    for usage in alien_usage.values():
+        for key in keys:
+            total[key] += float(usage.get(key, 0) or 0)
+    for key in keys:
+        if key in board.columns:
+            total[key] += float(board.groupby("task", sort=True).tail(1)[key].fillna(0).sum())
+    return total
+
+
+def llm_checks(llm: dict | None) -> list[str]:
+    """Нарушения для прогона с --llm: Qwen не ответила ни разу — прогон ничего не проверил."""
+    if llm is None:
+        return []
+    if llm["llm_calls"] == 0:
+        return [
+            f"Qwen не ответила ни на один запрос (ошибок: {llm['llm_errors']:.0f}) — прогон не проверяет работу с LLM"
+        ]
+    return []
+
+
+def render(
+    base: dict | None, alien: dict, public: dict, fails: list[str], notes: list[str], llm: dict | None = None
+) -> str:
     lines = ["# Гейт перед сабмитом", "", f"**{'❌ НЕ ПРОХОДИТ' if fails else '✅ проходит'}**", ""]
     lines += [f"- ❌ {f}" for f in fails] + [f"- ℹ️ {n}" for n in notes] + [""]
     lines += ["| Public | Балл к сильному | База | Время, с |", "|---|---|---|---|"]
     for name, cur in public.items():
         was = (base or {}).get("public", {}).get(name, {}).get("score")
         lines.append(f"| {name} | {cur['score']} | {was} | {cur['seconds']} |")
+    if llm is not None:
+        lines += [
+            "",
+            f"LLM (Qwen): запросов **{llm['llm_calls']:.0f}** (ошибок {llm['llm_errors']:.0f}), "
+            f"токенов {llm['llm_tokens']:.0f}, **{llm['llm_rub']:.2f} ₽**",
+        ]
     zeros = sum(v["zero"] for v in alien.values())
     lines += ["", f"Чужие задачи: нулей **{zeros}** из {len(alien)}", ""]
     lines += ["| Чужая | Балл к сильному | Ноль | База: ноль | Время, с |", "|---|---|---|---|---|"]
@@ -126,14 +170,37 @@ def _git_head() -> str:
     return proc.stdout.strip() or "?"
 
 
-def run_checks(minutes: float, out_dir: Path) -> None:
+def run_alien_llm(minutes: float) -> dict[str, dict]:
+    """Чужие задачи с настоящей Qwen: run_alien.py всегда ставит LLM_MOCK=1, поэтому зовём его run_one напрямую."""
+    spec = importlib.util.spec_from_file_location("run_alien", ROOT / "research" / "night" / "run_alien.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.path.insert(0, str(ROOT))
+    from evaluation.harness import llm_usage
+
+    usage = {}
+    for name in sorted(p.stem for p in (module.ALIEN / "_answers").glob("*.json")):
+        try:
+            module.run_one(name, minutes, "_llm", {"LLM_MOCK": "0"})
+        except Exception as exc:  # noqa: BLE001 — одна задача не роняет гейт
+            print(f"💥 {name}: раннер упал: {type(exc).__name__}: {exc}", flush=True)
+        usage[name] = llm_usage(module.RUNS / f"{name}_llm")
+    return usage
+
+
+def run_checks(minutes: float, out_dir: Path, use_llm: bool = False) -> None:
     """Прогнать чужие задачи и public-пару харнессом (долго: ≈ (15 + 2) × minutes)."""
     alien_dir = ROOT / "runs" / "night" / "alien"
     if not (alien_dir / "_answers").exists():
         subprocess.run([sys.executable, "research/night/make_alien_tasks.py"], cwd=ROOT, check=True)
     ALIEN_RESULTS.unlink(missing_ok=True)  # свежие строки только этого прогона
-    subprocess.run([sys.executable, "research/night/run_alien.py", "--minutes", str(minutes)], cwd=ROOT)
+    if use_llm:
+        (out_dir / "llm_alien.json").write_text(json.dumps(run_alien_llm(minutes)), encoding="utf-8")
+    else:
+        subprocess.run([sys.executable, "research/night/run_alien.py", "--minutes", str(minutes)], cwd=ROOT)
     cmd = [sys.executable, "-m", "evaluation.harness", "--minutes", str(minutes), "--out", str(out_dir / "harness.csv")]
+    if use_llm:
+        cmd.append("--llm")
     for task in PUBLIC_TASKS:
         cmd += ["--task", task]
     subprocess.run(cmd, cwd=ROOT)
@@ -147,7 +214,18 @@ def main() -> int:
         "--update-baseline", action="store_true", help="записать результат как новую базу (после сабмита)"
     )
     parser.add_argument("--out", type=Path, help="папка отчёта (по умолчанию runs/gate/<время>)")
+    parser.add_argument("--llm", action="store_true", help="с настоящей Qwen (OPENAI_*), тратит общий бюджет ₽")
     args = parser.parse_args()
+
+    if args.llm and args.update_baseline:
+        print("--llm и --update-baseline вместе нельзя: база снята без LLM", file=sys.stderr)
+        return 2
+    if args.llm and not args.no_run:
+        problem = llm_problem()
+        if problem:
+            print(f"--llm: {problem}", file=sys.stderr)
+            return 2
+        print("⚠️ --llm: агент ходит в Qwen на всех задачах — это тратит общий бюджет ₽ команды", flush=True)
 
     runs = ROOT / "runs" / "gate"
     if args.no_run:
@@ -159,7 +237,7 @@ def main() -> int:
     else:
         out_dir = args.out or runs / time.strftime("%Y%m%d-%H%M")
         out_dir.mkdir(parents=True, exist_ok=True)
-        run_checks(args.minutes, out_dir)
+        run_checks(args.minutes, out_dir, args.llm)
 
     alien_rows = [json.loads(ln) for ln in ALIEN_RESULTS.read_text(encoding="utf-8").splitlines() if ln.strip()]
     if not alien_rows or not (out_dir / "harness.csv").exists():
@@ -169,8 +247,14 @@ def main() -> int:
     public = summarize_public(pd.read_csv(out_dir / "harness.csv"))
     base = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else None
 
+    llm = None
+    if (out_dir / "llm_alien.json").exists():
+        board = pd.read_csv(out_dir / "harness.csv")
+        llm = llm_totals(json.loads((out_dir / "llm_alien.json").read_text(encoding="utf-8")), board)
+
     fails, notes = compare(base, alien, public)
-    report = render(base, alien, public, fails, notes)
+    fails += llm_checks(llm)
+    report = render(base, alien, public, fails, notes, llm)
     (out_dir / "gate.md").write_text(report, encoding="utf-8")
     print(report)
 
