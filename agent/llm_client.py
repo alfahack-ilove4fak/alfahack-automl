@@ -6,8 +6,10 @@
   * Все ответы кэшируются на диск (LLM_CACHE_DIR): повторный запуск на той же задаче не тратит рубли.
   * Считаем потраченные рубли по usage из ответа. Цены — в .env (⚠️ уточнить у организаторов).
 
-  * Запрос знает остаток бюджета (ADR 0008, D3): ждём ответа не дольше LLM_TIME_SHARE оставшегося времени,
-    а если это меньше MIN_CALL_SECONDS — не зовём LLM совсем (полный таймаут с повторами — до 6 минут).
+  * Запрос знает остаток бюджета (ADR 0008, D3): ждём ответа не дольше LLM_TIME_SHARE оставшегося времени
+    и не дольше MAX_CALL_SECONDS на весь запрос с повторами; если это меньше MIN_CALL_SECONDS — не зовём LLM совсем.
+    Срок проверяется и внутри потока (медленная «струйка» не рвётся таймаутом чтения), а после TIMEOUTS_TO_DISABLE
+    запросов подряд, упёршихся в срок, LLM выключается до конца прогона (#239).
 
   * Выданная Qwen — «рассуждающая» модель: перед ответом она пишет скрытые рассуждения (2–2.5 тыс. токенов
     на промпт гипотез) и тратит на них тот же max_tokens. Выключить нельзя (проверено 21.10: enable_thinking
@@ -26,7 +28,7 @@
 LLM_MOCK=1 (принудительно без LLM), LLM_CACHE_DIR, LLM_PRICE_RUB_PER_1K_INPUT, LLM_PRICE_RUB_PER_1K_OUTPUT,
 LLM_REASONING_EFFORT (low по умолчанию; пусто — не передавать), LLM_COOLDOWN_SEC (пауза после 3 сбоев, 120 с),
 LLM_STREAM (1 по умолчанию: потоковый ответ — прокси рвёт обычный запрос через ~10 с),
-LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 6000).
+LLM_REASONING_TOKENS (запас на рассуждения, по умолчанию 6000), LLM_MAX_CALL_SEC (потолок на запрос, 90 с).
 """
 
 from __future__ import annotations
@@ -64,6 +66,17 @@ DEFAULT_STREAM = "1"  # сколько символов ответа модел�
 # Запрос гипотез идёт 6–64 с (low / полные рассуждения / поток, замеры 22.10), плюс повторы 2/5/10 с:
 # меньше минуты на ответ — запрос не успеет.
 MIN_CALL_SECONDS = 60.0
+# Потолок на весь запрос вместе с повторами (#239): ночной аудит (#230) — зависший сервер держал запрос 497 с,
+# а медленный поток («струйка», символ раз в 3 с) — до сторожа, без даже тривиального ответа. LLM_MAX_CALL_SEC.
+MAX_CALL_SECONDS = float(os.getenv("LLM_MAX_CALL_SEC", 90))
+# Между кусками потока: нормальный поток Qwen идёт без пауз дольше 2.3 с (22.10), тишина дольше — сервер завис
+STREAM_STALL_SECONDS = 30.0
+# Столько запросов подряд упёрлись в потолок времени — сервер не успевает отвечать, дальше без LLM (#193 п. 3)
+TIMEOUTS_TO_DISABLE = 3
+
+
+class LLMTimeout(TimeoutError):
+    """Ответ не уложился в потолок времени запроса — повторять бессмысленно, время вышло."""
 
 
 def _env(name: str) -> str:
@@ -93,7 +106,11 @@ class LLMClient:
         self.reasoning_tokens = int(os.getenv("LLM_REASONING_TOKENS", DEFAULT_REASONING_TOKENS))
         self.reasoning_effort = os.getenv("LLM_REASONING_EFFORT", DEFAULT_REASONING_EFFORT).strip()
         self.stream = os.getenv("LLM_STREAM", DEFAULT_STREAM).strip() not in ("0", "false", "")
+        self.stream_usage = True  # просить usage в потоке; сервер не понял stream_options — дальше без него (#224)
         self._paused_until = 0.0  # после серии сбоев LLM «отдыхает» до этого момента (time.monotonic)
+        self.max_call_seconds = MAX_CALL_SECONDS
+        self.timeouts = 0  # запросов подряд, упёршихся в потолок времени
+        self.disabled_reason = ""  # непусто — LLM выключена до конца прогона
         cache = os.getenv("LLM_CACHE_DIR")
         self.cache_dir = Path(cache) if cache else None
         self._client = None
@@ -117,20 +134,23 @@ class LLMClient:
         self._client = OpenAI(api_key=self._api_key, base_url=base_url, timeout=timeout, max_retries=0)
 
     def available(self) -> bool:
-        if self._client is None:
+        if self._client is None or self.disabled_reason:
             return False
         if self.failures >= FAILURES_TO_PAUSE and time.monotonic() < self._paused_until:
             return False  # серия сбоев — пауза; после неё пробуем снова (сервер часто оживает через минуту-две)
         return not (self.rub_limit and self.rub_spent >= self.rub_limit)
 
-    def time_limit(self, seconds_left: float | None) -> float | None:
-        """Сколько ждать ответа при таком остатке бюджета: None — без ограничения, 0 — не звать LLM."""
+    def time_limit(self, seconds_left: float | None) -> float:
+        """Сколько ждать ответа (весь запрос с повторами) при таком остатке бюджета: 0 — не звать LLM.
+
+        Не больше max_call_seconds, даже если бюджета много: один запрос не должен съедать время экспериментов.
+        """
         if seconds_left is None:
-            return None
+            return self.max_call_seconds
         limit = LLM_TIME_SHARE * seconds_left
         if limit < MIN_CALL_SECONDS:
             return 0.0
-        return None if limit >= self.timeout * (1 + MAX_RETRIES) else limit
+        return min(limit, self.max_call_seconds)
 
     def chat(
         self,
@@ -158,7 +178,7 @@ class LLMClient:
             return None
         limit = self.time_limit(seconds_left)
         if max_wait is not None and limit != 0:
-            limit = max_wait if limit is None else min(limit, max_wait)
+            limit = min(limit, max_wait)
         if limit == 0:
             log.info("До конца бюджета %.0f с — LLM не зовём, гипотезы из playbook", seconds_left)
             return None
@@ -173,6 +193,11 @@ class LLMClient:
             )
         except Exception as exc:  # noqa: BLE001 — любая ошибка сети/API = «LLM временно нет»
             self.failures += 1
+            if _timed_out(exc):
+                self.timeouts += 1
+                if self.timeouts >= TIMEOUTS_TO_DISABLE:
+                    self.disabled_reason = f"{self.timeouts} запроса подряд не уложились в {limit:.0f} с"
+                    log.warning("LLM выключена до конца прогона: %s — дальше playbook и правила", self.disabled_reason)
             if self.failures >= FAILURES_TO_PAUSE:
                 self._paused_until = time.monotonic() + COOLDOWN_SECONDS
                 log.warning("LLM: %d сбоев подряд — пауза %.0f с, потом пробуем снова", self.failures, COOLDOWN_SECONDS)
@@ -185,6 +210,7 @@ class LLMClient:
         elapsed = time.monotonic() - started
         self.seconds += elapsed
         self.failures = 0
+        self.timeouts = 0
         self.calls += 1
         choice = response.choices[0]
         text = choice.message.content or ""
@@ -244,36 +270,46 @@ class LLMClient:
         log.warning("LLM вернула невалидный JSON")
         return None
 
-    def _create_with_retries(self, limit: float | None, **request):
-        """Запрос с повторами при обрыве/таймауте/перегрузке сервера; всё — в пределах limit секунд (None — без).
+    def _create_with_retries(self, limit: float, **request):
+        """Запрос с повторами при обрыве/таймауте/перегрузке сервера; всё — в пределах limit секунд.
 
-        Ошибки запроса (400/401/404) не повторяем: повтор их не исправит. Если сервер не понял reasoning_effort,
-        один раз повторяем без него и дальше его не шлём.
+        Ошибки запроса (400/401/404) не повторяем: повтор их не исправит. Если сервер не понял reasoning_effort
+        или stream_options, один раз повторяем без параметра и дальше его не шлём.
         """
-        deadline = None if limit is None else time.monotonic() + limit
+        deadline = time.monotonic() + limit
         if self.reasoning_effort:
             request["extra_body"] = {"reasoning_effort": self.reasoning_effort}
         if self.stream:
             request["stream"] = True
-            request["stream_options"] = {"include_usage": True}  # usage (токены, cost) — в последнем чанке
+            if self.stream_usage:
+                request["stream_options"] = {"include_usage": True}  # usage (токены, cost) — в последнем чанке
         attempt = 0
         while True:
             attempt += 1
-            client = self._client
-            if deadline is not None:
-                client = client.with_options(timeout=max(deadline - time.monotonic(), 1.0), max_retries=0)
+            remaining = max(deadline - time.monotonic(), 1.0)
+            # timeout httpx — на каждое чтение, а не на весь ответ: для потока ограничиваем паузу между кусками,
+            # а общий срок проверяет _collect_stream (иначе «струйка» читается бесконечно — #239)
+            timeout = _stream_timeout(remaining) if self.stream else remaining
+            client = self._client.with_options(timeout=timeout, max_retries=0)
             try:
                 response = client.chat.completions.create(**request)
                 # обрыв посреди потока — тоже исключение здесь, и его повторяем так же
-                return response if hasattr(response, "choices") else _collect_stream(response)
+                return response if hasattr(response, "choices") else _collect_stream(response, deadline)
             except Exception as exc:  # noqa: BLE001
                 if "extra_body" in request and _rejects_param(exc, "reasoning_effort"):
                     log.warning("Сервер не принимает reasoning_effort — дальше без него")
                     self.reasoning_effort = ""
                     request.pop("extra_body")
                     continue
+                if "stream_options" in request and _rejects_param(exc, "stream_options"):
+                    log.warning("Сервер не принимает stream_options — дальше без него (токены в журнале — 0)")
+                    self.stream_usage = False
+                    request.pop("stream_options")
+                    continue
+                if isinstance(exc, LLMTimeout) or time.monotonic() >= deadline:
+                    raise
                 pause = RETRY_BACKOFF[attempt - 1] if attempt <= len(RETRY_BACKOFF) else None
-                out_of_time = deadline is not None and pause is not None and time.monotonic() + pause + 5 > deadline
+                out_of_time = pause is not None and time.monotonic() + pause + 5 > deadline
                 if not _retryable(exc) or pause is None or out_of_time:
                     raise
                 log.info("LLM: попытка %d не удалась (%s) — повтор через %.0f с", attempt, _short(exc), pause)
@@ -401,14 +437,43 @@ def _short(exc: BaseException) -> str:
     return f"{type(root).__name__}: {str(root)[:120]}"
 
 
-def _collect_stream(stream):
-    """Собрать потоковый ответ в объект как у обычного: choices[0].message.content, finish_reason, usage."""
+def _timed_out(exc: BaseException) -> bool:
+    """Запрос упёрся во время: наш потолок или таймаут чтения (openai/httpx)."""
+    if isinstance(exc, TimeoutError):
+        return True
+    try:
+        import httpx
+        import openai
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, openai.APITimeoutError | httpx.TimeoutException)
+
+
+def _stream_timeout(remaining: float):
+    """Таймаут потокового запроса: соединение и первый кусок — в пределах остатка, пауза между кусками ≤ 30 с."""
+    import httpx
+
+    read = min(remaining, STREAM_STALL_SECONDS)
+    return httpx.Timeout(remaining, connect=min(remaining, 10.0), read=read)
+
+
+def _collect_stream(stream, deadline: float | None = None):
+    """Собрать потоковый ответ в объект как у обычного: choices[0].message.content, finish_reason, usage.
+
+    deadline (time.monotonic) — общий срок на весь ответ: «струйка» по символу раз в 3 с не обрывается таймаутом
+    чтения, поэтому проверяем срок между кусками и закрываем поток (#239).
+    """
     from types import SimpleNamespace
 
     parts: list[str] = []
     finish_reason = None
     usage = None
     for chunk in stream:
+        if deadline is not None and time.monotonic() > deadline:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+            raise LLMTimeout(f"ответ не уложился в срок, получено {sum(map(len, parts))} символов")
         if getattr(chunk, "usage", None) is not None:
             usage = chunk.usage
         for choice in getattr(chunk, "choices", None) or []:
