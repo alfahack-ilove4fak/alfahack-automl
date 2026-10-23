@@ -1,4 +1,4 @@
-"""Ночной аудит: агент против плохой LLM (поддельный сервер research/night/fake_llm.py).
+"""Ночной аудит: агент против плохой LLM (поддельный сервер research/night/fake_llm_thenlaooo.py).
 
     PYTHONPATH=. uv run python research/night/llm_chaos.py --task tasks/practice/cancer_binary_auc/task.md --budget 600 \
         --modes garbage,badjson,... --out /abs/path
@@ -31,7 +31,7 @@ def run_mode(mode: str, port: int, task: Path, budget: int, out: Path) -> dict:
     shutil.rmtree(run_dir, ignore_errors=True)
     shutil.copytree(task.parent, run_dir / "task", ignore=shutil.ignore_patterns("submission.csv"))
     server_log = (run_dir / "server.log").open("w")
-    server = subprocess.Popen([sys.executable, str(ROOT / "research/night/fake_llm.py"), "--mode", mode, "--port", str(port),
+    server = subprocess.Popen([sys.executable, str(ROOT / "research/night/fake_llm_thenlaooo.py"), "--mode", mode, "--port", str(port),
                                "--delay", str(DELAYS.get(mode, 0))], stdout=server_log, stderr=subprocess.STDOUT)
     time.sleep(1.5)
     env = {**os.environ, "LLM_MOCK": "0", "OPENAI_API_KEY": "fake", "OPENAI_MODEL": "fake",

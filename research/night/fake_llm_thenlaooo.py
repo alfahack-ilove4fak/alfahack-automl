@@ -1,6 +1,6 @@
 """Ночной аудит: поддельный OpenAI-совместимый сервер для проверки устойчивости агента к плохой LLM.
 
-    uv run python research/night/fake_llm.py --mode garbage --port 8765
+    uv run python research/night/fake_llm_thenlaooo.py --mode garbage --port 8765
 
 Агент: OPENAI_BASE_URL=http://127.0.0.1:8765/v1 OPENAI_API_KEY=fake OPENAI_MODEL=fake NO_PROXY=127.0.0.1
 Режимы (--mode):
