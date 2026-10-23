@@ -26,6 +26,10 @@ from interfaces.schemas import TaskSpec, TaskType
 BEST_FOR_GREATER = 1.0  # потолок метрик «больше — лучше»
 SEED = 42
 MODEL_THREADS = 4
+# Без force_*_wise LightGBM при старте замеряет row-wise и col-wise и берёт быстрый — выбор зависит от нагрузки
+# машины, а ответы различаются: на public/multiclass F1 0.504 против 0.521. Бейзлайн обязан быть одинаковым
+# в прогонах «было» и «стало», иначе таблица харнесса шумит (#219)
+DETERMINISTIC = {"deterministic": True, "force_row_wise": True}
 
 
 def organizer_score(metric_name: str, value: float, baseline: float) -> float:
@@ -96,7 +100,7 @@ def model_prediction(spec: TaskSpec, x_train: pd.DataFrame, y_train: pd.Series, 
     import lightgbm as lgb  # тяжёлый импорт — только когда бейзлайн реально считаем
 
     train, test = _model_frames(x_train, x_test)
-    params = {"random_state": SEED, "n_jobs": MODEL_THREADS, "verbose": -1}
+    params = {"random_state": SEED, "n_jobs": MODEL_THREADS, "verbose": -1, **DETERMINISTIC}
     kind = METRICS[spec.metric.name].prediction
     if kind == "value":
         model = lgb.LGBMRegressor(**params).fit(train, pd.to_numeric(y_train).to_numpy(dtype=float))

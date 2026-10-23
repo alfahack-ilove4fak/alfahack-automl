@@ -3,8 +3,8 @@
 import numpy as np
 import pandas as pd
 
-from interfaces.schemas import DataProfile, MetricSpec, TaskSpec, TaskType
-from research.bench_playbook import honest_split, time_column
+from interfaces.schemas import DataProfile, Hypothesis, HypothesisKind, MetricSpec, TaskSpec, TaskType
+from research.bench_playbook import honest_split, summarize, time_column, with_validation
 
 
 def _spec(task_type=TaskType.REGRESSION):
@@ -67,3 +67,40 @@ def test_duplicates_stay_on_one_side():
     tr, va, how = honest_split(_spec(TaskType.BINARY), _profile(["x"]), train, test)
     assert how == "группы дубликатов"
     assert not set(train.x.iloc[tr]) & set(train.x.iloc[va])
+
+
+def test_with_validation_like_agent():
+    hyp = Hypothesis(id="h", kind=HypothesisKind.MODEL, title="h", params={"model": "xgboost"})
+    assert with_validation(hyp, "time:year").params == {"model": "xgboost", "validation": "time:year"}
+    assert "validation" not in with_validation(hyp, "kfold").params  # обычная CV — как без схемы
+    own = hyp.model_copy(update={"params": {"validation": "group:x"}})
+    assert with_validation(own, "time:year").params["validation"] == "group:x"
+    assert hyp.params == {"model": "xgboost"}  # исходные params не тронуты
+
+
+def test_summarize_counts_honest_wins_and_agent_decisions():
+    rows = pd.DataFrame(
+        [
+            {"task": "a", "id": "baseline", "honest": 10.0, "seconds": 1},
+            {"task": "a", "id": "h", "honest": 9.0, "honest_gain": 1.0, "accepted": True, "seconds": 2},
+            {"task": "b", "id": "baseline", "honest": 2.0, "seconds": 1},
+            {"task": "b", "id": "h", "honest": 2.5, "honest_gain": -0.5, "accepted": True, "seconds": 4},
+            {"task": "b", "id": "baseline", "honest": 2.0, "seconds": 1},  # второй CSV: тот же бейзлайн
+        ]
+    )
+    row = summarize(rows).loc["h"]
+    assert (row.tasks, row.wins, row.accepted, row.accepted_and_win) == (2, 1, 2, 1)
+    assert row.win_share == 0.5
+    assert np.isclose(row.median_gain_pct, (10 - 25) / 2)
+
+
+def test_summarize_orders_by_win_share_then_median():
+    rows = pd.DataFrame(
+        [{"task": t, "id": "baseline", "honest": 1.0, "seconds": 1} for t in "abc"]
+        + [
+            {"task": t, "id": "wide", "honest_gain": g, "seconds": 1}
+            for t, g in zip("abc", [0.01, 0.01, -0.5], strict=True)
+        ]
+        + [{"task": "a", "id": "narrow", "honest_gain": 0.2, "seconds": 1}]  # 1/1 задач — выше, чем 2/3
+    )
+    assert list(summarize(rows).index) == ["narrow", "wide"]

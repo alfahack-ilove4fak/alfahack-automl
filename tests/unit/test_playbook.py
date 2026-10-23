@@ -1,6 +1,8 @@
 """Playbook: поля по шапке файла, params понимает ml/experiment.py, ни одна гипотеза не падает."""
 
+import importlib.util
 import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -30,9 +32,20 @@ def test_supported_params_parsed():
     assert {"model", "model_params", "log_target", "class_weight"} <= SUPPORTED_PARAMS
 
 
-def test_playbook_models_run_in_ci():
-    """CI ставит зависимости без группы full: xgboost/catboost в playbook CI не проверит (и они ломаются — #145)."""
-    assert {item["params"].get("model", "lightgbm") for item in PLAYBOOK} <= {"lightgbm", "hist_gb", "linear"}
+REQUIREMENTS = (Path(__file__).resolve().parents[2] / "requirements.txt").read_text(encoding="utf-8")
+HEAVY_MODELS = {"xgboost", "catboost"}  # группа full: в CI их нет, на платформе — из requirements.txt
+
+
+def _model(item: dict) -> str:
+    return item["params"].get("model", "lightgbm")
+
+
+def test_playbook_models_exist_on_platform():
+    """Модель — из реестра ml/experiment.py, а тяжёлая — ещё и в requirements.txt платформы."""
+    for item in PLAYBOOK:
+        assert _model(item) in ml.experiment.MODEL_FITTERS, item["id"]
+        if _model(item) in HEAVY_MODELS:
+            assert re.search(rf"^{_model(item)}==", REQUIREMENTS, flags=re.MULTILINE), item["id"]
 
 
 def test_playbook_has_unique_ids():
@@ -102,13 +115,24 @@ def test_playbook_hypotheses_run(task_type, monkeypatch):
     # Проверяем «не падает», а не качество: мало деревьев, один поток, 2 фолда
     monkeypatch.setitem(ml.experiment.BASE_PARAMS, "n_estimators", 20)
     monkeypatch.setitem(ml.experiment.BASE_PARAMS, "n_jobs", 1)
+    monkeypatch.setitem(ml.experiment.XGBOOST_PARAMS, "n_estimators", 20)
+    monkeypatch.setitem(ml.experiment.CATBOOST_PARAMS, "iterations", 20)
     spec, profile, train = _toy_task(task_type)
     for item in PLAYBOOK:
         if item.get("task_types") and task_type.value not in item["task_types"]:
             continue
+        if _model(item) in HEAVY_MODELS and importlib.util.find_spec(_model(item)) is None:
+            continue  # CI без группы full; локально с `uv sync --group full` проверяется
         params = {**item["params"], "n_folds": 2}
         hyp = Hypothesis(id=item["id"], kind=HypothesisKind(item["kind"]), title=item["title"], params=params)
         result = run_experiment(spec, profile, hyp, train, RunBudget())
         assert result.status == ExperimentStatus.OK, f"{item['id']}: {result.error}"
         if item["params"].get("proba_weights") and spec.metric.name == "f1_macro":
             assert hyp.params.get("_proba_weights"), f"{item['id']}: множители классов не подобраны"
+
+
+def test_xgboost_proba_weights_after_lightgbm_one():
+    """Стенд v2: против бейзлайна xgboost_balanced_proba_weights на payments принимается зря (CV 0.21 против 0.10,
+    честно F1 0.13 против 0.18), против balanced_proba_weights (CV 0.27) — нет. Порядок защищает от ложного принятия."""
+    ids = [item["id"] for item in PLAYBOOK]
+    assert ids.index("balanced_proba_weights") < ids.index("xgboost_balanced_proba_weights")
