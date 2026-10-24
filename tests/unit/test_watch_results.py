@@ -241,3 +241,30 @@ def test_once_markdown_renders_all_checks_and_returns_code(tmp_path, capsys):
     for check in ("К1", "К2", "К3", "К4", "К5", "К6", "К7", "К8"):
         assert f"| {check} |" in text
     assert "## До/после: 15 мин" in text
+
+
+def test_html_marks_statuses_and_escapes_text(tmp_path):
+    before = [_row("<r>", 10.0, 20.0)]
+    after = [_row("<r>", 12.0, 10.0)]
+    html = wr.render(wr.evaluate(_plan(tmp_path, before, after)), "html")
+    assert "<table>" in html and "&lt;r&gt;" in html and "<r>" not in html
+    assert '<td class="bad">❌</td>' in html  # К3: потеря 10 баллов
+
+
+def test_serve_returns_page_and_markdown(tmp_path):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    plan = _plan(tmp_path, [_row("r", 10.0, 20.0)], [_row("r", 9.0, 25.0)])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), wr.make_handler(plan, refresh=5))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        page = urllib.request.urlopen(base + "/", timeout=10).read().decode("utf-8")
+        report = urllib.request.urlopen(base + "/report.md", timeout=10).read().decode("utf-8")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert '<meta http-equiv="refresh" content="5">' in page and "К4" in page
+    assert report.startswith("# ") and "| К1 |" in report

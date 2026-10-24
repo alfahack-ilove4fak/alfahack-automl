@@ -3,8 +3,11 @@
     uv run python research/night/watch_results.py --plan runs/oh/plan.json              # обновление каждые 15 с
     uv run python research/night/watch_results.py --plan runs/oh/plan.json --once       # один снимок
     uv run python research/night/watch_results.py --plan runs/oh/plan.json --once --markdown > report.md
+    uv run python research/night/watch_results.py --plan runs/oh/plan.json --serve      # http://127.0.0.1:8765
 
 Скрипт только читает файлы (agent.log, CSV харнесса, jsonl run_alien, gate.md) — прогонам не мешает.
+--serve — страница в браузере: на каждое обновление (раз в --interval секунд) файлы читаются заново;
+/report.md — тот же снимок в markdown. По умолчанию слушает только 127.0.0.1.
 Код выхода --once: 0 — всё проверено и нет ❌; 1 — есть ❌; 2 — нет ❌, но что-то ещё идёт (⏳).
 
 План — JSON (пример: research/night/control_plan.example.json). Пути — от текущей папки или абсолютные:
@@ -38,6 +41,8 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pandas as pd
@@ -429,38 +434,85 @@ def exit_code(snapshot: dict) -> int:
     return 1 if FAIL in statuses else (2 if WAIT in statuses else 0)
 
 
-def _table(headers: list[str], rows: list[list], markdown: bool) -> str:
+FORMATS = ("text", "markdown", "html")
+CELL_CLASS = {FAIL: "bad", "🔴": "bad", WARN: "warn", WAIT: "wait", OK: "good", "🟢": "good"}
+PAGE = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{refresh}"><title>Контроль результата</title>
+<style>
+:root {{ --bg: #fff; --fg: #1d1d1f; --line: #d9d9de; --head: #f3f3f6; --good: #e3f6e8; --bad: #fde4e4;
+  --warn: #fff4d6; --wait: #e8eefc; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg: #17181c; --fg: #e8e8ea; --line: #34363d; --head: #22242a;
+  --good: #1f3a28; --bad: #4a2224; --warn: #4a3d1a; --wait: #23304d; }} }}
+body {{ background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; margin: 0 16px 32px; }}
+table {{ border-collapse: collapse; margin: 6px 0 4px; max-width: 100%; display: block; overflow-x: auto; }}
+th, td {{ border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }}
+th {{ background: var(--head); }} td.good {{ background: var(--good); }} td.bad {{ background: var(--bad); }}
+td.warn {{ background: var(--warn); }} td.wait {{ background: var(--wait); }}
+h1 {{ font-size: 20px; }} h2 {{ font-size: 16px; margin-top: 22px; }} .muted {{ opacity: .7; }}
+</style></head><body>
+{body}
+<p class="muted">Страница обновляется каждые {refresh} с · данные — файлы прогонов на этой машине</p>
+</body></html>
+"""
+
+
+def _cell_class(text: str) -> str:
+    for mark, css in CELL_CLASS.items():
+        if text.startswith(mark):
+            return f' class="{css}"'
+    return ""
+
+
+def _table(headers: list[str], rows: list[list], fmt: str) -> str:
     cells = [[str(c) for c in row] for row in rows]
-    if markdown:
+    if fmt == "markdown":
         lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
         return "\n".join(lines + ["| " + " | ".join(r) + " |" for r in cells])
+    if fmt == "html":
+        head = "".join(f"<th>{escape(h)}</th>" for h in headers)
+        body = "".join(
+            "<tr>" + "".join(f"<td{_cell_class(c)}>{escape(c)}</td>" for c in row) + "</tr>" for row in cells
+        )
+        return f"<table><tr>{head}</tr>{body}</table>"
     widths = [max(len(h), *(len(r[i]) for r in cells)) if cells else len(h) for i, h in enumerate(headers)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    return "\n".join([fmt.format(*headers), fmt.format(*("-" * w for w in widths))] + [fmt.format(*r) for r in cells])
+    line = "  ".join(f"{{:<{w}}}" for w in widths)
+    return "\n".join(
+        [line.format(*headers), line.format(*("-" * w for w in widths))] + [line.format(*r) for r in cells]
+    )
 
 
 def _num(value: float | None) -> str:
     return NA if value is None else f"{value:.5g}"
 
 
-def render(snapshot: dict, markdown: bool = False) -> str:
+def render(snapshot: dict, fmt: str = "text") -> str:
+    """Снимок как текст для терминала, markdown для PR/issue или HTML-фрагмент для страницы --serve."""
     plan, crit = snapshot["plan"], snapshot["crit"]
-    h = "## " if markdown else "== "
+
+    def head(text: str, level: int = 2) -> str:
+        if fmt == "html":
+            return f"<h{level}>{escape(text)}</h{level}>"
+        return ("#" * level + " " if fmt == "markdown" else ("" if level == 1 else "== ")) + text
+
+    def para(text: str) -> str:
+        return f"<p>{escape(text)}</p>" if fmt == "html" else text
+
     counts = {s: sum(c["status"] == s for c in snapshot["checks"]) for s in (OK, WARN, FAIL, WAIT)}
     now = datetime.now().strftime("%H:%M:%S")
     out = [
-        f"{'# ' if markdown else ''}{plan.get('title', 'Контроль результата')} · гипотеза «{plan.get('hypothesis', '')}»",
-        f"{now} · " + " · ".join(f"{s} {n}" for s, n in counts.items()),
+        head(f"{plan.get('title', 'Контроль результата')} · гипотеза «{plan.get('hypothesis', '')}»", 1),
+        para(f"{now} · " + " · ".join(f"{s} {n}" for s, n in counts.items())),
         "",
-        h + "Контроль",
+        head("Контроль"),
         _table(
             ["", "Проверка", "Итог", "Подробности"],
             [[c["code"], c["title"], c["status"], c["detail"]] for c in snapshot["checks"]],
-            markdown,
+            fmt,
         ),
     ]
     active = [r for r in snapshot["runs"] if r.state(crit["stale_sec"], crit["grace_sec"]) != "готов"]
-    out += ["", h + "Идут сейчас"]
+    out += ["", head("Идут сейчас")]
     if active:
         rows = [
             [
@@ -472,11 +524,11 @@ def render(snapshot: dict, markdown: bool = False) -> str:
             ]
             for r in active
         ]
-        out.append(_table(["Прогон", "Состояние", "Прошло", "Итерация", "Лучший CV"], rows, markdown))
+        out.append(_table(["Прогон", "Состояние", "Прошло", "Итерация", "Лучший CV"], rows, fmt))
     else:
-        out.append("нет живых прогонов")
+        out.append(para("нет живых прогонов"))
     for pair in snapshot["pairs"]:
-        out += ["", h + f"До/после: {pair['name']}"]
+        out += ["", head(f"До/после: {pair['name']}")]
         rows = [
             [
                 short(r["task"]),
@@ -490,23 +542,18 @@ def render(snapshot: dict, markdown: bool = False) -> str:
             for r in pair["rows"]
         ]
         headers = ["Задача", "Метрика", "До", "После", "Метрика лучше на", "Балл к сильному", "Итог"]
-        out.append(_table(headers, rows, markdown) if rows else f"{WAIT} результатов ещё нет")
+        out.append(_table(headers, rows, fmt) if rows else para(f"{WAIT} результатов ещё нет"))
     decided = [r for r in snapshot["runs"] if r.decision]
     if decided and plan.get("hypothesis"):
-        out += ["", h + f"Решения по «{plan['hypothesis']}»"]
-        out.append(
-            _table(["Прогон", "Решение", "Подробности"], [[r.name, r.decision, r.detail] for r in decided], markdown)
-        )
+        out += ["", head(f"Решения по «{plan['hypothesis']}»")]
+        out.append(_table(["Прогон", "Решение", "Подробности"], [[r.name, r.decision, r.detail] for r in decided], fmt))
     if snapshot["gate"] and not snapshot["gate"]["passed"]:
-        out += ["", h + "Провалы гейта"]
+        out += ["", head("Провалы гейта")]
         rows = [[a["name"], a["status"], a["text"]] for a in snapshot["attribution"]]
-        out.append(
-            _table(["Задача", "Итог", "Перепроверка"], rows, markdown)
-            if rows
-            else "\n".join(snapshot["gate"]["failures"])
-        )
+        failures = [[f] for f in snapshot["gate"]["failures"]]
+        out.append(_table(["Задача", "Итог", "Перепроверка"], rows, fmt) if rows else _table(["Провал"], failures, fmt))
     if snapshot["leak"]:
-        out += ["", h + "Ловушки утечек"]
+        out += ["", head("Ловушки утечек")]
         rows = [
             [
                 short(r["task"]),
@@ -516,8 +563,41 @@ def render(snapshot: dict, markdown: bool = False) -> str:
             ]
             for r in snapshot["leak"]
         ]
-        out.append(_table(["Ловушка", "dev", "Ветка", "Балл к сильному"], rows, markdown))
+        out.append(_table(["Ловушка", "dev", "Ветка", "Балл к сильному"], rows, fmt))
     return "\n".join(out) + "\n"
+
+
+def make_handler(plan: dict, refresh: float) -> type[BaseHTTPRequestHandler]:
+    """Обработчик для --serve: на каждый запрос заново читает файлы и отдаёт страницу (/) или markdown (/report.md)."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — имя задаёт http.server
+            path = self.path.split("?", 1)[0]
+            if path not in ("/", "/report.md"):
+                self.send_error(404)
+                return
+            try:
+                snapshot = evaluate(plan)
+                if path == "/":
+                    body = PAGE.format(refresh=max(1, int(refresh)), body=render(snapshot, "html"))
+                    ctype = "text/html; charset=utf-8"
+                else:
+                    body, ctype = render(snapshot, "markdown"), "text/markdown; charset=utf-8"
+            except Exception as exc:  # noqa: BLE001 — страница не падает от недописанного файла
+                body = f"Снимок не собрался: {type(exc).__name__}: {exc}"
+                ctype = "text/plain; charset=utf-8"
+            data = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):  # не засоряем консоль строкой на каждый запрос
+            pass
+
+    return Handler
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -526,16 +606,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="один снимок и выход (код: 0 / 1 — есть ❌ / 2 — идёт)")
     parser.add_argument("--markdown", action="store_true", help="markdown — для комментария в PR или issue")
     parser.add_argument("--interval", type=float, default=15, help="период обновления, секунд (по умолчанию 15)")
+    parser.add_argument("--serve", action="store_true", help="страница в браузере: http://HOST:PORT, сама обновляется")
+    parser.add_argument("--host", default="127.0.0.1", help="адрес для --serve (по умолчанию только этот компьютер)")
+    parser.add_argument("--port", type=int, default=8765, help="порт для --serve (по умолчанию 8765)")
     args = parser.parse_args(argv)
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
+    fmt = "markdown" if args.markdown else "text"
     if args.once:
         snapshot = evaluate(plan)
-        print(render(snapshot, args.markdown), end="")
+        print(render(snapshot, fmt), end="")
         return exit_code(snapshot)
+    if args.serve:
+        server = ThreadingHTTPServer((args.host, args.port), make_handler(plan, args.interval))
+        print(f"Открой http://{args.host}:{server.server_port} — markdown: /report.md · Ctrl+C — выход", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return 0
     try:
         while True:
             snapshot = evaluate(plan)
-            sys.stdout.write("\033[2J\033[H" + render(snapshot, args.markdown))
+            sys.stdout.write("\033[2J\033[H" + render(snapshot, fmt))
             sys.stdout.write(f"\nобновление каждые {args.interval:g} с · Ctrl+C — выход\n")
             sys.stdout.flush()
             time.sleep(args.interval)
