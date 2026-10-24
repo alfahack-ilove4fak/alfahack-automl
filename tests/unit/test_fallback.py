@@ -306,3 +306,10 @@ def test_metric_objective_not_repeated_for_best_with_it(spec):
     assert {"model": "xgboost", "objective": "metric"} not in [h.params for h in hyps]
     # цель лучшего (objective) — его предобработка: её наследуют и другие модели
     assert all(h.params.get("objective") == "metric" for h in hyps)
+
+
+def test_metric_objective_replaces_explicit_objective_of_best(spec):
+    """Лучший с явной целью (objective_huber) — направление для его модели без неё, иначе повтор лучшего."""
+    best = (hyp("best", model="lightgbm", model_params={"objective": "huber", "num_leaves": 31}), result("b", BASE))
+    hyps = fallback_hypotheses(_metric_spec(spec, "pinball@0.9"), [best], best, RunBudget(total_seconds=3600))
+    assert hyps[0].params == {"model": "lightgbm", "model_params": {"num_leaves": 31}, "objective": "metric"}

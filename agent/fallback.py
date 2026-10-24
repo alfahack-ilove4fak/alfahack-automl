@@ -61,6 +61,7 @@ SEED_KEYS = {"lightgbm": "random_state", "xgboost": "random_state", "catboost": 
 SEED = 42  # как ml.experiment.SEED: первая копия ансамбля — та же модель, что и лучшая
 # то, что запасная гипотеза задаёт сама; остальное (признаки, веса, log_target, objective) — от лучшего
 OWN_KEYS = ("model", "model_params", "optuna", "ensemble")
+OBJECTIVE_KEYS = ("objective", "loss_function", "loss")  # как ml.experiment.OBJECTIVE_KEYS: цель в model_params
 FALLBACK_ENV = "AGENT_FALLBACK"  # "0" — без запасных направлений
 PREFIX = "fb-"  # id запасных гипотез
 
@@ -182,12 +183,16 @@ class _Directions:
 
     def metric_objective(self, model: str, spec: TaskSpec) -> None:
         """Модель с целью обучения под метрику (#237): pinball −71%, MAPE −28% на стенде. Только если цель своя."""
-        if model == self.model and not self.single:
-            return
-        base = self.tuned if model == self.model else {**self.common, "model": model}
-        params = {**base, "objective": "metric"}
-        if self.base.get("objective") == "metric" and model == self.model:
-            return  # у лучшего цель уже под метрику
+        if model == self.model and (not self.single or self.base.get("objective") == "metric"):
+            return  # ансамбль или у лучшего цель уже под метрику
+        if model == self.model:
+            # явная цель в model_params важнее подстановки (ml/experiment) — убираем, иначе был бы повтор лучшего
+            model_params = {k: v for k, v in (self.tuned.get("model_params") or {}).items() if k not in OBJECTIVE_KEYS}
+            params = {**self.tuned, "model_params": model_params, "objective": "metric"}
+            if not model_params:
+                del params["model_params"]
+        else:
+            params = {**self.common, "model": model, "objective": "metric"}
         if not _metric_objective_differs(spec, params):
             return  # у метрики нет своей цели для этой модели — был бы повтор на L2
         self.add(
