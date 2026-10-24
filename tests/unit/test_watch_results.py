@@ -311,3 +311,8 @@ def test_export_then_snapshot_shows_same_result_on_another_machine(tmp_path, cap
 def test_plan_or_snapshot_is_required(tmp_path):
     with pytest.raises(SystemExit):
         wr.main(["--once"])
+
+
+def test_missing_snapshot_file_explains_where_it_was_looked_for(tmp_path):
+    text, code = wr.load_view(None, tmp_path / "нет.json", "html")
+    assert code == 2 and "Файла снимка нет" in text and "нет.json" in text

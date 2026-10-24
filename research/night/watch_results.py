@@ -693,6 +693,12 @@ def load_view(plan: dict | None, snapshot_file: Path | None, fmt: str) -> tuple[
     if snapshot_file is None:
         snapshot = evaluate(plan or {})
         return render(snapshot, fmt), exit_code(snapshot)
+    if not snapshot_file.exists():
+        note = (
+            f"Файла снимка нет: {snapshot_file.resolve()}. Путь считается от папки, из которой запущен скрипт "
+            f"({Path.cwd()}). Положи файл туда или укажи в --snapshot полный путь."
+        )
+        return (f'<p class="verdict">{escape(note)}</p>' if fmt == "html" else note + "\n"), 2
     data = json.loads(snapshot_file.read_text(encoding="utf-8"))
     note = f"Снимок из файла {snapshot_file.name}, собран {data['generated']} на машине, где идут прогоны."
     note += " Положи новую версию файла — страница покажет её при следующем обновлении."
