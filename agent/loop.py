@@ -12,7 +12,15 @@ from collections.abc import Callable
 import pandas as pd
 
 from agent.acceptance import accept
-from agent.critic import estimated_seconds, review
+from agent.critic import (
+    HYP_TIME_SHARE_ENV,
+    capped_budget,
+    estimated_seconds,
+    hyp_time_share,
+    hypothesis_limit,
+    observed_slowdown,
+    review,
+)
 from agent.fallback import fallback_hypotheses, is_fallback
 from agent.feature_code import MAX_FEATURE_TRIES, propose_feature_hypothesis
 from agent.hypotheses import propose_hypotheses
@@ -114,8 +122,19 @@ def run_autoresearch(
         log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
         reason = review(hyp, spec) or foreign_validation(hyp, validation)
         needed = estimated_seconds(hyp, baseline_seconds)
+        share = hyp_time_share()
+        limit = None
+        if share > 0:  # потолок одной гипотезы (#276); AGENT_HYP_TIME_SHARE=0 — как раньше
+            needed *= observed_slowdown(hyp, history, baseline_seconds)
+            if not hyp.params.get("optuna"):  # подбор Optuna ограничен своей долей остатка (ml/tuning.py)
+                limit = hypothesis_limit(budget.seconds_left(), share, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
             reason = f"не успеет: оценка {needed:.0f} с, осталось {budget.seconds_left():.0f} с"
+        if reason is None and limit is not None and needed > limit:
+            reason = (
+                f"дороже потолка гипотезы: оценка {needed:.0f} с > {limit:.0f} с "
+                f"({share:.0%} остатка {budget.seconds_left():.0f} с, {HYP_TIME_SHARE_ENV})"
+            )
         if reason is not None:
             # в историю со статусом SKIPPED: гипотезу не предложат снова, а LLM увидит причину
             log.info("  ⊘ пропуск критиком: %s", reason)
@@ -125,7 +144,12 @@ def run_autoresearch(
         # run_experiment пишет в params запущенной копии _best_iteration, _proba_weights, _optuna_best —
         # финал должен обучаться на ней, а не на исходной гипотезе (#206: иначе 550 деревьев и без весов классов)
         run_hyp = with_validation(hyp, validation)
-        result = run_experiment(spec, profile, run_hyp, train, budget)
+        run_budget = budget
+        if limit is not None and limit < budget.seconds_left():
+            # ml/ проверяет время по этому бюджету: прогноз по первому фолду оборвёт гипотезу на потолке
+            log.info("  ⏱ потолок гипотезы %.0f с (оценка %.0f с)", limit, needed)
+            run_budget = capped_budget(budget, limit)
+        result = run_experiment(spec, profile, run_hyp, train, run_budget)
         history.append((hyp, result))
         if result.status != ExperimentStatus.OK:
             log.info("  ✗ %s: %s", result.status.value, result.error)
