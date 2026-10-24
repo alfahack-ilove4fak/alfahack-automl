@@ -17,8 +17,9 @@
 примере; надёжнее не тюнить на time-фолдах вовсе (#236).
 Остальные схемы — только по t. Исследование — docs/research/accept-rule.md.
 
-Гипотезы от LLM (source="llm", #276) проходят по строгому порогу: t ≥ LLM_T_MIN (3), во time-схеме выигрыш
-≥ LLM_TIME_MIN_REL_GAIN (2%). Переменные AGENT_LLM_T_MIN и AGENT_LLM_TIME_GAIN меняют их; 2 и 0.01 — как у playbook.
+Гипотезы от LLM (source="llm", #276) проходят по своему порогу: t ≥ LLM_T_MIN, во time-схеме выигрыш
+≥ LLM_TIME_MIN_REL_GAIN. По умолчанию — как у playbook (2 и 1%): сабмит №6 без LLM показал, что штраф −8 не от LLM,
+а строгий порог отсекал все её гипотезы. Ужесточить — AGENT_LLM_T_MIN=3 AGENT_LLM_TIME_GAIN=0.02.
 
 Если фолды несравнимы (другое n_folds, упавшие фолды) — старое правило: среднее лучше на NOISE_FACTOR·std.
 """
@@ -35,10 +36,10 @@ MIN_REL_GAIN = 1e-4  # улучшение меньше 0.01% от метрики
 NOISE_FACTOR = 0.25  # запасное правило: какую долю std лучшего результата считаем шумом
 TIME_PREFIX = "time:"  # схема по времени: фолды по возрастанию периода (ml/validation._time_folds)
 TIME_MIN_REL_GAIN = 0.01  # time-правило без t: улучшение меньше 1% от метрики считаем шумом подбора
-LLM_T_ENV = "AGENT_LLM_T_MIN"  # порог t для гипотез LLM (#276, штраф −8)
-LLM_T_MIN = 3.0
+LLM_T_ENV = "AGENT_LLM_T_MIN"  # порог t для гипотез LLM (#276); выключатель остаётся
+LLM_T_MIN = T_MIN  # как у playbook: строгий порог 3 отсекал все гипотезы LLM, а штраф не от неё (сабмит №6)
 LLM_GAIN_ENV = "AGENT_LLM_TIME_GAIN"  # порог выигрыша time-правила для гипотез LLM, доля метрики
-LLM_TIME_MIN_REL_GAIN = 0.02
+LLM_TIME_MIN_REL_GAIN = TIME_MIN_REL_GAIN
 
 
 def _env_float(name: str, default: float) -> float:

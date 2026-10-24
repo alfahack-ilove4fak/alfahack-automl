@@ -56,7 +56,13 @@ def apply_on(monkeypatch):
 
 @pytest.mark.parametrize(
     "value, expected",
-    [("mae", "mae"), ("  MAE ", "mae"), ("Root Mean Squared Error", "rmse")],
+    [
+        ("mae", "mae"),
+        ("  MAE ", "mae"),
+        ("Root Mean Squared Error", "rmse"),
+        ("fbeta@2", "fbeta@2"),  # параметрическая метрика реестра: `in` её не видит, __missing__ собирает
+        ("pinball@0.9", "pinball@0.9"),
+    ],
 )
 def test_metric_key_known_names(value, expected):
     """Название метрики от LLM приводится к ключу реестра (регистр и пробелы не важны)."""
@@ -181,12 +187,24 @@ def test_reconcile_default_fills_field_when_data_parse_failed(monkeypatch, field
     assert field in accepted
 
 
-def test_reconcile_default_does_not_fill_missing_metric(monkeypatch):
-    """#276: метрики нет в тексте (None — так «угадана» любая метрика в parse_task) — по умолчанию LLM её не ставит."""
+@pytest.mark.parametrize(
+    "llm_metric, expected",
+    [("NDCG@10", "ndcg"), ("Huber loss", "huber"), ("F2 score", "fbeta@2"), ("fbeta@2", "fbeta@2"), ("MAPE", "mape")],
+)
+def test_reconcile_default_fills_missing_metric(monkeypatch, llm_metric, expected):
+    """#276: словарь не нашёл метрику в тексте (None) — по умолчанию её ставит аналитик, если она есть в реестре."""
     monkeypatch.delenv(APPLY_ENV, raising=False)
-    accepted, notes = run({"metric": "mae"}, heur(metric=None), guessed={"metric"})
+    accepted, notes = run({"metric": llm_metric}, heur(metric=None), guessed={"metric"})
+    assert accepted == {"metric": expected}
+    assert notes == [f"{PREFIX}: метрика от аналитика: {expected}"]
+
+
+def test_reconcile_default_missing_metric_not_in_registry_not_filled(monkeypatch):
+    """Метрики нет ни в тексте, ни в реестре (и ближайшей LLM не назвала) — остаётся метрика по типу задачи."""
+    monkeypatch.delenv(APPLY_ENV, raising=False)
+    accepted, notes = run({"metric": "quantum_score@10"}, heur(metric=None), guessed={"metric"})
     assert accepted == {}
-    assert any("значения по умолчанию" in n and APPLY_ENV in n for n in notes)
+    assert not any("метрика от аналитика" in n for n in notes)
 
 
 # ---------- reconcile: id ----------
@@ -220,7 +238,7 @@ def test_reconcile_guessed_metric_accepted(apply_on):
     """Метрику в тексте не нашли (угадана), LLM даёт валидную из реестра — принимаем."""
     accepted, notes = run({"metric": "MAE"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {"metric": "mae"}
-    assert notes == []
+    assert notes == [f"{PREFIX}: метрика от аналитика: mae"]
 
 
 def test_reconcile_found_metric_wins_over_llm():
@@ -429,12 +447,19 @@ def test_parse_task_llm_fills_missing_metric(tmp_path, apply_on):
     assert not spec.metric.greater_is_better
 
 
-def test_parse_task_default_keeps_default_metric(tmp_path):
-    """#276: метрики в тексте нет — по умолчанию метрика по типу задачи, мнение LLM — только в notes."""
-    task_md = write_task(tmp_path, text="Предскажи значение y по признакам.")
-    spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": "mae"}))
-    assert spec.metric.name == "rmse"
-    assert any("metric=mae" in n and APPLY_ENV in n for n in spec.notes)
+@pytest.mark.parametrize(
+    "text, llm_metric, expected",
+    [
+        ("Предскажи y. Ошибку считают как модуль разницы прогноза и факта, делённый на факт.", "MAPE", "mape"),
+        ("Предскажи y. Ошибка штрафуется квадратично, пока она мала, и линейно, когда велика.", "Huber loss", "huber"),
+    ],
+)
+def test_parse_task_default_metric_in_words_from_analyst(tmp_path, text, llm_metric, expected):
+    """#276: метрика описана словами, словарь её не нашёл — по умолчанию её ставит аналитик, а не метрика по типу."""
+    task_md = write_task(tmp_path, text=text)
+    spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": llm_metric}))
+    assert spec.metric.name == expected
+    assert any(f"метрика от аналитика: {expected}" in n for n in spec.notes)
 
 
 def test_parse_task_text_metric_beats_llm(tmp_path):

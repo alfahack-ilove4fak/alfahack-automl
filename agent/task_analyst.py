@@ -49,13 +49,22 @@ def apply_enabled() -> bool:
     return os.getenv(APPLY_ENV, "0") == "1"
 
 
+def _in_registry(name: str) -> bool:
+    """Метрика есть в реестре; не `in`: параметрические (fbeta@2, pinball@0.9) реестр собирает через __missing__."""
+    try:
+        METRICS[name]
+    except KeyError:
+        return False
+    return True
+
+
 def _only_fill_gaps(accepted: dict[str, str], heuristic: dict[str, str | None]) -> tuple[dict[str, str], list[str]]:
     """Без AGENT_ANALYST_APPLY=1 оставить только поля, где разбор по данным ничего не нашёл; прочее — в заметки.
 
-    Метрику не заполняем и при None: в parse_task она «угадана» только тогда, когда её нет в тексте, а на этот
-    случай есть метрика по типу задачи — иначе выключатель для метрики не срабатывал бы никогда (#276).
+    Метрику заполняем, когда словарь не нашёл её в тексте (None) и LLM назвала метрику из реестра: метрика,
+    описанная словами, точнее метрики по типу задачи (#276). Найденную словарём по-прежнему не заменяем.
     """
-    kept = {k: v for k, v in accepted.items() if k != "metric" and heuristic.get(k) is None}
+    kept = {k: v for k, v in accepted.items() if heuristic.get(k) is None and (k != "metric" or _in_registry(v))}
     notes = [
         f"предлагает {key}={value} вместо {heuristic[key] or 'значения по умолчанию'} — не применено ({APPLY_ENV}=1 включает)"
         for key, value in accepted.items()
@@ -123,7 +132,7 @@ def metric_key(value) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     name = value.strip().lower()
-    return name if name in METRICS else find_metric_in_text(name)
+    return name if _in_registry(name) else find_metric_in_text(name)
 
 
 def reconcile(
@@ -206,6 +215,8 @@ def reconcile(
     if not apply_enabled():
         accepted, kept_back = _only_fill_gaps(accepted, heuristic)
         notes += kept_back
+    if "metric" in accepted:
+        notes.append(f"метрика от аналитика: {accepted['metric']}")
     log.info("%s: %s", PREFIX, ", ".join(checks) or "поля не распознаны")
     for note in notes:
         log.info("%s: %s", PREFIX, note)
