@@ -1,0 +1,124 @@
+{
+ "tasks": {
+  "auction_verification": {
+   "zero": false,
+   "score": 51.84,
+   "seconds": 232.0,
+   "type": "regression",
+   "metric": "rmse",
+   "parsed_metric": "rmse",
+   "parse_ok": true,
+   "problems": []
+  },
+  "brazilian_houses": {
+   "zero": false,
+   "score": 23.58,
+   "seconds": 241.5,
+   "type": "regression",
+   "metric": "r2",
+   "parsed_metric": "r2",
+   "parse_ok": true,
+   "problems": []
+  },
+  "churn": {
+   "zero": false,
+   "score": 1.99,
+   "seconds": 191.5,
+   "type": "binary",
+   "metric": "roc_auc",
+   "parsed_metric": "roc_auc",
+   "parse_ok": true,
+   "problems": []
+  },
+  "cpu_act": {
+   "zero": false,
+   "score": 5.45,
+   "seconds": 232.1,
+   "type": "regression",
+   "metric": "r2",
+   "parsed_metric": "r2",
+   "parse_ok": true,
+   "problems": []
+  },
+  "credit": {
+   "zero": false,
+   "score": 2.6,
+   "seconds": 198.1,
+   "type": "binary",
+   "metric": "pr_auc",
+   "parsed_metric": "pr_auc",
+   "parse_ok": true,
+   "problems": []
+  },
+  "default_of_credit_card_clien": {
+   "zero": false,
+   "score": 3.4,
+   "seconds": 224.0,
+   "type": "binary",
+   "metric": "pr_auc",
+   "parsed_metric": "pr_auc",
+   "parse_ok": true,
+   "problems": []
+  },
+  "dna": {
+   "zero": false,
+   "score": 6.9,
+   "seconds": 225.0,
+   "type": "multiclass",
+   "metric": "accuracy",
+   "parsed_metric": "accuracy",
+   "parse_ok": true,
+   "problems": []
+  },
+  "letter": {
+   "zero": false,
+   "score": 15.67,
+   "seconds": 129.2,
+   "type": "multiclass",
+   "metric": "balanced_accuracy",
+   "parsed_metric": "balanced_accuracy",
+   "parse_ok": true,
+   "problems": []
+  },
+  "mfeat_zernike": {
+   "zero": false,
+   "score": 6.96,
+   "seconds": 235.9,
+   "type": "multiclass",
+   "metric": "balanced_accuracy",
+   "parsed_metric": "balanced_accuracy",
+   "parse_ok": true,
+   "problems": []
+  },
+  "ozone_level_8hr": {
+   "zero": false,
+   "score": 2.62,
+   "seconds": 193.4,
+   "type": "binary",
+   "metric": "pr_auc",
+   "parsed_metric": "pr_auc",
+   "parse_ok": true,
+   "problems": []
+  },
+  "steel_plates_fault": {
+   "zero": true,
+   "score": 0.0,
+   "seconds": 209.2,
+   "type": "multiclass",
+   "metric": "accuracy",
+   "parsed_metric": "accuracy",
+   "parse_ok": true,
+   "problems": []
+  },
+  "wine_quality": {
+   "zero": false,
+   "score": 3.77,
+   "seconds": 106.2,
+   "type": "regression",
+   "metric": "r2",
+   "parsed_metric": "r2",
+   "parse_ok": true,
+   "problems": []
+  }
+ }
+}
