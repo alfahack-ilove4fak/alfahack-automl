@@ -131,7 +131,9 @@ def run_autoresearch(
             log.info("  ✗ %s: %s", result.status.value, result.error)
             memory.record(hyp.id, False, result.status.value)
             continue
-        accepted, reason = accept(result, best[1], gib, strict=hyp.source == "llm")  # LLM — строже (#276)
+        n_tested = sum(r.status == ExperimentStatus.OK for _, r in history[1:])  # сравнений с лучшим, без бейзлайна
+        # LLM — строже; AGENT_ACCEPT_MULTI=1 — порог растёт с числом сравнений (#276)
+        accepted, reason = accept(result, best[1], gib, strict=hyp.source == "llm", n_tested=n_tested)
         memory.record(hyp.id, accepted, reason)  # причина (t, k/5 фолдов) видна LLM в истории
         if accepted:
             log.info("  ✓ лучше: %.5f → %.5f — %s", best[1].mean_score, result.mean_score, reason)

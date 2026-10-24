@@ -189,10 +189,11 @@ def test_feature_code_disabled_by_default(spec, profile, monkeypatch):
 def test_loop_accepts_llm_hypotheses_strictly(spec, profile, monkeypatch):
     """#276: цикл передаёт в правило принятия strict=True только для гипотез от LLM."""
     monkeypatch.setenv(FEATURE_ENV, "1")
-    calls = []
+    calls, counts = [], []
 
-    def fake_accept(new, best, gib, strict=False):
+    def fake_accept(new, best, gib, strict=False, n_tested=1):
         calls.append((new.hypothesis_id, strict))
+        counts.append(n_tested)
         return False, "тест"
 
     monkeypatch.setattr(loop, "accept", fake_accept)
@@ -200,3 +201,4 @@ def test_loop_accepts_llm_hypotheses_strictly(spec, profile, monkeypatch):
     by_id = {h.id: h.source for h in seen}
     assert any(strict for _, strict in calls) and any(not strict for _, strict in calls)
     assert all(strict == (by_id[hid] == "llm") for hid, strict in calls)
+    assert counts == list(range(1, len(counts) + 1))  # каждое сравнение с лучшим увеличивает счётчик (#276)

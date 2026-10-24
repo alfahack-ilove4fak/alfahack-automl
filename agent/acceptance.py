@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+from statistics import NormalDist
 
 from interfaces.schemas import ExperimentResult, ExperimentStatus
 
@@ -39,6 +40,15 @@ LLM_T_ENV = "AGENT_LLM_T_MIN"  # порог t для гипотез LLM (#276, �
 LLM_T_MIN = 3.0
 LLM_GAIN_ENV = "AGENT_LLM_TIME_GAIN"  # порог выигрыша time-правила для гипотез LLM, доля метрики
 LLM_TIME_MIN_REL_GAIN = 0.02
+# Поправка на множественные сравнения (#276, гипотеза штрафа −7): за 3 часа цикл сравнивает с лучшим сотни гипотез
+# на одних и тех же фолдах, и правило t ≥ 2 (≈ 2.3% ложных принятий на гипотезу) пропускает шум: на «нулевых»
+# гипотезах ≈ 6 ложных принятий на 300 проверок при 5 фолдах, ≈ 13 при 3. С поправкой Бонферрони на тот же уровень
+# на одну проверку порог растёт как квантиль нормального: m=20 → 3.05, 100 → 3.51, 300 → 3.79 (≈ 0.7 ложных на 300).
+# Нормальный, а не t-квантиль: при 3 фолдах (2 степени свободы) t-квантиль уходит в десятки и цикл замирает.
+# Во time-схеме и для несравнимых фолдов порог выигрыша растёт в том же отношении. По умолчанию выключено.
+MULTI_ENV = "AGENT_ACCEPT_MULTI"  # "1" — порог растёт с числом проверенных гипотез
+T_MULTI_MAX = 4.0  # потолок порога: m ≈ 1000; дальше честные улучшения почти не проходят
+_ALPHA = 1 - NormalDist().cdf(T_MIN)  # уровень одной проверки, который даёт T_MIN
 
 
 def _env_float(name: str, default: float) -> float:
@@ -50,11 +60,22 @@ def _env_float(name: str, default: float) -> float:
     return value if math.isfinite(value) and value >= 0 else default
 
 
-def thresholds(strict: bool) -> tuple[float, float]:
-    """(порог t, порог выигрыша time-правила): strict — для гипотез LLM, иначе обычные."""
-    if not strict:
-        return T_MIN, TIME_MIN_REL_GAIN
-    return _env_float(LLM_T_ENV, LLM_T_MIN), _env_float(LLM_GAIN_ENV, LLM_TIME_MIN_REL_GAIN)
+def multi_factor(n_tested: int) -> float:
+    """Во сколько раз поднять пороги после n_tested сравнений с лучшим (≥ 1). 1 — поправка выключена."""
+    if os.getenv(MULTI_ENV, "0") != "1" or n_tested <= 1:
+        return 1.0
+    z = NormalDist().inv_cdf(1 - _ALPHA / n_tested)
+    return max(1.0, min(z, T_MULTI_MAX) / T_MIN)
+
+
+def thresholds(strict: bool, n_tested: int = 1) -> tuple[float, float]:
+    """(порог t, порог выигрыша time-правила): strict — для гипотез LLM, n_tested — поправка на число сравнений."""
+    if strict:
+        t_min, gain = _env_float(LLM_T_ENV, LLM_T_MIN), _env_float(LLM_GAIN_ENV, LLM_TIME_MIN_REL_GAIN)
+    else:
+        t_min, gain = T_MIN, TIME_MIN_REL_GAIN
+    factor = multi_factor(n_tested)
+    return max(t_min, T_MIN * factor), max(gain, TIME_MIN_REL_GAIN * factor)
 
 
 def fold_gains(new: ExperimentResult, best: ExperimentResult, greater_is_better: bool) -> list[float] | None:
@@ -76,11 +97,16 @@ def corrected_t(gains: list[float]) -> float:
 
 
 def accept(
-    new: ExperimentResult, best: ExperimentResult, greater_is_better: bool, strict: bool = False
+    new: ExperimentResult,
+    best: ExperimentResult,
+    greater_is_better: bool,
+    strict: bool = False,
+    n_tested: int = 1,
 ) -> tuple[bool, str]:
     """Принять ли new вместо best. Возвращает решение и короткую причину для лога и истории.
 
     strict=True — гипотеза от LLM: пороги t и time-правила строже (thresholds).
+    n_tested — сколько гипотез уже сравнили с лучшим за прогон, включая эту (поправка при AGENT_ACCEPT_MULTI=1).
     """
     if new.status != ExperimentStatus.OK or new.mean_score is None:
         return False, f"эксперимент не удался ({new.status.value})"
@@ -91,16 +117,19 @@ def accept(
         return False, f"другая схема валидации: {new.validation} против {best.validation}"
     gains = fold_gains(new, best, greater_is_better)
     if gains is None:
-        delta = NOISE_FACTOR * (best.std_score or 0.0)
+        delta = NOISE_FACTOR * (best.std_score or 0.0) * multi_factor(n_tested)
         ok = new.beats(best, greater_is_better, delta)
         return ok, f"фолды несравнимы — по среднему с порогом {delta:.4g}"
     mean_gain = sum(gains) / len(gains)
     if mean_gain <= MIN_REL_GAIN * abs(best.mean_score):
         return False, f"среднее улучшение {mean_gain:.4g} слишком мало"
-    t_min, time_gain = thresholds(strict)
+    t_min, time_gain = thresholds(strict, n_tested)
     t = corrected_t(gains)
     wins = sum(g > 0 for g in gains)
-    reason = f"улучшение {mean_gain:.4g}, лучше на {wins}/{len(gains)} фолдах, t={t:.2f} (порог {t_min:g}{', LLM' if strict else ''})"
+    rule = (
+        f"порог {t_min:.3g}" + (", LLM" if strict else "") + (f", m={n_tested}" if multi_factor(n_tested) > 1 else "")
+    )
+    reason = f"улучшение {mean_gain:.4g}, лучше на {wins}/{len(gains)} фолдах, t={t:.2f} ({rule})"
     if (
         t < t_min
         and (new.validation or "").startswith(TIME_PREFIX)
