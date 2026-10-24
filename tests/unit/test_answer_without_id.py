@@ -79,3 +79,38 @@ def test_unknown_first_name_in_template_is_id_taken_from_sample(tmp_path):
         train, test = load_data(spec)
         answer = trivial_answer(spec, train, test)
         assert list(answer.columns) == [name, "price"] and len(answer) == len(test)
+
+
+def make_task_with_train_id(folder, id_name, sample_columns, targets=("price",), n=60, n_test=20):
+    """id_name лежит в train (номера строк), в test его нет; sample_columns — шаблон ответа."""
+    rng = np.random.default_rng(2)
+    train = pd.DataFrame({id_name: np.arange(n), "a": rng.normal(size=n)})
+    for t in targets:
+        train[t] = train["a"] * 3 + rng.normal(scale=0.1, size=n)
+    train.to_csv(folder / "train.csv", index=False)
+    pd.DataFrame({"a": rng.normal(size=n_test)}).to_csv(folder / "test.csv", index=False)
+    sample = pd.DataFrame({c: (np.arange(n, n + n_test) if c == id_name else np.zeros(n_test)) for c in sample_columns})
+    sample.to_csv(folder / "sample_submission.csv", index=False)
+    (folder / "task.md").write_text("Предскажи price. Метрика RMSE.", encoding="utf-8")
+    return folder / "task.md"
+
+
+def test_id_in_train_and_template_but_not_in_test_stays_id_not_second_target(tmp_path):
+    """Ревью artem в #268: id, index, row есть в train и в шаблоне, нет в test — это id, а не таргет «extra»."""
+    for name in ("id", "index", "row"):
+        folder = tmp_path / name
+        folder.mkdir()
+        spec = parse_task(make_task_with_train_id(folder, name, (name, "price")), use_analyst=False)
+        assert spec.id_column == name and spec.target == "price"
+        assert spec.extra_targets == [] and spec.submission_columns == [name, "price"]
+        train, test = load_data(spec)
+        assert list(test[name]) == [str(60 + i) for i in range(len(test))]  # id — из образца
+
+
+def test_multitarget_template_without_id_still_uses_row_numbers(tmp_path):
+    """Шаблон из двух таргетов (без id): первая колонка — вещественный таргет из train, а не id."""
+    spec = parse_task(
+        make_task_with_train_id(tmp_path, "id", ("price", "price2"), targets=("price", "price2")), use_analyst=False
+    )
+    assert spec.id_column == ROW_ID_COLUMN
+    assert spec.submission_columns == ["price", "price2"]

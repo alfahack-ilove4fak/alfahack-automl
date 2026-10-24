@@ -82,7 +82,9 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
-        if id_column not in test_cols and (id_column in train_cols or len(submission_columns) == 1):
+        if id_column not in test_cols and (
+            len(submission_columns) == 1 or (id_column in train_cols and not _is_train_id(files["train"], id_column))
+        ):
             # Шаблон без id (первая колонка — таргет из train или единственная, строки в порядке test): ответ — по номеру строки, id в ответ не входит
             id_column = ROW_ID_COLUMN
             notes.append("В шаблоне ответа нет id: строки ответа идут в порядке test.csv")
@@ -284,6 +286,21 @@ def _looks_like_id(name: str) -> bool:
     """«txn_id», «clientID», «Номер заявки», «row-key» — по словам имени, а не по подстроке («paid» — не id)."""
     words = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(name)).lower()
     return bool(ID_TOKENS & set(re.split(r"[^0-9a-zа-яё]+", words)))
+
+
+def _is_train_id(train_path: Path, column: str) -> bool:
+    """Первая колонка шаблона лежит в train, но не в test: это id (значения возьмём из образца) или таргет?
+
+    id — если имя похоже на id или колонка — уникальные целые («index», «row», номер строки): имена надёжно не
+    угадать, а таргет в train почти никогда не состоит из одних уникальных целых (#268, ревью artem и dzigoku-ku).
+    """
+    if _looks_like_id(column):
+        return True
+    try:
+        values = pd.read_csv(train_path, usecols=[column])[column]
+    except (ValueError, OSError):
+        return False
+    return bool(pd.api.types.is_integer_dtype(values) and len(values) > 1 and values.is_unique)
 
 
 def _guess_id(test_cols, dictionary, test_path: Path | None = None) -> str:
