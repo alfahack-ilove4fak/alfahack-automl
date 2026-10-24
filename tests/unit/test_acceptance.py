@@ -224,7 +224,7 @@ def test_llm_time_scheme_needs_bigger_gain(monkeypatch):
     assert accept(new, best, greater_is_better=False, strict=True)[0]
 
 
-# --- #276, гипотеза штрафа −7: поправка на число сравнений (AGENT_ACCEPT_MULTI=1) ---
+# --- #276, гипотеза штрафа −7: поправка на число сравнений (AGENT_CONFIRM=1) ---
 
 
 @pytest.fixture
