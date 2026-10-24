@@ -34,16 +34,38 @@ uv run python research/external/report.py --update-baseline                # п�
 
 ## Честные ограничения
 
-- Разбиение случайное: **временные и групповые схемы здесь не проверяются**. Для них — BeyondArena
-  ([HF TabArena/BeyondArena](https://huggingface.co/datasets/TabArena/BeyondArena), 142 датасета с временным и групповым
-  разбиением): следующий шаг, пока не подключён.
+- Разбиение случайное: **временные и групповые схемы здесь не проверяются**. Для временных — набор `beyond` ниже,
+  групповые — следующий шаг.
 - Часть датасетов могла попасть в обучение Qwen: выигрыш от LLM на них завышен — LLM-замеры тут не показательны.
 - Баллы «к сильному» на таких данных малы (0–7): LightGBM по умолчанию уже силён. Важны **нули** и просадки, а не рост.
 - Падения, видимые только на длинном прогоне с живой LLM (сабмит 22.10), этот набор не ловит.
 
+## BeyondArena: выбор схемы валидации (`--set beyond`)
+
+[HF TabArena/BeyondArena](https://huggingface.co/datasets/TabArena/BeyondArena) ([arXiv 2606.30410](https://arxiv.org/abs/2606.30410))
+— 142 настоящих датасета; у временных кураторы указали колонку времени (`time_on`). Здесь test — **последний период**
+(≈ 25% строк по времени, одна дата не делится), и проверяем, что агент сам выбрал `time:<колонка>`, а не случайные фолды.
+
+```bash
+uv run python research/external/make_beyond_tasks.py --select                        # README на HF → manifest_beyond.json
+uv run --with pyarrow==19.0.1 python research/external/make_beyond_tasks.py --core   # 5 задач → runs/night/beyond/
+uv run python research/night/run_alien.py --set beyond --minutes 5
+uv run python research/external/report.py --set beyond                               # + колонка «Схема»
+```
+
+- Отбор: Temporal из таблицы README, ≤ 100 000 строк и ≤ 400 колонок (9 задач); core — 2 самых маленьких каждого типа
+  (5 задач). Ревизия HF зафиксирована в `make_beyond_tasks.REVISION`, данные кэшируются в `~/.cache/alfahack/beyond`.
+- `pyarrow` есть только в группе `full`, поэтому `uv run --with pyarrow==19.0.1` (та же версия, что в requirements.txt).
+- Метрика — как у кураторов (rmse / roc_auc / f1_macro), формат ответа и стиль текста — как в external. В половине задач
+  `task.md` прямо говорит «test — более поздний период», в другой половине агент должен найти время сам.
+- Колонка времени бывает датой (`PurchDate`), годом (`VCF0004`) или номером периода (`time_index`); имя не всегда
+  «про время» — это и проверяем.
+- Ограничения: кураторы чистили признаки от утечек «из будущего», но не гарантируют этого (см. `curation_comments` в
+  `dataset_metadata`); лицензии разные (Kaggle Competition Rules, CC BY, …) — данные только локально, в git не кладём.
+
 ## Источники
 
-[AMLB](https://github.com/openml/automlbenchmark) (MIT) · [TabArena](https://github.com/AutoGluon/tabarena) (Apache-2.0) ·
+[AMLB](https://github.com/openml/automlbenchmark) (MIT) · [BeyondArena](https://huggingface.co/datasets/TabArena/BeyondArena) · [TabArena](https://github.com/AutoGluon/tabarena) (Apache-2.0) ·
 [OpenML-CTR23](https://www.openml.org/s/353) · [OpenML-CC18](https://www.openml.org/s/99) ·
 [Grinsztajn et al.](https://arxiv.org/abs/2207.08815) · [MLE-bench](https://github.com/openai/mle-bench) ·
 [PMLB](https://github.com/EpistasisLab/pmlb) (MIT).

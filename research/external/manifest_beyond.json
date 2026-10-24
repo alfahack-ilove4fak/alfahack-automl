@@ -1,0 +1,120 @@
+{
+ "repo": "TabArena/BeyondArena",
+ "revision": "2ecfe882ccfb814fc27c4de10a64ceefd5d7655c",
+ "rule": "Temporal из README, ≤ 100000 строк и ≤ 400 колонок; core — 2 самых маленьких каждого типа",
+ "tasks": [
+  {
+   "name": "garments_worker_productivity",
+   "task_type": "regression",
+   "rows": 1197,
+   "features": 15,
+   "folder": "garments_worker_productivity/019db501-f4c4-7de2-b626-fcb769c7d82e",
+   "target": "actual_productivity",
+   "time_on": "date",
+   "curator_metric": "rmse",
+   "license": "CC BY 4.0",
+   "source": "https://doi.org/10.24432/C51S6D",
+   "core": true
+  },
+  {
+   "name": "coffee_rating_prediction",
+   "task_type": "regression",
+   "rows": 2369,
+   "features": 12,
+   "folder": "coffee_rating_prediction/019d7388-dffd-7bc4-ab3d-40bf6581786e",
+   "target": "rating",
+   "time_on": "review_date",
+   "curator_metric": "rmse",
+   "license": "None",
+   "source": "https://www.kaggle.com/datasets/hanifalirsyad/coffee-scrap-coffeereview",
+   "core": true
+  },
+  {
+   "name": "mercedes_benz_greener_manufacturing",
+   "task_type": "regression",
+   "rows": 4204,
+   "features": 371,
+   "folder": "mercedes_benz_greener_manufacturing/019d7384-bae5-71ab-ab7c-361f23e277dc",
+   "target": "y",
+   "time_on": "time_index",
+   "curator_metric": "rmse",
+   "license": "Kaggle Competition Rules",
+   "source": "https://www.kaggle.com/competitions/mercedes-benz-greener-manufacturing"
+  },
+  {
+   "name": "ghanas_indigenous_intel",
+   "task_type": "multiclass",
+   "rows": 10928,
+   "features": 10,
+   "folder": "ghanas_indigenous_intel/019dd375-4259-77c1-a177-5acc1f4d0134",
+   "target": "rainfall",
+   "time_on": "prediction_time",
+   "curator_metric": "f1_macro",
+   "license": "CC-BY-SA 4.0",
+   "source": "https://www.kaggle.com/datasets/phantom50/ghanas-indigenous-intel-dataset",
+   "core": true
+  },
+  {
+   "name": "sberbank_housing_market_forecasting",
+   "task_type": "regression",
+   "rows": 27195,
+   "features": 386,
+   "folder": "sberbank_housing_market_forecasting/019d9279-a91a-73ac-a221-72a6aab17df0",
+   "target": "price_doc",
+   "time_on": "timestamp",
+   "curator_metric": "rmse",
+   "license": "Kaggle Competition Rules",
+   "source": "https://www.kaggle.com/competitions/sberbank-russian-housing-market"
+  },
+  {
+   "name": "california_house_prices_2020",
+   "task_type": "regression",
+   "rows": 41528,
+   "features": 41,
+   "folder": "california_house_prices_2020/019d7388-c562-72b3-a533-5f588dc737c9",
+   "target": "Sold Price",
+   "time_on": "time_index",
+   "curator_metric": "rmse",
+   "license": "Custom Kaggle Competition Rules",
+   "source": "https://www.kaggle.com/competitions/california-house-prices/data?select=train.csv"
+  },
+  {
+   "name": "anes_voting_2026",
+   "task_type": "binary",
+   "rows": 48587,
+   "features": 318,
+   "folder": "anes_voting_2026/019db4ba-6124-7a56-a0b5-9df8811adc2f",
+   "target": "VCF0702",
+   "time_on": "VCF0004",
+   "curator_metric": "roc_auc",
+   "license": "Use for research or statistical purposes",
+   "source": "https://electionstudies.org/data-center/anes-time-series-cumulative-data-file/",
+   "core": true
+  },
+  {
+   "name": "kick",
+   "task_type": "binary",
+   "rows": 72983,
+   "features": 32,
+   "folder": "kick/019d744f-147d-721e-affc-94b58645c0ad",
+   "target": "IsBadBuy",
+   "time_on": "PurchDate",
+   "curator_metric": "roc_auc",
+   "license": "Public Domain",
+   "source": "https://www.kaggle.com/competitions/DontGetKicked/overview",
+   "core": true
+  },
+  {
+   "name": "hotel_booking_demand",
+   "task_type": "binary",
+   "rows": 81418,
+   "features": 31,
+   "folder": "hotel_booking_demand/019db498-7402-74ea-a334-69938355ae2c",
+   "target": "IsCanceled",
+   "time_on": "arrival_date",
+   "curator_metric": "roc_auc",
+   "license": "CC BY 4.0",
+   "source": "https://www.sciencedirect.com/science/article/pii/S2352340918315191#s0005"
+  }
+ ]
+}
