@@ -40,7 +40,7 @@ def validate_submission(path: Path, spec: TaskSpec, test: pd.DataFrame) -> Valid
         problems.append(f"Колонки {list(sub.columns)}, ожидались {spec.submission_columns}")
     if len(sub) != len(test):
         problems.append(f"Строк {len(sub)}, в test.csv {len(test)}")
-    if spec.id_column in sub.columns:
+    if spec.id_column in sub.columns and spec.id_column in test.columns:
         ids = sub[spec.id_column]
         if ids.duplicated().any():
             problems.append(f"Повторяющиеся {spec.id_column}: {int(ids.duplicated().sum())} шт.")
