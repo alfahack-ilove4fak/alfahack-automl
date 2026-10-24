@@ -56,7 +56,7 @@ def make_task(folder, test_cols=("id", "a", "b"), train_extra=(), n=40, n_test=1
 
 @pytest.fixture(autouse=True)
 def no_real_llm(monkeypatch):
-    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV):
+    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV, "AGENT_ANALYST_APPLY"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -136,6 +136,7 @@ def test_analyst_changes_metric_step0_is_rewritten(tmp_path, monkeypatch):
     assert spec.metric.name == "rmse"  # без LLM метрика по умолчанию для регрессии
     fake = FakeLLM({"target": "y", "id_column": "id", "metric": "mae"})
     monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("AGENT_ANALYST_APPLY", "1")  # по умолчанию аналитик метрику не меняет (#276)
 
     new_spec, new_train, new_test = refine_with_analyst(task_md, spec, train, test, keeper, log)
 

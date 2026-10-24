@@ -50,10 +50,14 @@ def apply_enabled() -> bool:
 
 
 def _only_fill_gaps(accepted: dict[str, str], heuristic: dict[str, str | None]) -> tuple[dict[str, str], list[str]]:
-    """Без AGENT_ANALYST_APPLY=1 оставить только поля, где разбор по данным ничего не нашёл; прочее — в заметки."""
-    kept = {k: v for k, v in accepted.items() if heuristic.get(k) is None}
+    """Без AGENT_ANALYST_APPLY=1 оставить только поля, где разбор по данным ничего не нашёл; прочее — в заметки.
+
+    Метрику не заполняем и при None: в parse_task она «угадана» только тогда, когда её нет в тексте, а на этот
+    случай есть метрика по типу задачи — иначе выключатель для метрики не срабатывал бы никогда (#276).
+    """
+    kept = {k: v for k, v in accepted.items() if k != "metric" and heuristic.get(k) is None}
     notes = [
-        f"предлагает {key}={value} вместо {heuristic[key]} — не применено ({APPLY_ENV}=1 включает)"
+        f"предлагает {key}={value} вместо {heuristic[key] or 'значения по умолчанию'} — не применено ({APPLY_ENV}=1 включает)"
         for key, value in accepted.items()
         if key not in kept
     ]

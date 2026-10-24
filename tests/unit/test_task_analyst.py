@@ -173,12 +173,20 @@ def test_reconcile_default_does_not_replace_guessed(monkeypatch, view, heuristic
     assert any("не применено" in n and APPLY_ENV in n for n in notes)
 
 
-@pytest.mark.parametrize("field, view", [("target", {"target": "y"}), ("metric", {"metric": "mae"})])
+@pytest.mark.parametrize("field, view", [("target", {"target": "y"}), ("id_column", {"id_column": "a"})])
 def test_reconcile_default_fills_field_when_data_parse_failed(monkeypatch, field, view):
     """#276: исключение — разбор по данным ничего не нашёл (None); тогда LLM заполняет поле и по умолчанию."""
     monkeypatch.delenv(APPLY_ENV, raising=False)
     accepted, _ = run(view, heur(**{field: None}), guessed={field})
     assert field in accepted
+
+
+def test_reconcile_default_does_not_fill_missing_metric(monkeypatch):
+    """#276: метрики нет в тексте (None — так «угадана» любая метрика в parse_task) — по умолчанию LLM её не ставит."""
+    monkeypatch.delenv(APPLY_ENV, raising=False)
+    accepted, notes = run({"metric": "mae"}, heur(metric=None), guessed={"metric"})
+    assert accepted == {}
+    assert any("значения по умолчанию" in n and APPLY_ENV in n for n in notes)
 
 
 # ---------- reconcile: id ----------
@@ -413,12 +421,20 @@ def test_parse_task_llm_id_not_in_test_is_ignored(tmp_path):
     assert spec.submission_columns == ["id", "y"]
 
 
-def test_parse_task_llm_fills_missing_metric(tmp_path):
+def test_parse_task_llm_fills_missing_metric(tmp_path, apply_on):
     """В тексте метрики нет — её называет LLM."""
     task_md = write_task(tmp_path, text="Предскажи значение y по признакам.")
     spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": "mae"}))
     assert spec.metric.name == "mae"
     assert not spec.metric.greater_is_better
+
+
+def test_parse_task_default_keeps_default_metric(tmp_path):
+    """#276: метрики в тексте нет — по умолчанию метрика по типу задачи, мнение LLM — только в notes."""
+    task_md = write_task(tmp_path, text="Предскажи значение y по признакам.")
+    spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": "mae"}))
+    assert spec.metric.name == "rmse"
+    assert any("metric=mae" in n and APPLY_ENV in n for n in spec.notes)
 
 
 def test_parse_task_text_metric_beats_llm(tmp_path):
@@ -497,7 +513,7 @@ def test_parse_task_analyst_notes_go_to_spec(tmp_path):
     assert any("округлить" in n for n in analyst_notes)
 
 
-def test_parse_task_unknown_metric_uses_closest(tmp_path):
+def test_parse_task_unknown_metric_uses_closest(tmp_path, apply_on):
     """#186: «Метрика — Quantum loss» раньше молча становилась rmse; теперь — ближайшая из реестра от LLM."""
     task_md = write_task(tmp_path, text="Предскажи значение y. Метрика — Quantum loss.")
     llm = FakeLLM({"target": "y", "metric": "Quantum loss", "closest_metric": "mae"})
