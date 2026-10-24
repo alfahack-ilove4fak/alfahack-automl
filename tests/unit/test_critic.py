@@ -7,6 +7,7 @@ import pytest
 from agent import critic, loop
 from agent.critic import MAX_SLOWDOWN, TIME_SAFETY, estimated_seconds, lightgbm_slowdown, review, slowdown
 from interfaces.schemas import (
+    DataProfile,
     ExperimentResult,
     ExperimentStatus,
     Hypothesis,
@@ -162,3 +163,76 @@ def test_num_leaves_only_for_lightgbm(multiclass):
     lossguide = {"model": "catboost", "model_params": {"num_leaves": 255, "grow_policy": "Lossguide"}}
     assert review(hyp(lossguide), multiclass) is None
     assert review(hyp({"model": "xgboost", "model_params": {"max_depth": 8}}), multiclass) is None
+
+
+# ---------- цель обучения не подходит таргету (#276: на public regression 2 итерации впустую) ----------
+
+
+def profile_with_min(low):
+    return DataProfile(
+        n_train=100,
+        n_test=10,
+        numeric_features=["a"],
+        categorical_features=[],
+        target_summary={"min": low, "max": 10.0},
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"model": "lightgbm", "model_params": {"objective": "poisson"}},
+        {"model": "lightgbm", "model_params": {"objective": "tweedie"}},
+        {"model": "xgboost", "model_params": {"objective": "count:poisson"}},
+        {"model": "xgboost", "model_params": {"objective": "reg:tweedie"}},
+        {"model": "catboost", "model_params": {"loss_function": "Tweedie:variance_power=1.5"}},
+        {"model": "hist_gb", "model_params": {"loss": "poisson"}},
+        {"ensemble": [{"model": "lightgbm", "model_params": {"objective": "poisson"}}, "xgboost"]},
+    ],
+)
+def test_non_negative_objective_rejected_on_negative_target(regression, params):
+    reason = review(hyp(params), regression, profile_with_min(-3.5))
+    assert reason is not None and "≥ 0" in reason and "-3.5" in reason
+
+
+def test_gamma_rejected_on_zero_target(regression):
+    assert "> 0" in review(lgbm(objective="gamma"), regression, profile_with_min(0.0))
+    assert review(lgbm(objective="gamma"), regression, profile_with_min(0.1)) is None
+
+
+@pytest.mark.parametrize("low", [0.0, 2.0])
+def test_poisson_allowed_on_non_negative_target(regression, low):
+    assert review(lgbm(objective="poisson"), regression, profile_with_min(low)) is None
+
+
+def test_objective_check_skipped_with_log_target_or_without_profile(regression):
+    """log_target: модель учится на log1p(max(y, 0)) ≥ 0; без профиля (старые вызовы) — проверки нет."""
+    on_log = hyp({"model": "lightgbm", "log_target": True, "model_params": {"objective": "poisson"}})
+    assert review(on_log, regression, profile_with_min(-1.0)) is None
+    assert review(lgbm(objective="poisson"), regression) is None
+    assert review(lgbm(objective="regression"), regression, profile_with_min(-1.0)) is None  # L2 — можно
+
+
+def test_loop_skips_poisson_on_negative_target_without_running(regression, monkeypatch):
+    ran = []
+    monkeypatch.setenv("AGENT_FALLBACK", "0")
+    monkeypatch.setenv("AGENT_FEATURE_CODE", "0")
+
+    def fake_experiment(spec, profile, h, train, budget):
+        ran.append(h.id)
+        return ExperimentResult(hypothesis_id=h.id, status=ExperimentStatus.OK, metric_name="rmse", mean_score=1.0)
+
+    batches = [[lgbm("pois", objective="poisson"), lgbm("deeper", num_leaves=63)]]
+    monkeypatch.setattr(loop, "run_experiment", fake_experiment)
+    monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: batches.pop(0) if batches else [])
+    base = (
+        hyp({"model": "lightgbm"}, "baseline"),
+        ExperimentResult(hypothesis_id="baseline", status=ExperimentStatus.OK, metric_name="rmse", mean_score=1.0),
+    )
+    history = [base]
+    loop.run_autoresearch(
+        regression, profile_with_min(-2.0), None, RunBudget(), history, base, lambda h, r: None, llm=None
+    )
+    assert ran == ["deeper"]
+    skipped = {h.id: r for h, r in history if r.status == ExperimentStatus.SKIPPED}
+    assert "pois" in skipped and "≥ 0" in skipped["pois"].error
