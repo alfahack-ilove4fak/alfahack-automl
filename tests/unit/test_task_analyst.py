@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from agent import task_analyst
-from agent.task_analyst import ANALYST_ENV, PREFIX, ask_llm, build_messages, metric_key, reconcile
+from agent.task_analyst import ANALYST_ENV, APPLY_ENV, PREFIX, ask_llm, build_messages, metric_key, reconcile
 from agent.task_parser import parse_task
 
 TRAIN_COLS = ["id", "a", "b", "y", "y2"]
@@ -45,12 +45,30 @@ def run(view, heuristic=None, guessed=(), train=TRAIN_COLS, test=TEST_COLS):
     return reconcile(view, heuristic or heur(), set(guessed), train, test)
 
 
+@pytest.fixture
+def apply_on(monkeypatch):
+    """Аналитик заменяет угаданные поля (AGENT_ANALYST_APPLY=1, оно же поведение по умолчанию)."""
+    monkeypatch.setenv(APPLY_ENV, "1")
+
+
+@pytest.fixture
+def apply_off(monkeypatch):
+    """Выключатель #276: аналитик только заполняет пустое, замены угаданного — в заметки."""
+    monkeypatch.setenv(APPLY_ENV, "0")
+
+
 # ---------- metric_key ----------
 
 
 @pytest.mark.parametrize(
     "value, expected",
-    [("mae", "mae"), ("  MAE ", "mae"), ("Root Mean Squared Error", "rmse")],
+    [
+        ("mae", "mae"),
+        ("  MAE ", "mae"),
+        ("Root Mean Squared Error", "rmse"),
+        ("fbeta@2", "fbeta@2"),  # параметрическая метрика реестра: `in` её не видит, __missing__ собирает
+        ("pinball@0.9", "pinball@0.9"),
+    ],
 )
 def test_metric_key_known_names(value, expected):
     """Название метрики от LLM приводится к ключу реестра (регистр и пробелы не важны)."""
@@ -112,7 +130,7 @@ def test_reconcile_agrees_with_heuristic():
 # ---------- reconcile: target ----------
 
 
-def test_reconcile_guessed_target_replaced_by_llm():
+def test_reconcile_guessed_target_replaced_by_llm(apply_on):
     """Target был лишь угадан, LLM называет колонку «только в train» — принимаем."""
     accepted, notes = run({"target": "y2"}, heur(target="y"), guessed={"target"})
     assert accepted == {"target": "y2"}
@@ -150,10 +168,68 @@ def test_reconcile_multiple_targets_note():
     assert all(n.startswith(f"{PREFIX}: ") for n in notes)
 
 
+@pytest.mark.parametrize(
+    "view, heuristic, guessed",
+    [
+        ({"target": "y2"}, heur(target="y"), {"target"}),
+        ({"id_column": "a"}, heur(id_column="id"), {"id_column"}),
+        ({"metric": "MAE"}, heur(metric="rmse"), {"metric"}),
+        ({"metric": "quantum@10", "closest_metric": "mae"}, heur(metric="rmse"), {"metric"}),
+    ],
+)
+def test_reconcile_apply_off_does_not_replace_guessed(apply_off, view, heuristic, guessed):
+    """Выключатель #276 (AGENT_ANALYST_APPLY=0): угаданные target/id/метрику не заменяем — только заметка в notes."""
+    accepted, notes = run(view, heuristic, guessed=guessed)
+    assert accepted == {}
+    assert any("не применено" in n and APPLY_ENV in n for n in notes)
+
+
+@pytest.mark.parametrize(
+    "view, heuristic, guessed, expected",
+    [
+        ({"target": "y2"}, heur(target="y"), {"target"}, {"target": "y2"}),
+        ({"metric": "MAE"}, heur(metric=None), {"metric"}, {"metric": "mae"}),
+    ],
+)
+def test_reconcile_default_replaces_guessed(monkeypatch, view, heuristic, guessed, expected):
+    """Решение капитана (#276): по умолчанию AGENT_ANALYST_APPLY=1 — аналитик заменяет угаданное, как до #276."""
+    monkeypatch.delenv(APPLY_ENV, raising=False)
+    assert task_analyst.apply_enabled()
+    accepted, _ = run(view, heuristic, guessed=guessed)
+    assert accepted == expected
+
+
+@pytest.mark.parametrize("field, view", [("target", {"target": "y"}), ("id_column", {"id_column": "a"})])
+def test_reconcile_apply_off_fills_field_when_data_parse_failed(apply_off, field, view):
+    """#276: и с выключателем разбор по данным ничего не нашёл (None) — LLM заполняет поле."""
+    accepted, _ = run(view, heur(**{field: None}), guessed={field})
+    assert field in accepted
+
+
+@pytest.mark.parametrize(
+    "llm_metric, expected",
+    [("NDCG@10", "ndcg"), ("Huber loss", "huber"), ("F2 score", "fbeta@2"), ("fbeta@2", "fbeta@2"), ("MAPE", "mape")],
+)
+@pytest.mark.parametrize("apply", ["0", "1"])
+def test_reconcile_fills_missing_metric(monkeypatch, apply, llm_metric, expected):
+    """Словарь не нашёл метрику в тексте (None) — её ставит аналитик, если она в реестре; и с выключателем тоже."""
+    monkeypatch.setenv(APPLY_ENV, apply)
+    accepted, notes = run({"metric": llm_metric}, heur(metric=None), guessed={"metric"})
+    assert accepted == {"metric": expected}
+    assert notes == [f"{PREFIX}: метрика от аналитика: {expected}"]
+
+
+def test_reconcile_missing_metric_not_in_registry_not_filled():
+    """Метрики нет ни в тексте, ни в реестре (и ближайшей LLM не назвала) — остаётся метрика по типу задачи."""
+    accepted, notes = run({"metric": "quantum_score@10"}, heur(metric=None), guessed={"metric"})
+    assert accepted == {}
+    assert not any("метрика от аналитика" in n for n in notes)
+
+
 # ---------- reconcile: id ----------
 
 
-def test_reconcile_guessed_id_replaced_if_in_test():
+def test_reconcile_guessed_id_replaced_if_in_test(apply_on):
     """id угадан, LLM называет колонку из test — принимаем."""
     accepted, notes = run({"id_column": "a"}, heur(id_column="id"), guessed={"id_column"})
     assert accepted == {"id_column": "a"}
@@ -177,11 +253,11 @@ def test_reconcile_confirmed_id_not_replaced():
 # ---------- reconcile: метрика ----------
 
 
-def test_reconcile_guessed_metric_accepted():
+def test_reconcile_guessed_metric_accepted(apply_on):
     """Метрику в тексте не нашли (угадана), LLM даёт валидную из реестра — принимаем."""
     accepted, notes = run({"metric": "MAE"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {"metric": "mae"}
-    assert notes == []
+    assert notes == [f"{PREFIX}: метрика от аналитика: mae"]
 
 
 def test_reconcile_found_metric_wins_over_llm():
@@ -199,7 +275,7 @@ def test_reconcile_metric_not_in_registry():
     assert "нет в реестре" in notes[0] and "quantum_score@10" in notes[0]
 
 
-def test_reconcile_unknown_metric_takes_closest_from_registry():
+def test_reconcile_unknown_metric_takes_closest_from_registry(apply_on):
     """#186: метрики нет в реестре (Quantum loss), поиск по тексту ничего не нашёл — оптимизируем ближайшую из реестра."""
     accepted, notes = run({"metric": "Quantum loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {"metric": "mae"}
@@ -338,7 +414,7 @@ def write_task(
 @pytest.fixture(autouse=True)
 def no_real_llm(monkeypatch):
     """Ключа нет и аналитик включён по умолчанию: parse_task без llm создаёт недоступный клиент."""
-    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV):
+    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV, APPLY_ENV):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -382,12 +458,27 @@ def test_parse_task_llm_id_not_in_test_is_ignored(tmp_path):
     assert spec.submission_columns == ["id", "y"]
 
 
-def test_parse_task_llm_fills_missing_metric(tmp_path):
+def test_parse_task_llm_fills_missing_metric(tmp_path, apply_on):
     """В тексте метрики нет — её называет LLM."""
     task_md = write_task(tmp_path, text="Предскажи значение y по признакам.")
     spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": "mae"}))
     assert spec.metric.name == "mae"
     assert not spec.metric.greater_is_better
+
+
+@pytest.mark.parametrize(
+    "text, llm_metric, expected",
+    [
+        ("Предскажи y. Ошибку считают как модуль разницы прогноза и факта, делённый на факт.", "MAPE", "mape"),
+        ("Предскажи y. Ошибка штрафуется квадратично, пока она мала, и линейно, когда велика.", "Huber loss", "huber"),
+    ],
+)
+def test_parse_task_default_metric_in_words_from_analyst(tmp_path, text, llm_metric, expected):
+    """#276: метрика описана словами, словарь её не нашёл — по умолчанию её ставит аналитик, а не метрика по типу."""
+    task_md = write_task(tmp_path, text=text)
+    spec = parse_task(task_md, llm=FakeLLM({"target": "y", "metric": llm_metric}))
+    assert spec.metric.name == expected
+    assert any(f"метрика от аналитика: {expected}" in n for n in spec.notes)
 
 
 def test_parse_task_text_metric_beats_llm(tmp_path):
@@ -466,7 +557,7 @@ def test_parse_task_analyst_notes_go_to_spec(tmp_path):
     assert any("округлить" in n for n in analyst_notes)
 
 
-def test_parse_task_unknown_metric_uses_closest(tmp_path):
+def test_parse_task_unknown_metric_uses_closest(tmp_path, apply_on):
     """#186: «Метрика — Quantum loss» раньше молча становилась rmse; теперь — ближайшая из реестра от LLM."""
     task_md = write_task(tmp_path, text="Предскажи значение y. Метрика — Quantum loss.")
     llm = FakeLLM({"target": "y", "metric": "Quantum loss", "closest_metric": "mae"})
