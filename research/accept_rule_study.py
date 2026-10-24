@@ -11,7 +11,9 @@
   current   — как agent.acceptance.accept: скорректированная t-статистика по фолдам ≥ 2;
   last      — для схемы по времени: лучше на последнем (самом позднем) периоде и в среднем по фолдам;
               для остальных схем — как current;
-  last_or_t — current ИЛИ last (то есть last добавляет принятия только во time-схеме).
+  last_or_t — current ИЛИ last (то есть last добавляет принятия только во time-схеме);
+  deployed  — ровно то, что агент делает сейчас: agent.acceptance.accept (порог t, MIN_REL_GAIN и time-правило
+              с TIME_MIN_REL_GAIN = 1%, #273) — у last такого порога нет.
 Код агента не меняется: это исследование для владельцев agent/ и ml/.
 """
 
@@ -26,8 +28,9 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from agent.acceptance import T_MIN, corrected_t  # noqa: E402
+from agent.acceptance import T_MIN, accept, corrected_t  # noqa: E402
 from agent.hypotheses import load_playbook  # noqa: E402
+from interfaces.schemas import ExperimentResult, ExperimentStatus  # noqa: E402
 
 
 def _gib(task_rows: pd.DataFrame) -> bool:
@@ -60,14 +63,34 @@ def rule_last_or_t(g: list[float], time_scheme: bool) -> bool:
     return rule_current(g, time_scheme) or rule_last(g, time_scheme)
 
 
-RULES = {"current": rule_current, "last": rule_last, "last_or_t": rule_last_or_t}
+def rule_deployed(new: list[float], best: list[float], gib: bool, validation: str) -> bool:
+    """Действующее правило агента: сравнение двух экспериментов целиком, а не только выигрышей по фолдам."""
+
+    def result(folds: list[float]) -> ExperimentResult:
+        return ExperimentResult(
+            hypothesis_id="study", status=ExperimentStatus.OK, metric_name="study", fold_scores=folds,
+            mean_score=sum(folds) / len(folds), validation=validation,
+        )  # fmt: skip
+
+    return accept(result(new), result(best), gib)[0]
+
+
+RULES = {"current": rule_current, "last": rule_last, "last_or_t": rule_last_or_t, "deployed": rule_deployed}
+
+
+def decide(rule, new: list[float], best: list[float], gib: bool, validation: str) -> bool:
+    """Принять ли гипотезу: deployed смотрит на эксперименты целиком, остальные правила — на выигрыши по фолдам."""
+    if rule is rule_deployed:
+        return rule_deployed(new, best, gib, validation)
+    g = gains(new, best, gib)
+    return g is not None and rule(g, validation.startswith("time:"))
 
 
 def simulate(task_rows: pd.DataFrame, order: list[str], rule) -> dict:
     """Цикл агента на одной задаче: итоговая гипотеза и её честный выигрыш против бейзлайна (в %)."""
     base = task_rows[task_rows.id == "baseline"].iloc[0]
     gib = _gib(task_rows)
-    time_scheme = str(base.get("validation", "")).startswith("time:")
+    validation = str(base.get("validation", ""))
     best_id, best_folds, best_honest = "baseline", json.loads(base.fold_scores), base.honest
     accepted, wrong = 0, 0
     by_id = task_rows.set_index("id")
@@ -77,8 +100,7 @@ def simulate(task_rows: pd.DataFrame, order: list[str], rule) -> dict:
         r = by_id.loc[hyp]
         if pd.isna(r.honest) or not isinstance(r.fold_scores, str):
             continue
-        g = gains(json.loads(r.fold_scores), best_folds, gib)
-        if g is None or not rule(g, time_scheme):
+        if not decide(rule, json.loads(r.fold_scores), best_folds, gib, validation):
             continue
         accepted += 1
         sign = 1 if gib else -1
