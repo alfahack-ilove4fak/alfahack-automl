@@ -1,0 +1,372 @@
+{
+ "seed": "alfahack-external-1",
+ "tasks": [
+  {
+   "data_id": 44993,
+   "name": "health_insurance",
+   "task_type": "regression",
+   "rows": 22272,
+   "features": 12,
+   "classes": 0,
+   "suites": [
+    "OpenML-CTR23"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 44132,
+   "name": "cpu_act",
+   "task_type": "regression",
+   "rows": 8192,
+   "features": 22,
+   "classes": 0,
+   "suites": [
+    "Grinsztajn-336"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 44138,
+   "name": "houses",
+   "task_type": "regression",
+   "rows": 20640,
+   "features": 9,
+   "classes": 0,
+   "suites": [
+    "Grinsztajn-336"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 287,
+   "name": "wine_quality",
+   "task_type": "regression",
+   "rows": 6497,
+   "features": 12,
+   "classes": 0,
+   "suites": [
+    "AMLB-regression"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 44958,
+   "name": "auction_verification",
+   "task_type": "regression",
+   "rows": 2043,
+   "features": 8,
+   "classes": 0,
+   "suites": [
+    "OpenML-CTR23"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 42688,
+   "name": "Brazilian_houses",
+   "task_type": "regression",
+   "rows": 10692,
+   "features": 13,
+   "classes": 0,
+   "suites": [
+    "AMLB-regression"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 42225,
+   "name": "diamonds",
+   "task_type": "regression",
+   "rows": 53940,
+   "features": 10,
+   "classes": 0,
+   "suites": [
+    "AMLB-regression"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 44055,
+   "name": "analcatdata_supreme",
+   "task_type": "regression",
+   "rows": 4052,
+   "features": 8,
+   "classes": 0,
+   "suites": [
+    "Grinsztajn-335"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 44957,
+   "name": "airfoil_self_noise",
+   "task_type": "regression",
+   "rows": 1503,
+   "features": 6,
+   "classes": 0,
+   "suites": [
+    "OpenML-CTR23"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 45043,
+   "name": "seattlecrime6",
+   "task_type": "regression",
+   "rows": 52031,
+   "features": 5,
+   "classes": 0,
+   "suites": [
+    "Grinsztajn-335"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 45020,
+   "name": "default-of-credit-card-clients",
+   "task_type": "binary",
+   "rows": 13272,
+   "features": 21,
+   "classes": 2,
+   "suites": [
+    "Grinsztajn-337"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 1590,
+   "name": "adult",
+   "task_type": "binary",
+   "rows": 48842,
+   "features": 15,
+   "classes": 2,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 1461,
+   "name": "bank-marketing",
+   "task_type": "binary",
+   "rows": 45211,
+   "features": 17,
+   "classes": 2,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 44089,
+   "name": "credit",
+   "task_type": "binary",
+   "rows": 16714,
+   "features": 11,
+   "classes": 2,
+   "suites": [
+    "Grinsztajn-337"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 40701,
+   "name": "churn",
+   "task_type": "binary",
+   "rows": 5000,
+   "features": 21,
+   "classes": 2,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 42733,
+   "name": "Click_prediction_small",
+   "task_type": "binary",
+   "rows": 39948,
+   "features": 12,
+   "classes": 2,
+   "suites": [
+    "AMLB-classification"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 1487,
+   "name": "ozone-level-8hr",
+   "task_type": "binary",
+   "rows": 2534,
+   "features": 73,
+   "classes": 2,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 1050,
+   "name": "pc3",
+   "task_type": "binary",
+   "rows": 1563,
+   "features": 38,
+   "classes": 2,
+   "suites": [
+    "OpenML-CC18"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 45021,
+   "name": "jannis",
+   "task_type": "binary",
+   "rows": 57580,
+   "features": 55,
+   "classes": 2,
+   "suites": [
+    "Grinsztajn-337"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 40900,
+   "name": "Satellite",
+   "task_type": "binary",
+   "rows": 5100,
+   "features": 37,
+   "classes": 2,
+   "suites": [
+    "AMLB-classification"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 6,
+   "name": "letter",
+   "task_type": "multiclass",
+   "rows": 20000,
+   "features": 17,
+   "classes": 26,
+   "suites": [
+    "OpenML-CC18"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 22,
+   "name": "mfeat-zernike",
+   "task_type": "multiclass",
+   "rows": 2000,
+   "features": 48,
+   "classes": 10,
+   "suites": [
+    "OpenML-CC18"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 42734,
+   "name": "okcupid-stem",
+   "task_type": "multiclass",
+   "rows": 50789,
+   "features": 20,
+   "classes": 3,
+   "suites": [
+    "AMLB-classification"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 40670,
+   "name": "dna",
+   "task_type": "multiclass",
+   "rows": 3186,
+   "features": 181,
+   "classes": 3,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 40982,
+   "name": "steel-plates-fault",
+   "task_type": "multiclass",
+   "rows": 1941,
+   "features": 28,
+   "classes": 7,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": true
+  },
+  {
+   "data_id": 182,
+   "name": "satimage",
+   "task_type": "multiclass",
+   "rows": 6430,
+   "features": 37,
+   "classes": 6,
+   "suites": [
+    "OpenML-CC18"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 14,
+   "name": "mfeat-fourier",
+   "task_type": "multiclass",
+   "rows": 2000,
+   "features": 77,
+   "classes": 10,
+   "suites": [
+    "OpenML-CC18"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 41027,
+   "name": "jungle_chess_2pcs_raw_endgame_complete",
+   "task_type": "multiclass",
+   "rows": 44819,
+   "features": 7,
+   "classes": 3,
+   "suites": [
+    "AMLB-classification",
+    "OpenML-CC18"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 41166,
+   "name": "volkert",
+   "task_type": "multiclass",
+   "rows": 58310,
+   "features": 181,
+   "classes": 10,
+   "suites": [
+    "AMLB-classification"
+   ],
+   "core": false
+  },
+  {
+   "data_id": 16,
+   "name": "mfeat-karhunen",
+   "task_type": "multiclass",
+   "rows": 2000,
+   "features": 65,
+   "classes": 10,
+   "suites": [
+    "OpenML-CC18"
+   ],
+   "core": false
+  }
+ ]
+}

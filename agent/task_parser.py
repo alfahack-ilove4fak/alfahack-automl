@@ -17,7 +17,7 @@ import pandas as pd
 
 from agent.csv_dialect import read_text_any, standard_csv
 from evaluation.metrics import METRICS, find_metric_in_text
-from interfaces.schemas import MetricSpec, TaskSpec, TaskType
+from interfaces.schemas import ROW_ID_COLUMN, MetricSpec, TaskSpec, TaskType
 from runtime.log import get_logger
 
 log = get_logger("task_parser")
@@ -82,6 +82,12 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
     if "sample_submission" in files:
         submission_columns = list(pd.read_csv(files["sample_submission"], nrows=0).columns)
         id_column, target = submission_columns[0], submission_columns[-1]
+        if id_column not in test_cols and (
+            len(submission_columns) == 1 or (id_column in train_cols and not _is_train_id(files["train"], id_column))
+        ):
+            # Шаблон без id (первая колонка — таргет из train или единственная, строки в порядке test): ответ — по номеру строки, id в ответ не входит
+            id_column = ROW_ID_COLUMN
+            notes.append("В шаблоне ответа нет id: строки ответа идут в порядке test.csv")
         if target not in train_cols:
             # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
             target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
@@ -109,7 +115,8 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
 
     # Несколько таргетов (#174): другие колонки ответа, которые есть только в train, — тоже таргеты.
     # Основной (по нему CV и цикл) — тот, к которому подходит метрика из текста
-    targets = [target] + [c for c in submission_columns[1:] if c != target and c in train_cols and c not in test_cols]
+    answer_columns = [c for c in submission_columns if c != id_column]
+    targets = [target] + [c for c in answer_columns if c != target and c in train_cols and c not in test_cols]
     if len(targets) > 1:
         target = _primary_target(files["train"], targets, metric_name)
         notes.append(f"Несколько таргетов: {targets} — модель на каждый, цикл — по {target}")
@@ -126,7 +133,6 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
     class_labels = None
     if task_type in (TaskType.BINARY, TaskType.MULTICLASS):
         class_labels = sorted(map(str, y.dropna().unique()))
-        answer_columns = submission_columns[1:]
         if len(answer_columns) > 1 and not extra_targets and set(answer_columns) != set(class_labels):
             notes.append(f"Колонки ответа {answer_columns} не совпадают с классами train {class_labels}")
 
@@ -282,6 +288,21 @@ def _looks_like_id(name: str) -> bool:
     return bool(ID_TOKENS & set(re.split(r"[^0-9a-zа-яё]+", words)))
 
 
+def _is_train_id(train_path: Path, column: str) -> bool:
+    """Первая колонка шаблона лежит в train, но не в test: это id (значения возьмём из образца) или таргет?
+
+    id — если имя похоже на id или колонка — уникальные целые («index», «row», номер строки): имена надёжно не
+    угадать, а таргет в train почти никогда не состоит из одних уникальных целых (#268, ревью artem и dzigoku-ku).
+    """
+    if _looks_like_id(column):
+        return True
+    try:
+        values = pd.read_csv(train_path, usecols=[column])[column]
+    except (ValueError, OSError):
+        return False
+    return bool(pd.api.types.is_integer_dtype(values) and len(values) > 1 and values.is_unique)
+
+
 def _guess_id(test_cols, dictionary, test_path: Path | None = None) -> str:
     """id без шаблона ответа: роль в словаре → «id» → колонка с id-именем и уникальными значениями в test.
 
@@ -356,6 +377,6 @@ def spec_for_target(spec: TaskSpec, target: str, y: pd.Series) -> TaskSpec:
             "extra_targets": [],
             "task_type": task_type,
             "class_labels": labels,
-            "submission_columns": [spec.id_column, target],
+            "submission_columns": [c for c in (spec.id_column, target) if c != ROW_ID_COLUMN],
         }
     )
