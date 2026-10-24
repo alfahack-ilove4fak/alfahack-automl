@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from agent import task_analyst
-from agent.task_analyst import ANALYST_ENV, PREFIX, ask_llm, build_messages, metric_key, reconcile
+from agent.task_analyst import ANALYST_ENV, APPLY_ENV, PREFIX, ask_llm, build_messages, metric_key, reconcile
 from agent.task_parser import parse_task
 
 TRAIN_COLS = ["id", "a", "b", "y", "y2"]
@@ -43,6 +43,12 @@ def heur(target="y", id_column="id", metric="rmse"):
 
 def run(view, heuristic=None, guessed=(), train=TRAIN_COLS, test=TEST_COLS):
     return reconcile(view, heuristic or heur(), set(guessed), train, test)
+
+
+@pytest.fixture
+def apply_on(monkeypatch):
+    """Старое поведение: аналитик заменяет угаданные поля (AGENT_ANALYST_APPLY=1)."""
+    monkeypatch.setenv(APPLY_ENV, "1")
 
 
 # ---------- metric_key ----------
@@ -112,7 +118,7 @@ def test_reconcile_agrees_with_heuristic():
 # ---------- reconcile: target ----------
 
 
-def test_reconcile_guessed_target_replaced_by_llm():
+def test_reconcile_guessed_target_replaced_by_llm(apply_on):
     """Target был лишь угадан, LLM называет колонку «только в train» — принимаем."""
     accepted, notes = run({"target": "y2"}, heur(target="y"), guessed={"target"})
     assert accepted == {"target": "y2"}
@@ -150,10 +156,35 @@ def test_reconcile_multiple_targets_note():
     assert all(n.startswith(f"{PREFIX}: ") for n in notes)
 
 
+@pytest.mark.parametrize(
+    "view, heuristic, guessed",
+    [
+        ({"target": "y2"}, heur(target="y"), {"target"}),
+        ({"id_column": "a"}, heur(id_column="id"), {"id_column"}),
+        ({"metric": "MAE"}, heur(metric="rmse"), {"metric"}),
+        ({"metric": "quantum@10", "closest_metric": "mae"}, heur(metric="rmse"), {"metric"}),
+    ],
+)
+def test_reconcile_default_does_not_replace_guessed(monkeypatch, view, heuristic, guessed):
+    """#276: по умолчанию аналитик не заменяет угаданные target/id/метрику — только заметка в notes."""
+    monkeypatch.delenv(APPLY_ENV, raising=False)
+    accepted, notes = run(view, heuristic, guessed=guessed)
+    assert accepted == {}
+    assert any("не применено" in n and APPLY_ENV in n for n in notes)
+
+
+@pytest.mark.parametrize("field, view", [("target", {"target": "y"}), ("metric", {"metric": "mae"})])
+def test_reconcile_default_fills_field_when_data_parse_failed(monkeypatch, field, view):
+    """#276: исключение — разбор по данным ничего не нашёл (None); тогда LLM заполняет поле и по умолчанию."""
+    monkeypatch.delenv(APPLY_ENV, raising=False)
+    accepted, _ = run(view, heur(**{field: None}), guessed={field})
+    assert field in accepted
+
+
 # ---------- reconcile: id ----------
 
 
-def test_reconcile_guessed_id_replaced_if_in_test():
+def test_reconcile_guessed_id_replaced_if_in_test(apply_on):
     """id угадан, LLM называет колонку из test — принимаем."""
     accepted, notes = run({"id_column": "a"}, heur(id_column="id"), guessed={"id_column"})
     assert accepted == {"id_column": "a"}
@@ -177,7 +208,7 @@ def test_reconcile_confirmed_id_not_replaced():
 # ---------- reconcile: метрика ----------
 
 
-def test_reconcile_guessed_metric_accepted():
+def test_reconcile_guessed_metric_accepted(apply_on):
     """Метрику в тексте не нашли (угадана), LLM даёт валидную из реестра — принимаем."""
     accepted, notes = run({"metric": "MAE"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {"metric": "mae"}
@@ -199,7 +230,7 @@ def test_reconcile_metric_not_in_registry():
     assert "нет в реестре" in notes[0] and "quantum_score@10" in notes[0]
 
 
-def test_reconcile_unknown_metric_takes_closest_from_registry():
+def test_reconcile_unknown_metric_takes_closest_from_registry(apply_on):
     """#186: метрики нет в реестре (Quantum loss), поиск по тексту ничего не нашёл — оптимизируем ближайшую из реестра."""
     accepted, notes = run({"metric": "Quantum loss", "closest_metric": "mae"}, heur(metric="rmse"), guessed={"metric"})
     assert accepted == {"metric": "mae"}
@@ -338,7 +369,7 @@ def write_task(
 @pytest.fixture(autouse=True)
 def no_real_llm(monkeypatch):
     """Ключа нет и аналитик включён по умолчанию: parse_task без llm создаёт недоступный клиент."""
-    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV):
+    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV, APPLY_ENV):
         monkeypatch.delenv(var, raising=False)
 
 
