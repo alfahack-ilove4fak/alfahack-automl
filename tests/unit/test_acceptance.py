@@ -4,7 +4,19 @@ import math
 
 import pytest
 
-from agent.acceptance import MIN_REL_GAIN, T_MIN, TIME_MIN_REL_GAIN, accept, corrected_t, fold_gains
+from agent.acceptance import (
+    LLM_GAIN_ENV,
+    LLM_T_ENV,
+    LLM_T_MIN,
+    LLM_TIME_MIN_REL_GAIN,
+    MIN_REL_GAIN,
+    T_MIN,
+    TIME_MIN_REL_GAIN,
+    accept,
+    corrected_t,
+    fold_gains,
+    thresholds,
+)
 from interfaces.schemas import ExperimentResult, ExperimentStatus
 
 
@@ -170,3 +182,51 @@ def test_time_scheme_gain_above_time_threshold_accepted():
     assert corrected_t(fold_gains(new, best, greater_is_better=False)) < T_MIN
     ok, reason = accept(new, best, greater_is_better=False)
     assert ok and "последнем периоде" in reason
+
+
+# ---------- гипотезы LLM: свой порог (#276) — по умолчанию как у playbook, строже через переменные ----------
+def gains_result(gains):
+    return res([b - g for b, g in zip(BEST.fold_scores, gains, strict=True)])
+
+
+MID_T_GAINS = [0.3, 0.09, 0.25, 0.03, 0.2]  # t ≈ 2.3
+LOW_T_GAINS = [0.3, -0.02, 0.25, 0.0, 0.2]  # t ≈ 1.5
+
+
+def test_llm_default_threshold_like_playbook(monkeypatch):
+    """Сабмит №6: штраф −8 не от LLM — по умолчанию гипотеза LLM с t = 2.3 проходит, с t = 1.5 нет."""
+    monkeypatch.delenv(LLM_T_ENV, raising=False)
+    assert (LLM_T_MIN, LLM_TIME_MIN_REL_GAIN) == (T_MIN, TIME_MIN_REL_GAIN)
+    assert corrected_t(MID_T_GAINS) == pytest.approx(2.3, abs=0.05)
+    assert corrected_t(LOW_T_GAINS) == pytest.approx(1.5, abs=0.05)
+    ok, reason = accept(gains_result(MID_T_GAINS), BEST, greater_is_better=False, strict=True)
+    assert ok and "порог 2, LLM" in reason
+    assert not accept(gains_result(LOW_T_GAINS), BEST, greater_is_better=False, strict=True)[0]
+
+
+def test_llm_strict_threshold_from_env(monkeypatch):
+    """Выключатель остаётся: AGENT_LLM_T_MIN=3 отсекает t = 2.3 только у LLM, playbook — по-прежнему по 2."""
+    monkeypatch.setenv(LLM_T_ENV, "3")
+    ok, reason = accept(gains_result(MID_T_GAINS), BEST, greater_is_better=False, strict=True)
+    assert not ok and "порог 3, LLM" in reason
+    assert accept(gains_result(MID_T_GAINS), BEST, greater_is_better=False)[0]
+
+
+@pytest.mark.parametrize("garbage", ["", "abc", "-1", "nan", "inf"])
+def test_llm_thresholds_garbage_env_uses_defaults(monkeypatch, garbage):
+    monkeypatch.setenv(LLM_T_ENV, garbage)
+    monkeypatch.setenv(LLM_GAIN_ENV, garbage)
+    assert thresholds(strict=True) == (LLM_T_MIN, LLM_TIME_MIN_REL_GAIN)
+    assert thresholds(strict=False) == (T_MIN, TIME_MIN_REL_GAIN)
+
+
+def test_llm_time_scheme_gain(monkeypatch):
+    """time-схема: по умолчанию +1.5% проходит и у LLM (порог 1%); AGENT_LLM_TIME_GAIN=0.02 — только у playbook."""
+    new, best = time_pair([0.2, 0.7, 1.4])  # +1.5%
+    monkeypatch.delenv(LLM_GAIN_ENV, raising=False)
+    assert accept(new, best, greater_is_better=False, strict=True)[0]
+    monkeypatch.setenv(LLM_GAIN_ENV, "0.02")
+    assert accept(new, best, greater_is_better=False)[0]
+    assert not accept(new, best, greater_is_better=False, strict=True)[0]
+    new, best = time_pair([0.2, 1.8, 3.2])  # +3.5% — проходит и при строгом пороге
+    assert accept(new, best, greater_is_better=False, strict=True)[0]

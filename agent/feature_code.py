@@ -57,7 +57,15 @@ ORDER_ATTRS = {
 MAX_NEW_COLUMNS = 10  # промпт просит ≤ 5; запас на случай, когда LLM разворачивает идею шире
 SANDBOX_TIMEOUT = 120.0  # сек: векторный код на 100–500 тыс. строк укладывается в секунды
 SANDBOX_MEM_MB = 8192  # ≥ 2048 только на импорт pandas (runtime/sandbox.py); таблица ×2–3 на копии
-FEATURE_ENV = "AGENT_FEATURE_CODE"  # "0" — не просить у LLM код признаков
+FEATURE_ENV = "AGENT_FEATURE_CODE"  # "1" — просить у LLM код признаков; по умолчанию выключено (#276, штраф −8)
+FEATURE_DEFAULT = "0"
+
+
+def feature_code_enabled() -> bool:
+    """Просить ли у LLM код признаков: только при AGENT_FEATURE_CODE=1 — главный кандидат в утечку (#276)."""
+    return os.getenv(FEATURE_ENV, FEATURE_DEFAULT) == "1"
+
+
 MAX_FEATURE_TRIES = 2  # запросов кода за прогон: каждый ≈ 1 ₽ и ~35 с, плюс песочница — токены и время тай-брейки
 FEATURE_MAX_TOKENS = 1500  # ответ — код до MAX_CODE_CHARS; рассуждения модели сверху (LLM_REASONING_TOKENS)
 FEATURE_TEMPERATURE = 0.3
@@ -152,7 +160,7 @@ def propose_feature_hypothesis(
     budget: RunBudget | None = None,
 ) -> Hypothesis | None:
     """Один запрос к LLM за гипотезой-признаками с кодом. None — выключено, LLM недоступна, мусор или сбой."""
-    if os.getenv(FEATURE_ENV, "1") == "0" or llm is None or not llm.available():
+    if not feature_code_enabled() or llm is None or not llm.available():
         return None
     tried = [h.title for h, _ in history if h.kind == HypothesisKind.FEATURES]
     messages = build_feature_messages(spec, profile, tried)
