@@ -193,3 +193,32 @@ def test_spec_changed_sees_metric_and_columns(tmp_path):
     assert spec_changed(spec, spec.model_copy(update={"id_column": "row_id"}))
     other_metric = spec.metric.model_copy(update={"name": "mae"})
     assert spec_changed(spec, spec.model_copy(update={"metric": other_metric}))
+
+
+def test_ambiguous_target_has_fallback_answer_on_disk_before_analyst(tmp_path, monkeypatch):
+    """Разбор по данным упал, аналитик зависает до 90 с: к его запросу на диске уже есть ответ (#239)."""
+    task_md = make_task(tmp_path, train_extra=["y_leak"])
+    seen = {}
+
+    class HangingLLM(FakeLLM):
+        def chat_json(self, messages, **kwargs):
+            seen["on_disk"] = (tmp_path / "submission.csv").exists()
+            return super().chat_json(messages, **kwargs)
+
+    fake = HangingLLM({"target": "y", "id_column": "id"})
+    monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
+
+    class Stop(Exception):
+        pass
+
+    def stop_after_step0(*args, **kwargs):
+        raise Stop
+
+    monkeypatch.setattr(solution, "profile_data", stop_after_step0)
+    started = time.time()
+    budget = make_budget(started)
+    with pytest.raises(Stop):
+        run_pipeline(task_md, budget, plan_stages(budget), AnswerKeeper(task_md), started)
+    assert seen["on_disk"] is True
+    answer = pd.read_csv(tmp_path / "submission.csv")
+    assert len(answer) == 10 and "y" in answer.columns
