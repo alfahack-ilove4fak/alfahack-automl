@@ -13,7 +13,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CONTRACT_VERSION = "1.1.1"
+CONTRACT_VERSION = "1.1.2"
+
+ROW_ID_COLUMN = "__row__"  # id_column задачи, где в test нет id, а в ответе нет колонки id: номер строки test (1.1.2)
 
 
 class _Contract(BaseModel):
@@ -51,7 +53,7 @@ class TaskSpec(_Contract):
     task_type: TaskType
     target: str  # основной таргет; по нему идут CV и цикл AutoResearch
     extra_targets: list[str] = Field(default_factory=list)  # остальные таргеты, если их несколько (#174, 1.1.1)
-    id_column: str
+    id_column: str  # ROW_ID_COLUMN — id в test нет и в ответ он не входит: load_data добавляет колонку в test (1.1.2)
     metric: MetricSpec
     submission_columns: list[str]
     class_labels: list[str] | None = None  # для классификации — допустимые метки
