@@ -42,7 +42,7 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
-from ml.experiment import fit_predict_final, run_experiment
+from ml.experiment import fit_predict_final, match_class_columns, run_experiment
 from ml.profiling import load_data, profile_data
 from ml.validation import choose_validation
 from runtime.budget import StagePlan, ensure_final_reserve, make_budget, plan_stages
@@ -51,13 +51,18 @@ from runtime.watchdog import Watchdog
 
 
 def _class_share_answer(spec: TaskSpec, y, test, class_columns: list[str]):
-    """Шаблон «колонка на класс» (#117): доли классов train. Колонка ↔ класс — по имени, иначе по порядку class_labels."""
+    """Шаблон «колонка на класс» (#117): доли классов train.
+
+    Колонка ↔ класс — по имени (match_class_columns: без регистра, без общей приставки «proba_<класс>», #238),
+    иначе по порядку class_labels. Та же логика, что у финального ответа модели (ml/experiment._per_class_columns):
+    иначе при срыве бейзлайна доли классов уходят в чужие колонки и logloss хуже тривиального ответа.
+    """
     shares = y.astype(str).value_counts(normalize=True)
     labels = spec.class_labels or []
-    by_name = set(class_columns) == set(labels)
+    matched = match_class_columns(class_columns, labels)
     values = []
-    for i, col in enumerate(class_columns):
-        label = col if by_name else (labels[i] if i < len(labels) else None)
+    for i in range(len(class_columns)):
+        label = matched[i] if matched is not None else (labels[i] if i < len(labels) else None)
         values.append(float(shares.get(label, 0.0)) if label is not None else 0.0)
     probs = pd.Series(values).clip(lower=1e-6)  # нулевая вероятность ломает logloss
     probs = probs / probs.sum()

@@ -2,10 +2,13 @@
 
     uv run python research/night/make_alien_tasks.py                 # все задачи → runs/night/alien/
     uv run python research/night/make_alien_tasks.py --only wide_1500_logloss
+    uv run python research/night/make_alien_tasks.py --set leak         # 3 утечки разной природы → runs/night/leak/
+    uv run python research/night/make_alien_tasks.py --set uncovered    # мультиметка, ранжирование, 600k строк
 
 Seed = сумма кодов букв ника (Richi-Marqez → 1164): у разных людей разные данные.
 Каждая задача — папка с task.md и CSV (как на платформе); ответы и описание того, что проверяем, —
-отдельно, в runs/night/alien/_answers/<задача>.json и .csv (агент их не видит: раннер копирует только папку задачи).
+отдельно, в runs/night/<набор>/_answers/<задача>.json и .csv (агент их не видит: раннер копирует только папку задачи).
+Наборы leak и uncovered в гейт не входят (он считает нули на 15 задачах набора alien); прогон — run_alien.py --set.
 Данные — синтетика без интернета; в каждой задаче есть сигнал, чтобы LightGBM был заметно лучше тривиального ответа.
 """
 
@@ -797,6 +800,370 @@ def mape_in_words():
     )
 
 
+# ================================================================== набор «leak»: три утечки разной природы
+# Для проверки утечек в агенте (ml/, @marenkov17). У существующей leak_column_auc признак пуст в test и об этом сказано
+# в task.md; здесь три другие природы, и в task.md об утечке ни слова — правило не должно ловить одну форму.
+# meta["leak_columns"] — что надо отбросить; ориентир LightGBM считается без них (DS, заметивший утечку), а
+# lgbm_with_leak — с ними: насколько ловушка бьёт по ответу.
+
+
+def leak_idlike_regno_auc():
+    """Id-подобный признак: номер регистрации растёт вместе с target в train, в test — новый диапазон без связи."""
+    rng = _rng(16)
+    n = 10000
+    x = rng.normal(0, 1, (n, 6))
+    channel = rng.choice(["офис", "сайт", "приложение", "партнёр"], n)
+    z = (
+        -1.0
+        + 0.9 * x[:, 0]
+        - 0.7 * x[:, 1]
+        + 0.5 * x[:, 2] * x[:, 3]
+        + np.vectorize({"офис": 0.4, "сайт": 0.0, "приложение": -0.3, "партнёр": 0.6}.get)(channel)
+    )
+    y = (rng.random(n) < _sigmoid(z)).astype(int)
+    df = pd.DataFrame(x.round(4), columns=[f"f{i}" for i in range(6)])
+    df.insert(0, "request_id", [f"Q-{i:06d}" for i in rng.permutation(n)])
+    df["channel"] = channel
+    df["complaint"] = y
+    train, test = _split(df, 3000, rng)
+    # Жалобы регистрировали вторым потоком: в train номер почти упорядочен по target (как выгрузка, отсортированная
+    # по статусу). Test зарегистрирован позже — номера больше любого из train и с target не связаны.
+    order = np.argsort(train["complaint"].to_numpy() + rng.normal(0, 0.35, len(train)))
+    regno = np.empty(len(train), dtype=np.int64)
+    regno[order] = 500_000 + np.arange(len(train)) * 3 + rng.integers(0, 3, len(train))
+    train.insert(1, "reg_number", regno)
+    test.insert(1, "reg_number", regno.max() + 1 + rng.permutation(len(test)) * 3 + rng.integers(0, 3, len(test)))
+    answers = test[["request_id", "complaint"]].copy()
+    test = test.drop(columns=["complaint"])
+    sample = answers.assign(complaint=0.5)
+    md = """# Жалоба или обычное обращение
+
+По обращению клиента нужно оценить вероятность того, что это жалоба (`complaint` = 1).
+
+Файлы: `train.csv` (обращения с разметкой), `test.csv` (новые обращения), `sample_submission.csv`.
+Колонки: `request_id` — идентификатор обращения, `reg_number` — регистрационный номер, `channel` — канал,
+`f0`…`f5` — числовые характеристики обращения.
+
+Метрика — ROC-AUC, чем больше, тем лучше. Ответ: `request_id`, `complaint` (вероятность).
+"""
+    _save(
+        "leak_idlike_regno_auc",
+        {"train.csv": (train, {}), "test.csv": (test, {}), "sample_submission.csv": (sample, {})},
+        md,
+        answers,
+        {
+            "metric": "roc_auc",
+            "greater_is_better": True,
+            "task_type": "binary",
+            "id": "request_id",
+            "targets": ["complaint"],
+            "submission_columns": ["request_id", "complaint"],
+            "positive": "1",
+            "leak_columns": ["reg_number"],
+            "leak_kind": "id-подобный: монотонный номер, в train упорядочен по target, в test — новый диапазон",
+            "checks": "утечка через id-подобный номер (не назван id, заполнен в test): CV с ним завышена, "
+            "в test все номера правее train — модель на нём проваливается",
+        },
+    )
+
+
+def leak_target_copy_mae():
+    """Копия target: «сумма по договору» = цена сделки ±1% в train; в test поле заполнено шаблоном без связи."""
+    rng = _rng(17)
+    n = 9000
+    area = rng.uniform(25, 140, n).round(1)
+    rooms = np.clip((area / 30 + rng.normal(0, 0.7, n)).round(), 1, 5).astype(int)
+    district = rng.choice([f"район_{i}" for i in range(12)], n)
+    age = rng.integers(0, 60, n)
+    floor = rng.integers(1, 25, n)
+    d_eff = dict(zip(sorted(set(district)), rng.normal(0, 0.25, 12), strict=True))
+    log_price = (
+        np.log(140_000)
+        + np.log(area)
+        + np.vectorize(d_eff.get)(district)
+        - 0.004 * age
+        + 0.01 * np.minimum(floor, 10)
+        + rng.normal(0, 0.12, n)
+    )
+    price = np.exp(log_price).round(-3)
+    df = pd.DataFrame({"deal_id": np.arange(n) + 70_000, "area": area, "rooms": rooms, "district": district})
+    df["building_age"] = age
+    df["floor"] = floor
+    df["contract_sum"] = (price * (1 + rng.normal(0, 0.01, n))).round(-3)
+    df["price"] = price
+    train, test = _split(df, 2500, rng)
+    # В test договор ещё не подписан: поле заполнено значениями из шаблона выгрузки — то же распределение, без связи
+    test["contract_sum"] = rng.permutation(train["contract_sum"].to_numpy())[: len(test)]
+    answers = test[["deal_id", "price"]].copy()
+    test = test.drop(columns=["price"])
+    sample = answers.assign(price=0.0)
+    md = """# Цена сделки
+
+Оцените итоговую цену сделки с квартирой (`price`, руб.).
+
+Данные: `train.csv` — прошлые сделки, `test.csv` — новые, `sample_submission.csv` — пример ответа.
+Колонки: площадь, число комнат, район, возраст дома, этаж и `contract_sum` из системы договоров.
+
+Метрика — MAE (средняя абсолютная ошибка), меньше — лучше. Ответ: `deal_id`, `price`.
+"""
+    _save(
+        "leak_target_copy_mae",
+        {"train.csv": (train, {}), "test.csv": (test, {}), "sample_submission.csv": (sample, {})},
+        md,
+        answers,
+        {
+            "metric": "mae",
+            "greater_is_better": False,
+            "task_type": "regression",
+            "id": "deal_id",
+            "targets": ["price"],
+            "submission_columns": ["deal_id", "price"],
+            "leak_columns": ["contract_sum"],
+            "leak_kind": "копия target: corr ≈ 0.999 в train; в test то же распределение, но без связи с target",
+            "checks": "признак-копия target, в test заполнен и по распределению не отличается: состязательная "
+            "проверка train/test его не видит, видно только «слишком хорошо» в train",
+        },
+    )
+
+
+def leak_future_window_rmse():
+    """Будущее время: среднее продаж по окну [d−1, d+1] (включает день прогноза и завтра) — в test заморожено."""
+    rng = _rng(18)
+    stores = [f"S{i:02d}" for i in range(40)]
+    days = pd.date_range("2024-01-01", periods=730 + 61, freq="D")
+    st = np.repeat(stores, len(days))
+    dt = np.tile(days, len(stores))
+    base = np.repeat(rng.lognormal(4.5, 0.4, len(stores)), len(days))
+    dow = pd.DatetimeIndex(dt).dayofweek.to_numpy()
+    doy = pd.DatetimeIndex(dt).dayofyear.to_numpy()
+    promo = (rng.random(len(st)) < 0.15).astype(int)
+    temp = (10 - 12 * np.cos(2 * np.pi * doy / 365) + rng.normal(0, 3, len(st))).round(1)
+    mean = base * (1 + 0.25 * (dow >= 5)) * (1 + 0.15 * np.sin(2 * np.pi * doy / 365)) * (1 + 0.35 * promo)
+    sales = rng.poisson(mean).astype(float)
+    df = pd.DataFrame({"store": st, "date": pd.DatetimeIndex(dt).strftime("%Y-%m-%d"), "promo": promo, "temp": temp})
+    df["weekday"] = dow
+    df["month"] = pd.DatetimeIndex(dt).month
+    df["sales"] = sales
+    # Витрина считала «среднее за 3 дня» центрированным окном: в него входят день прогноза и следующий день
+    df["sales_3d_avg"] = (
+        df.groupby("store")["sales"].transform(lambda s: s.rolling(3, center=True, min_periods=1).mean()).round(2)
+    )
+    df.insert(0, "row_id", np.arange(len(df)) + 1)
+    cut = days[730]
+    is_test = pd.to_datetime(df["date"]) >= cut
+    train, test = df[~is_test].reset_index(drop=True), df[is_test].reset_index(drop=True)
+    # В test будущих продаж нет: витрина повторяет последнее известное (честное, только прошлое) среднее магазина
+    last = train.groupby("store")["sales"].apply(lambda s: s.iloc[-7:].mean()).round(2)
+    test["sales_3d_avg"] = test["store"].map(last)
+    answers = test[["row_id", "sales"]].copy()
+    test = test.drop(columns=["sales"])
+    sample = answers.assign(sales=0.0)
+    md = """# Продажи магазинов по дням
+
+Нужно предсказать продажи (`sales`, штук) каждого магазина на каждый день следующих двух месяцев.
+
+Файлы: `train.csv` — история за два года, `test.csv` — дни, на которые нужен прогноз, `sample_submission.csv`.
+Колонки: магазин, дата, день недели, месяц, флаг промо-акции, температура и `sales_3d_avg` — среднее продаж за 3 дня из витрины.
+
+Метрика — RMSE, меньше — лучше. Ответ: `row_id`, `sales`.
+"""
+    _save(
+        "leak_future_window_rmse",
+        {"train.csv": (train, {}), "test.csv": (test, {}), "sample_submission.csv": (sample, {})},
+        md,
+        answers,
+        {
+            "metric": "rmse",
+            "greater_is_better": False,
+            "task_type": "regression",
+            "id": "row_id",
+            "targets": ["sales"],
+            "submission_columns": ["row_id", "sales"],
+            "leak_columns": ["sales_3d_avg"],
+            "leak_kind": "будущее время: окно признака заходит за дату строки; в test заморожено на дате отсечки",
+            "checks": "утечка из будущего: валидация по времени её НЕ ловит (окно строки внутри фолда), в test "
+            "признак постоянен по магазину — модель на нём проваливается",
+        },
+    )
+
+
+# ================================================================== набор «uncovered»: чего нет ни в public, ни выше
+
+
+def multilabel_3targets_mean_auc():
+    """Три бинарных таргета (мультиметка) с разной частотой, метрика — средний ROC-AUC по колонкам."""
+    rng = _rng(19)
+    n = 14000
+    x = rng.normal(0, 1, (n, 8))
+    segment = rng.choice(["mass", "affluent", "private", "youth"], n, p=[0.6, 0.2, 0.05, 0.15])
+    seg = {"mass": 0.0, "affluent": 0.6, "private": 1.2, "youth": -0.5}
+    s = np.vectorize(seg.get)(segment)
+    shared = 0.6 * x[:, 0] + 0.4 * s  # общий фактор: таргеты коррелированы
+    targets = {
+        "credit_card": -0.8 + shared + 0.7 * x[:, 1] - 0.4 * x[:, 2] ** 2,
+        "mortgage": -2.4 + shared + 0.9 * x[:, 3] + 0.5 * (x[:, 4] > 0.5),
+        "deposit": -3.6 + 0.8 * shared + 0.8 * x[:, 5] * x[:, 6],
+    }
+    df = pd.DataFrame(x.round(4), columns=[f"x{i}" for i in range(8)])
+    df.insert(0, "client", [f"C{i:06d}" for i in rng.permutation(n)])
+    df["segment"] = segment
+    for name, z in targets.items():
+        df[name] = (rng.random(n) < _sigmoid(z)).astype(int)
+    train, test = _split(df, 4000, rng)
+    names = list(targets)
+    answers = test[["client", *names]].copy()
+    test = test.drop(columns=names)
+    sample = answers.assign(**{t: 0.5 for t in names})
+    md = """# Какие продукты подключит клиент
+
+Для каждого клиента нужно оценить вероятность подключения трёх продуктов: кредитной карты (`credit_card`),
+ипотеки (`mortgage`) и вклада (`deposit`). Клиент может подключить несколько продуктов сразу.
+
+Файлы: `train.csv`, `test.csv`, `sample_submission.csv`.
+
+Метрика — ROC-AUC, посчитанный отдельно по каждой из трёх колонок и усреднённый (больше — лучше).
+Ответ: `client` и три колонки вероятностей.
+"""
+    _save(
+        "multilabel_3targets_mean_auc",
+        {"train.csv": (train, {}), "test.csv": (test, {}), "sample_submission.csv": (sample, {})},
+        md,
+        answers,
+        {
+            "metric": "mean_roc_auc",
+            "greater_is_better": True,
+            "task_type": "binary",
+            "id": "client",
+            "targets": names,
+            "submission_columns": ["client", *names],
+            "positive": "1",
+            "checks": "три бинарных таргета в одном ответе (≈30% / 10% / 3% положительных), вероятности, "
+            "средний AUC: агенту нужна модель на каждый таргет, а не один таргет + копии",
+        },
+    )
+
+
+def ranking_query_map5():
+    """Ранжирование с query_id: релевантность зависит от документа относительно других документов запроса."""
+    rng = _rng(20)
+    n_q = 2000
+    sizes = rng.integers(5, 41, n_q)
+    q = np.repeat(np.arange(n_q) + 1, sizes)
+    n = len(q)
+    q_shift = np.repeat(rng.normal(0, 2.0, n_q), sizes)  # у запросов свой уровень bm25 — сырой порог не работает
+    q_len = np.repeat(rng.integers(1, 8, n_q), sizes)
+    bm25 = (q_shift + rng.gamma(2.0, 1.5, n)).round(3)
+    ctr = rng.beta(1, 12, n).round(4)
+    fresh = rng.integers(0, 2000, n)
+    doc_len = rng.lognormal(6, 0.7, n).round()
+    cat_match = (rng.random(n) < 0.3).astype(int)
+    score = (bm25 - q_shift) + 25 * ctr + 0.8 * cat_match - 0.0006 * fresh + rng.normal(0, 1.0, n)
+    df = pd.DataFrame({"query_id": q, "bm25": bm25, "ctr": ctr, "freshness_days": fresh, "doc_len": doc_len})
+    df["query_len"] = q_len
+    df["category_match"] = cat_match
+    df["relevant"] = 0
+    order = df.assign(s=score).groupby("query_id")["s"].rank(ascending=False, method="first")
+    df.loc[(order <= np.ceil(df.groupby("query_id")["query_id"].transform("size") * 0.15)).to_numpy(), "relevant"] = 1
+    df.insert(0, "id", np.arange(n) + 1)
+    test_q = rng.choice(np.arange(n_q) + 1, n_q // 4, replace=False)  # test — другие запросы
+    is_test = df["query_id"].isin(test_q)
+    train, test = df[~is_test].reset_index(drop=True), df[is_test].reset_index(drop=True)
+    answers = test[["id", "relevant", "query_id"]].copy()
+    test = test.drop(columns=["relevant"])
+    sample = test[["id"]].assign(score=0.0)
+    md = """# Ранжирование документов в поиске
+
+Для каждого запроса (`query_id`) нужно упорядочить найденные документы так, чтобы релевантные (`relevant` = 1)
+оказались наверху. В test — новые запросы, которых нет в train.
+
+Файлы: `train.csv`, `test.csv`, `sample_submission.csv`.
+
+Ответ — `id` и `score`: чем больше score, тем выше документ в выдаче своего запроса; шкала не важна.
+Метрика — MAP@5: средняя точность по первым пяти документам, считается по каждому запросу и усредняется
+(больше — лучше).
+"""
+    _save(
+        "ranking_query_map5",
+        {"train.csv": (train, {}), "test.csv": (test, {}), "sample_submission.csv": (sample, {})},
+        md,
+        answers,
+        {
+            "metric": "map@5",
+            "greater_is_better": True,
+            "task_type": "regression",
+            "id": "id",
+            "group": "query_id",
+            "targets": ["relevant"],
+            "answer_column": "score",
+            "submission_columns": ["id", "score"],
+            "checks": "ранжирование по запросам: колонка ответа ≠ имени таргета, test — новые query_id (нужны "
+            "группы в CV), уровень bm25 свой у каждого запроса, метрика по запросам",
+        },
+    )
+
+
+def big_600k_time_dups_auc():
+    """Большая таблица: 600k строк, дата строкой «дд.мм.гггг», 15% полных дубликатов, редкий класс, test — позже."""
+    rng = _rng(21)
+    n_train, n_test = 600_000, 150_000
+    n = n_train + n_test
+    day = np.sort(rng.integers(0, 820, n))  # 730 дней train + 90 дней test, строки по времени
+    day[n_train:] = np.maximum(day[n_train:], 731)
+    day[:n_train] = np.minimum(day[:n_train], 730)
+    x = rng.normal(0, 1, (n, 12)).astype(np.float32).round(3)
+    merchant = rng.zipf(1.6, n) % 40_000
+    mcc = rng.choice([f"mcc_{i}" for i in range(60)], n)
+    amount = rng.lognormal(7, 1.1, n).round(2)
+    m_risk = rng.normal(0, 1, 40_000)
+    drift = day / 820  # доля положительных растёт со временем
+    z = -4.3 + 0.8 * x[:, 0] + 0.5 * x[:, 1] * x[:, 2] + 0.35 * m_risk[merchant] + 0.3 * np.log(amount / 1000) + drift
+    y = (rng.random(n) < _sigmoid(z)).astype(np.int8)
+    df = pd.DataFrame(x, columns=[f"v{i}" for i in range(12)])
+    df.insert(0, "op_date", (pd.Timestamp("2023-01-01") + pd.to_timedelta(day, "D")).strftime("%d.%m.%Y"))
+    df["merchant"] = merchant
+    df["mcc"] = mcc
+    df["amount"] = amount
+    df["fraud"] = y
+    # 15% строк train — полные повторы других строк train (повторные списания): в случайной CV дубль в train и valid
+    dup_from = rng.choice(n_train, int(0.15 * n_train), replace=False)
+    dup_to = rng.choice(n_train, len(dup_from), replace=False)
+    src = np.arange(n)
+    src[dup_to] = dup_from
+    df = df.iloc[src].reset_index(drop=True)  # строками целиком — типы колонок сохраняются
+    df.insert(0, "op_id", np.arange(n) + 10_000_000)
+    train, test = df.iloc[:n_train].reset_index(drop=True), df.iloc[n_train:].reset_index(drop=True)
+    answers = test[["op_id", "fraud"]].copy()
+    test = test.drop(columns=["fraud"])
+    sample = answers.assign(fraud=0.0)
+    md = """# Мошеннические операции
+
+Оцените вероятность того, что операция по карте мошенническая (`fraud` = 1).
+
+Файлы: `train.csv` — операции за два года, `test.csv` — операции следующего квартала, `sample_submission.csv`.
+Дата операции — `op_date` (дд.мм.гггг), `merchant` — код торговой точки, `mcc` — категория, `amount` — сумма.
+
+Метрика — ROC-AUC (больше — лучше). Ответ: `op_id`, `fraud`.
+"""
+    _save(
+        "big_600k_time_dups_auc",
+        {"train.csv": (train, {}), "test.csv": (test, {}), "sample_submission.csv": (sample, {})},
+        md,
+        answers,
+        {
+            "metric": "roc_auc",
+            "greater_is_better": True,
+            "task_type": "binary",
+            "id": "op_id",
+            "targets": ["fraud"],
+            "submission_columns": ["op_id", "fraud"],
+            "positive": "1",
+            "checks": "≥ 500k строк: схема по времени (дата строкой дд.мм.гггг, test — следующий квартал) и группы "
+            "дубликатов на большой таблице, подвыборка CV (MAX_CV_ROWS), id-подобный merchant (40k значений), "
+            "≈2–3% положительных, дрейф доли во времени; время и RAM за бюджет",
+        },
+    )
+
+
 TASKS = {
     f.__name__: f
     for f in [
@@ -819,11 +1186,20 @@ TASKS = {
 }
 
 
+# Отдельные наборы, а не TASKS: гейт (scripts/gate.py) считает нули ровно на 15 задачах runs/night/alien
+LEAK = {f.__name__: f for f in [leak_idlike_regno_auc, leak_target_copy_mae, leak_future_window_rmse]}
+UNCOVERED = {f.__name__: f for f in [multilabel_3targets_mean_auc, ranking_query_map5, big_600k_time_dups_auc]}
+SETS = {"alien": TASKS, "leak": LEAK, "uncovered": UNCOVERED}
+
+
 def main() -> None:
+    global OUT
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", nargs="*", help="имена задач")
+    parser.add_argument("--set", choices=sorted(SETS), default="alien", help="набор задач (папка runs/night/<набор>)")
     args = parser.parse_args()
-    for name, make in TASKS.items():
+    OUT = ROOT / "runs" / "night" / args.set
+    for name, make in SETS[args.set].items():
         if not args.only or name in args.only:
             make()
 

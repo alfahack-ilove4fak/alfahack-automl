@@ -353,3 +353,14 @@ def test_llm_repeat_of_playbook_in_same_batch_dropped(spec, profile, monkeypatch
     monkeypatch.setattr(hypotheses, "load_playbook", lambda: [item])
     out = propose_hypotheses(spec, profile, baseline_history(), k=3, llm=FakeLLM([GOOD]))
     assert [h.id for h in out] == ["pb"]  # LLM повторила гипотезу playbook той же пачки — не берём
+
+
+def test_rejected_reasons_collected():
+    """Отброшенные при разборе гипотезы LLM — с причиной: они попадают в итог решений LLM в agent.log."""
+    bad_key = {**GOOD, "id": "bad_key", "params": {"model": "lightgbm", "секретный_ключ": 1}}
+    no_schema = {"id": "no_schema", "kind": "hyperparams"}
+    rejected: list[str] = []
+    out = parse_hypotheses([GOOD, bad_key, no_schema, "строка"], [], k=3, rejected=rejected)
+    assert [h.id for h in out] == ["lgbm_l2"]
+    assert rejected[0].startswith("bad_key: kind=hyperparams, неизвестные params=['секретный_ключ']")
+    assert rejected[1:] == ["no_schema: не по схеме", "?: не объект JSON"]

@@ -2,6 +2,7 @@
 
     uv run python research/night/run_alien.py --minutes 6                    # все задачи
     uv run python research/night/run_alien.py --minutes 6 --only cp1251_r2 no_id_rmse
+    uv run python research/night/run_alien.py --minutes 5 --set leak         # утечки → runs/night/leak_results.jsonl
 
 Для каждой задачи:
   1. разбор задачи агентом (parse_task, без LLM) — что он понял: target, id, метрика и направление, тип, колонки;
@@ -52,9 +53,30 @@ def _pinball(y, p, a=0.9):
     return float(np.mean(np.maximum(a * d, (a - 1) * d)))
 
 
+def _map_at_k(rel: np.ndarray, score: np.ndarray, groups: np.ndarray, k: int) -> float:
+    """MAP@k по запросам: запросы без релевантных пропускаются; при равных score — порядок строк test."""
+    aps = []
+    for g in pd.unique(groups):
+        idx = np.where(groups == g)[0]
+        r = rel[idx][np.argsort(-score[idx], kind="stable")]
+        if r.sum() == 0:
+            continue
+        hits = np.cumsum(r[:k])
+        aps.append(float((hits / np.arange(1, len(hits) + 1) * r[:k]).sum() / min(r.sum(), k)))
+    return float(np.mean(aps))
+
+
 def true_metric(meta: dict, answers: pd.DataFrame, sub: pd.DataFrame, classes: list[str] | None) -> float:
     m = meta["metric"]
     targets = meta["targets"]
+    if m == "mean_roc_auc":
+        return float(
+            np.mean([skm.roc_auc_score(answers[t].astype(int), pd.to_numeric(sub[t]).to_numpy(float)) for t in targets])
+        )
+    if m == "map@5":
+        col = meta.get("answer_column", targets[0])
+        rel = answers[targets[0]].to_numpy(int)
+        return _map_at_k(rel, pd.to_numeric(sub[col]).to_numpy(float), answers[meta["group"]].to_numpy(), 5)
     if m == "pinball@0.9":
         return float(np.mean([_pinball(answers[t].to_numpy(float), sub[t].to_numpy(float)) for t in targets]))
     t = targets[0]
@@ -127,7 +149,7 @@ def load_task(name: str, meta: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def _frames(train: pd.DataFrame, test: pd.DataFrame, meta: dict):
-    drop = set(meta["targets"]) | ({meta["id"]} if meta["id"] else set())
+    drop = set(meta["targets"]) | ({meta["id"]} if meta["id"] else set()) | set(meta.get("leak_columns", []))
     cols = [c for c in train.columns if c in test.columns and c not in drop and not test[c].isna().all()]
     xtr, xte = train[cols].copy(), test[cols].copy()
     for c in cols:
@@ -139,13 +161,19 @@ def _frames(train: pd.DataFrame, test: pd.DataFrame, meta: dict):
 
 
 def references(meta: dict, train: pd.DataFrame, test: pd.DataFrame, answers: pd.DataFrame, classes) -> dict:
-    """Тривиальный ответ, LightGBM по умолчанию и LightGBM с целью под метрику — в формате сабмита → метрика."""
+    """Тривиальный ответ, LightGBM по умолчанию и LightGBM с целью под метрику — в формате сабмита → метрика.
+
+    В задачах с утечкой (meta["leak_columns"]) lgbm_default — без утечки (DS, который её заметил), а lgbm_with_leak —
+    с ней: насколько ловушка бьёт по ответу.
+    """
     import lightgbm as lgb
 
     out = {}
     m, targets = meta["metric"], meta["targets"]
     train = train.dropna(subset=targets).reset_index(drop=True)
     xtr, xte = _frames(train, test, meta)
+    proba_metrics = ("roc_auc", "pr_auc", "logloss", "mean_roc_auc")
+    answer_col = meta.get("answer_column")
     params = {"random_state": 0, "n_jobs": 4, "verbose": -1}
 
     def as_sub(preds: dict) -> pd.DataFrame:
@@ -161,13 +189,15 @@ def references(meta: dict, train: pd.DataFrame, test: pd.DataFrame, answers: pd.
             shares = y.astype(str).value_counts(normalize=True)
             for c in classes:
                 triv[meta["per_class"][c]] = np.full(len(test), shares.get(c, 1e-6))
-        elif m in ("roc_auc", "pr_auc", "logloss"):
+        elif m in proba_metrics:
             triv[t] = np.full(len(test), (y.astype(str) == meta["positive"]).mean())
         else:
             triv[t] = np.full(len(test), y.astype(str).mode()[0], dtype=object)
+    if answer_col:
+        triv = {answer_col: triv[targets[0]]}
     out["trivial"] = true_metric(meta, answers, as_sub(triv), classes)
 
-    def lgbm(objective: dict | None = None) -> pd.DataFrame:
+    def lgbm(objective: dict | None = None, xtr=xtr, xte=xte) -> pd.DataFrame:
         preds = {}
         for t in targets:
             y = train[t]
@@ -182,13 +212,18 @@ def references(meta: dict, train: pd.DataFrame, test: pd.DataFrame, answers: pd.
                 if "per_class" in meta:
                     for i, c in enumerate(labels):
                         preds[meta["per_class"][c]] = proba[:, i]
-                elif m in ("roc_auc", "pr_auc", "logloss"):
+                elif m in proba_metrics:
                     preds[t] = proba[:, labels.index(meta["positive"])]
                 else:
                     preds[t] = np.array(labels, dtype=object)[proba.argmax(axis=1)]
+        if answer_col:
+            preds = {answer_col: preds[targets[0]]}
         return as_sub(preds)
 
     out["lgbm_default"] = true_metric(meta, answers, lgbm(), classes)
+    if meta.get("leak_columns"):
+        xtr_l, xte_l = _frames(train, test, {**meta, "leak_columns": []})
+        out["lgbm_with_leak"] = true_metric(meta, answers, lgbm(xtr=xtr_l, xte=xte_l), classes)
     aligned = {
         "pinball@0.9": {"objective": "quantile", "alpha": 0.9},
         "mae": {"objective": "l1"},
@@ -362,7 +397,13 @@ def main() -> int:
     parser.add_argument("--minutes", type=float, default=6)
     parser.add_argument("--only", nargs="*")
     parser.add_argument("--tag", default="")
+    parser.add_argument("--set", default="alien", help="набор make_alien_tasks.py --set: alien | leak | uncovered")
     args = parser.parse_args()
+    global ALIEN, RUNS, RESULTS
+    if args.set != "alien":  # alien — пути по умолчанию: их читает гейт (scripts/gate.py)
+        ALIEN = ROOT / "runs" / "night" / args.set
+        RUNS = ROOT / "runs" / "night" / f"{args.set}_runs"
+        RESULTS = ROOT / "runs" / "night" / f"{args.set}_results.jsonl"
     names = sorted(p.stem for p in (ALIEN / "_answers").glob("*.json"))
     for name in names:
         if not args.only or name in args.only:

@@ -17,6 +17,7 @@ class ResearchMemory:
     verdicts: dict[str, str] = field(default_factory=dict)  # id гипотезы → «принята» / «отклонена: почему»
     lessons: list[str] = field(default_factory=list)  # короткие выводы LLM после неудачных пачек
     best_id: str | None = None  # текущий лучший — то, что принял цикл и что лежит в submission.csv
+    llm_rejected: list[str] = field(default_factory=list)  # «id: причина» гипотез LLM, отброшенных при разборе
 
     def record(self, hypothesis_id: str, accepted: bool, reason: str = "") -> None:
         if accepted:

@@ -54,7 +54,7 @@
 | Харнесс — все 10 задач | `uv run python -m evaluation.harness --all --minutes 5` |
 | Харнесс — public-пара (быстро для PR) | `uv run python -m evaluation.harness --task tasks/public/regression/task.md --task tasks/public/multiclass/task.md --minutes 5` |
 | Сравнить два прогона | `uv run python scripts/harness_compare.py base.csv head.csv --out comment.md` |
-| Гейт перед сабмитом | `uv run python scripts/gate.py --minutes 5` (`--no-run` — только сравнить, `--update-baseline` — после сабмита) |
+| Гейт перед сабмитом | `uv run python scripts/gate.py --minutes 5` (`--no-run` — только сравнить, `--update-baseline` — после сабмита, `--llm` — с настоящей Qwen: тратит общий бюджет ₽, базу с ним не обновляем) |
 | Проверка «как на платформе» (в отчёте — доля использованного бюджета и почему закончился цикл; ⚠️ при простое < 50% или выходе за бюджет) | `uv run python scripts/pre_submit.py` |
 | Репетиция 3 ч, без интернета, 8 ядер | `taskset -c 0-7 uv run --offline python scripts/pre_submit.py --task tasks/public/regression/task.md --minutes 180` |
 | Проверка Qwen и бюджета | `uv run python scripts/qwen.py check` / `budget` |
