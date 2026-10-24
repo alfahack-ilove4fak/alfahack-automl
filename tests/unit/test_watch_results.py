@@ -316,3 +316,8 @@ def test_plan_or_snapshot_is_required(tmp_path):
 def test_missing_snapshot_file_explains_where_it_was_looked_for(tmp_path):
     text, code = wr.load_view(None, tmp_path / "нет.json", "html")
     assert code == 2 and "Файла снимка нет" in text and "нет.json" in text
+
+
+def test_serve_warns_when_listening_beyond_this_computer():
+    assert wr.exposure_warning("127.0.0.1") is None and wr.exposure_warning("localhost") is None
+    assert "без авторизации" in wr.exposure_warning("0.0.0.0")

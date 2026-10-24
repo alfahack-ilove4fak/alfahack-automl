@@ -9,7 +9,8 @@
 
 Скрипт только читает файлы (agent.log, CSV харнесса, jsonl run_alien, gate.md) — прогонам не мешает.
 --serve — страница в браузере: на каждое обновление (раз в --interval секунд) файлы читаются заново;
-/report.md — тот же снимок в markdown. По умолчанию слушает только 127.0.0.1.
+/report.md — тот же снимок в markdown. По умолчанию слушает только 127.0.0.1. Наружу (--host 0.0.0.0 и т. п.)
+не открывать: авторизации нет, сводку прогонов увидит любой в сети.
 Код выхода --once: 0 — всё проверено и нет ❌; 1 — есть ❌; 2 — нет ❌, но что-то ещё идёт (⏳).
 
 План — JSON (пример: research/night/control_plan.example.json). Пути — от текущей папки или абсолютные:
@@ -739,6 +740,16 @@ def make_handler(plan: dict | None, refresh: float, snapshot_file: Path | None =
     return Handler
 
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def exposure_warning(host: str) -> str | None:
+    """Предупреждение, если --serve слушает не только этот компьютер: авторизации у страницы нет."""
+    if host in LOCAL_HOSTS:
+        return None
+    return f"⚠️ --host {host}: страница без авторизации, сводку прогонов увидит любой, кто достучится до порта."
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--plan", type=Path, help="JSON-план: что и с какими порогами проверяем")
@@ -748,7 +759,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--markdown", action="store_true", help="markdown — для комментария в PR или issue")
     parser.add_argument("--interval", type=float, default=15, help="период обновления, секунд (по умолчанию 15)")
     parser.add_argument("--serve", action="store_true", help="страница в браузере: http://HOST:PORT, сама обновляется")
-    parser.add_argument("--host", default="127.0.0.1", help="адрес для --serve (по умолчанию только этот компьютер)")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="адрес для --serve: по умолчанию только этот компьютер; наружу не открывать — авторизации нет",
+    )
     parser.add_argument("--port", type=int, default=8765, help="порт для --serve (по умолчанию 8765)")
     args = parser.parse_args(argv)
     if (args.plan is None) == (args.snapshot is None):
@@ -768,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
         return code
     if args.serve:
         server = ThreadingHTTPServer((args.host, args.port), make_handler(plan, args.interval, args.snapshot))
+        if warning := exposure_warning(args.host):
+            print(warning, flush=True)
         print(f"Открой http://{args.host}:{server.server_port} — markdown: /report.md · Ctrl+C — выход", flush=True)
         try:
             server.serve_forever()
