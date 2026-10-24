@@ -136,7 +136,7 @@ def test_analyst_changes_metric_step0_is_rewritten(tmp_path, monkeypatch):
     assert spec.metric.name == "rmse"  # без LLM метрика по умолчанию для регрессии
     fake = FakeLLM({"target": "y", "id_column": "id", "metric": "mae"})
     monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
-    monkeypatch.setenv("AGENT_ANALYST_APPLY", "1")  # по умолчанию аналитик метрику не меняет (#276)
+    monkeypatch.setenv("AGENT_ANALYST_APPLY", "1")  # явно: с AGENT_ANALYST_APPLY=0 угаданное не меняется (#276)
 
     new_spec, new_train, new_test = refine_with_analyst(task_md, spec, train, test, keeper, log)
 

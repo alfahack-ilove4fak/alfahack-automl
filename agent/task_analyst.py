@@ -26,7 +26,9 @@ from runtime.log import get_logger
 log = get_logger("task_analyst")
 
 ANALYST_ENV = "AGENT_LLM_TASK"  # "0" — не спрашивать LLM
-APPLY_ENV = "AGENT_ANALYST_APPLY"  # "1" — LLM заменяет угаданные поля; по умолчанию только заметки (#276, штраф −8)
+APPLY_ENV = "AGENT_ANALYST_APPLY"  # "0" — LLM только заполняет пустое, замены — в заметки (выключатель #276)
+# как до #276: метрика по типу задачи вместо названной в тексте — риск нуля больше недоказанного вреда аналитика
+APPLY_DEFAULT = "1"
 MAX_TOKENS = 600
 MAX_WAIT = 90.0  # сек: разбор идёт до шага 0 (тривиального ответа) — дольше ждать нельзя
 MAX_TEXT_CHARS = 8000
@@ -45,8 +47,8 @@ def enabled() -> bool:
 
 
 def apply_enabled() -> bool:
-    """Может ли аналитик заменить угаданные target/id/метрику. По умолчанию нет: только заполнить пустое (#276)."""
-    return os.getenv(APPLY_ENV, "0") == "1"
+    """Может ли аналитик заменить угаданные target/id/метрику. По умолчанию да; AGENT_ANALYST_APPLY=0 — только пустое."""
+    return os.getenv(APPLY_ENV, APPLY_DEFAULT) == "1"
 
 
 def _in_registry(name: str) -> bool:

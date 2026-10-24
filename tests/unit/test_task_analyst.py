@@ -47,8 +47,14 @@ def run(view, heuristic=None, guessed=(), train=TRAIN_COLS, test=TEST_COLS):
 
 @pytest.fixture
 def apply_on(monkeypatch):
-    """Старое поведение: аналитик заменяет угаданные поля (AGENT_ANALYST_APPLY=1)."""
+    """Аналитик заменяет угаданные поля (AGENT_ANALYST_APPLY=1, оно же поведение по умолчанию)."""
     monkeypatch.setenv(APPLY_ENV, "1")
+
+
+@pytest.fixture
+def apply_off(monkeypatch):
+    """Выключатель #276: аналитик только заполняет пустое, замены угаданного — в заметки."""
+    monkeypatch.setenv(APPLY_ENV, "0")
 
 
 # ---------- metric_key ----------
@@ -171,18 +177,31 @@ def test_reconcile_multiple_targets_note():
         ({"metric": "quantum@10", "closest_metric": "mae"}, heur(metric="rmse"), {"metric"}),
     ],
 )
-def test_reconcile_default_does_not_replace_guessed(monkeypatch, view, heuristic, guessed):
-    """#276: по умолчанию аналитик не заменяет угаданные target/id/метрику — только заметка в notes."""
-    monkeypatch.delenv(APPLY_ENV, raising=False)
+def test_reconcile_apply_off_does_not_replace_guessed(apply_off, view, heuristic, guessed):
+    """Выключатель #276 (AGENT_ANALYST_APPLY=0): угаданные target/id/метрику не заменяем — только заметка в notes."""
     accepted, notes = run(view, heuristic, guessed=guessed)
     assert accepted == {}
     assert any("не применено" in n and APPLY_ENV in n for n in notes)
 
 
-@pytest.mark.parametrize("field, view", [("target", {"target": "y"}), ("id_column", {"id_column": "a"})])
-def test_reconcile_default_fills_field_when_data_parse_failed(monkeypatch, field, view):
-    """#276: исключение — разбор по данным ничего не нашёл (None); тогда LLM заполняет поле и по умолчанию."""
+@pytest.mark.parametrize(
+    "view, heuristic, guessed, expected",
+    [
+        ({"target": "y2"}, heur(target="y"), {"target"}, {"target": "y2"}),
+        ({"metric": "MAE"}, heur(metric=None), {"metric"}, {"metric": "mae"}),
+    ],
+)
+def test_reconcile_default_replaces_guessed(monkeypatch, view, heuristic, guessed, expected):
+    """Решение капитана (#276): по умолчанию AGENT_ANALYST_APPLY=1 — аналитик заменяет угаданное, как до #276."""
     monkeypatch.delenv(APPLY_ENV, raising=False)
+    assert task_analyst.apply_enabled()
+    accepted, _ = run(view, heuristic, guessed=guessed)
+    assert accepted == expected
+
+
+@pytest.mark.parametrize("field, view", [("target", {"target": "y"}), ("id_column", {"id_column": "a"})])
+def test_reconcile_apply_off_fills_field_when_data_parse_failed(apply_off, field, view):
+    """#276: и с выключателем разбор по данным ничего не нашёл (None) — LLM заполняет поле."""
     accepted, _ = run(view, heur(**{field: None}), guessed={field})
     assert field in accepted
 
@@ -191,17 +210,17 @@ def test_reconcile_default_fills_field_when_data_parse_failed(monkeypatch, field
     "llm_metric, expected",
     [("NDCG@10", "ndcg"), ("Huber loss", "huber"), ("F2 score", "fbeta@2"), ("fbeta@2", "fbeta@2"), ("MAPE", "mape")],
 )
-def test_reconcile_default_fills_missing_metric(monkeypatch, llm_metric, expected):
-    """#276: словарь не нашёл метрику в тексте (None) — по умолчанию её ставит аналитик, если она есть в реестре."""
-    monkeypatch.delenv(APPLY_ENV, raising=False)
+@pytest.mark.parametrize("apply", ["0", "1"])
+def test_reconcile_fills_missing_metric(monkeypatch, apply, llm_metric, expected):
+    """Словарь не нашёл метрику в тексте (None) — её ставит аналитик, если она в реестре; и с выключателем тоже."""
+    monkeypatch.setenv(APPLY_ENV, apply)
     accepted, notes = run({"metric": llm_metric}, heur(metric=None), guessed={"metric"})
     assert accepted == {"metric": expected}
     assert notes == [f"{PREFIX}: метрика от аналитика: {expected}"]
 
 
-def test_reconcile_default_missing_metric_not_in_registry_not_filled(monkeypatch):
+def test_reconcile_missing_metric_not_in_registry_not_filled():
     """Метрики нет ни в тексте, ни в реестре (и ближайшей LLM не назвала) — остаётся метрика по типу задачи."""
-    monkeypatch.delenv(APPLY_ENV, raising=False)
     accepted, notes = run({"metric": "quantum_score@10"}, heur(metric=None), guessed={"metric"})
     assert accepted == {}
     assert not any("метрика от аналитика" in n for n in notes)
