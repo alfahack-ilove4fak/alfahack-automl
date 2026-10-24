@@ -48,7 +48,7 @@ def _short(h):
 
 def test_models_and_optuna_keep_best_preprocessing(spec):
     best = (
-        hyp("best", model="lightgbm", log_target=True, _best_iteration=120, validation="time:Year"),
+        hyp("best", model="lightgbm", log_target=True, _best_iteration=120, validation="kfold"),
         result("b", BASE),
     )
     hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
@@ -66,6 +66,16 @@ def test_models_and_optuna_keep_best_preprocessing(spec):
     assert not any("_best_iteration" in h.params or "validation" in h.params for h in hyps)
     assert hyps[3].params["optuna"] == {"timeout": 600}
     assert all(h.id.startswith("fb-") and h.parent_id == "best" for h in hyps)
+
+
+@pytest.mark.parametrize("scheme", ["time:Year", "group:duplicates"])
+def test_no_optuna_in_time_and_group_schemes(spec, scheme):
+    """На time:/group: Optuna переобучается под фолды (public/regression: 53.1 против 44.5) — не запускаем (#236)."""
+    best = (hyp("best", model="lightgbm", validation=scheme), result("b", BASE))
+    hyps = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert hyps and not any("optuna" in h.params for h in hyps)  # остальные направления на месте
+    kfold = (hyp("best", model="lightgbm", validation="kfold"), result("b", BASE))
+    assert any("optuna" in h.params for h in fallback_hypotheses(spec, [kfold], kfold, RunBudget(total_seconds=3600)))
 
 
 def test_optuna_limited_by_budget_and_skipped_when_no_time(spec):
@@ -182,13 +192,13 @@ def test_loop_uses_fallback_instead_of_exit(spec, monkeypatch):
     monkeypatch.setattr(loop, "propose_hypotheses", lambda *a, **kw: [])
     reflected = []
     monkeypatch.setattr(loop, "reflect", lambda *a, **kw: reflected.append(a))
-    base = (hyp("baseline", validation="time:Year"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
+    base = (hyp("baseline", validation="kfold"), result("baseline", BASE).model_copy(update={"fit_seconds": 1.0}))
     profile = DataProfile(n_train=500, n_test=200, numeric_features=["a"], categorical_features=[])
     loop.run_autoresearch(spec, profile, None, RunBudget(total_seconds=3600), [base], base, lambda h, r: None, llm=None)
     assert {h.params.get("model") for h in ran} >= {"xgboost", "catboost", "hist_gb"}
     assert any("ensemble" in h.params for h in ran)
     assert any("optuna" in h.params for h in ran)
-    assert all(h.params["validation"] == "time:Year" for h in ran)  # в схеме прогона, как все гипотезы
+    assert all(h.params["validation"] == "kfold" for h in ran)  # в схеме прогона, как все гипотезы
     assert len({h.id for h in ran}) == len(ran)  # без повторов
     assert reflected == []  # пачки запасных направлений придумала не LLM — рефлексию не просим
 
