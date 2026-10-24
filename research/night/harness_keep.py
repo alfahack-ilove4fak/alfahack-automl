@@ -9,6 +9,7 @@ evaluation/harness.py работает во временной папке и с�
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -31,4 +32,10 @@ harness.tempfile.TemporaryDirectory = _keep_dir
 if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
+    # harness.main() сам .env не читает (это делает только его CLI-блок): без этой строки --llm молча идёт без Qwen
+    harness.load_env_file()
+    if "--llm" in sys.argv:
+        os.environ["LLM_CACHE_DIR"] = ""  # на платформе кэша нет; пустое значение .env уже не перезапишет
+        if not os.getenv("OPENAI_API_KEY"):
+            sys.exit("--llm: нет OPENAI_API_KEY (ни в окружении, ни в .env) — агент пойдёт без Qwen")
     sys.exit(harness.main())
