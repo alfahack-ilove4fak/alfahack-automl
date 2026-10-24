@@ -24,7 +24,9 @@ def make_task(folder, sample_columns=("id", "prediction"), n=300, n_test=60):
     pd.DataFrame({c: (test["id"] if c == "id" else np.zeros(n_test)) for c in sample_columns}).to_csv(
         folder / "sample_submission.csv", index=False
     )
-    (folder / "task.md").write_text("Предскажите target. В ответе колонка prediction. Метрика — RMSE.", encoding="utf-8")
+    (folder / "task.md").write_text(
+        "Предскажите target. В ответе колонка prediction. Метрика — RMSE.", encoding="utf-8"
+    )
     return folder / "task.md"
 
 
@@ -35,9 +37,7 @@ def test_answer_column_other_than_target_is_renamed_in_every_answer(tmp_path):
     path = tmp_path / "submission.csv"
     for answer in (
         trivial_answer(spec, train, test),
-        to_template(
-            fit_predict_final(spec, profile_data(spec, train, test), baseline_hypothesis(), train, test), spec
-        ),
+        to_template(fit_predict_final(spec, profile_data(spec, train, test), baseline_hypothesis(), train, test), spec),
     ):
         assert list(answer.columns) == ["id", "prediction"] and len(answer) == len(test)
         answer.to_csv(path, index=False)
