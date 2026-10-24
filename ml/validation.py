@@ -34,6 +34,11 @@ TIME_MIN_PERIODS = 3
 TIME_MAX_PERIODS = 50  # больше различных значений — режем на равные по числу строк периоды
 # Имя «про время»: слово в начале имени, после не-буквы или с заглавной после строчной (Year_Factor, sale_date,
 # SaleDate), но не update_count
+# Группы по колонке (#288): test — другие объекты (пациенты, молекулы), и их значения колонки в train не встречаются.
+# Пороги проверены на BeyondArena grouped: там новых значений в test 100%, строк на группу от ~2 до сотен
+GROUP_NEW_SHARE = 0.9  # столько строк test должны нести значение, которого нет в train
+GROUP_MIN_ROWS = 1.5  # строк train на значение в среднем: у идентификатора 1.0 — это не группы, а номера строк
+GROUP_MIN_GROUPS = 10  # меньше значений — это свойство (тип, регион), а не объекты; и фолдов по группам не хватит
 TIME_NAME_HINT = re.compile(
     r"(?:(?<![^\W\d_])|(?<=[a-zа-я])(?=[A-ZА-Я]))(?i:year|date|time|month|week|day|period|год|дата|время|месяц)"
 )
@@ -190,6 +195,56 @@ def _time_folds_ok(spec: TaskSpec, train: pd.DataFrame, column: str, features: l
     return True
 
 
+def _id_like(series: pd.Series) -> bool:
+    """Значения — имена или номера объектов: строки/категории или целые числа. Непрерывное число (температура года)
+    при сдвиге во времени тоже «новое» в test, но объектом не является (public/regression: погода года 6)."""
+    if not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return True
+    values = series.dropna().to_numpy(dtype=float)
+    return bool(np.all(values == np.round(values)))
+
+
+def group_candidates(train: pd.DataFrame, test: pd.DataFrame, features: list[str]) -> list[str]:
+    """Колонки, похожие на объекты, которые целиком ушли в test: в train значения повторяются, в test почти все новые.
+    Значения — имена или целые номера (_id_like), не непрерывные числа.
+
+    Порядок — от более крупных групп (меньше значений) к мелким: если test — новые больницы, то и пациенты в нём новые,
+    а честные фолды дают только больницы. При случайном разбиении повторяющиеся значения есть и в test — не кандидат.
+    """
+    found = []
+    for col in features:
+        if col not in test.columns:
+            continue
+        a, b = train[col].dropna(), test[col].dropna()
+        n_groups = a.nunique()
+        if len(b) == 0 or n_groups < GROUP_MIN_GROUPS or len(a) < GROUP_MIN_ROWS * n_groups or not _id_like(a):
+            continue
+        seen = set(a.astype(str).unique())
+        new_share = float((~b.astype(str).isin(seen)).mean())
+        if new_share >= GROUP_NEW_SHARE:
+            found.append((n_groups, col))
+    return [col for _, col in sorted(found)]
+
+
+def _group_folds_ok(spec: TaskSpec, train: pd.DataFrame, column: str, features: list[str]) -> bool:
+    """Схема group:<колонка> даёт хотя бы 2 фолда, а у классификации в каждом фолде больше одного класса."""
+    if spec.target not in train.columns:
+        return True
+    y = train[spec.target].to_numpy()
+    try:
+        folds = make_folds(spec, "group", column, train, features, y, 5, None)
+    except ValueError as err:
+        log.info("Схема group:%s не подходит: %s", column, err)
+        return False
+    if len(folds) < 2:
+        log.info("Схема group:%s не подходит: фолдов %d", column, len(folds))
+        return False
+    if _is_classification(spec) and any(len(np.unique(y[tr])) < 2 or len(np.unique(y[va])) < 2 for tr, va in folds):
+        log.info("Схема group:%s не подходит: в фолде один класс", column)
+        return False
+    return True
+
+
 def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame, test: pd.DataFrame) -> str:
     """Схема по умолчанию, похожая на то, как устроен скрытый test. Вызывать один раз до цикла (ADR 0008, D1).
 
@@ -197,8 +252,11 @@ def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame,
        Колонка — время, только если имя «про время», это даты строкой или значений не больше TIME_MAX_PERIODS:
        номер строки (record_no) на случайном разбиении тоже «продолжается» в test, но временем не является.
        Кандидат, у которого после выброса фолдов с одним классом осталось меньше 2 фолдов, пропускается.
-    2. Иначе ≥ DUPLICATE_SHARE строк train — полные дубликаты признаков → group:duplicates.
-    3. Иначе kfold / stratified.
+    2. Иначе есть колонка объектов, которые целиком ушли в test (в train значения повторяются, в test ≥ GROUP_NEW_SHARE
+       строк с новыми значениями) → group:<колонка> (#288). Идентификатор строки не повторяется в train — не группы.
+       Фолды не получаются (мало групп, один класс в фолде) — следующий кандидат, затем прежние правила.
+    3. Иначе ≥ DUPLICATE_SHARE строк train — полные дубликаты признаков → group:duplicates.
+    4. Иначе kfold / stratified.
     """
     features = profile.numeric_features + profile.categorical_features
     candidates = []
@@ -225,11 +283,16 @@ def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame,
         if _time_folds_ok(spec, train, col, features):
             log.info("Схема валидации: по времени (%s) — test лежит после train; кандидаты: %s", col, candidates)
             return f"time:{col}"
+    groups = group_candidates(train, test, features)
+    for col in groups:
+        if _group_folds_ok(spec, train, col, features):
+            log.info("Схема валидации: по группам (%s) — в test другие объекты; кандидаты: %s", col, groups)
+            return f"group:{col}"
     if features:
         share = float(pd.Series(duplicate_groups(train[features])).duplicated(keep=False).mean())
         if share >= DUPLICATE_SHARE:
             log.info("Схема валидации: группы дубликатов — %.0f%% строк train повторяются", share * 100)
             return f"group:{DUPLICATES}"
     scheme = default_scheme(spec)
-    log.info("Схема валидации: %s — времени и заметных дубликатов нет", scheme)
+    log.info("Схема валидации: %s — времени, групп и заметных дубликатов нет", scheme)
     return scheme

@@ -204,3 +204,72 @@ def test_duplicate_groups_without_text_conversion_of_numbers():
     assert len(set(groups)) == 3
     reference = pd.util.hash_pandas_object(df.astype(str), index=False).to_numpy()
     assert (pd.Series(groups).factorize()[0] == pd.Series(reference).factorize()[0]).all()
+
+
+def _objects(n_objects=60, per_object=8, seed=5, task_type=TaskType.REGRESSION):
+    """Объекты (пациенты) с несколькими строками; test — другие объекты целиком (#288)."""
+    rng = np.random.default_rng(seed)
+    obj = np.repeat(np.arange(n_objects), per_object)
+    df = pd.DataFrame({"patient": [f"p{o}" for o in obj], "x": rng.normal(size=len(obj))})
+    df["y"] = rng.normal(size=n_objects)[obj] + df["x"]
+    if task_type != TaskType.REGRESSION:
+        df["y"] = np.where(rng.random(n_objects)[obj] < 0.5, "a", "b")
+    # объекты test — случайные, а не последние по номеру (иначе целый номер — это «время»)
+    in_test = np.isin(obj, rng.permutation(n_objects)[: n_objects // 4])
+    train, test = df[~in_test].reset_index(drop=True), df[in_test].drop(columns="y").reset_index(drop=True)
+    return train, test
+
+
+@pytest.mark.parametrize("task_type", [TaskType.REGRESSION, TaskType.BINARY])
+def test_choose_validation_groups_when_test_has_other_objects(task_type):
+    train, test = _objects(task_type=task_type)
+    spec = _spec(task_type, ["a", "b"] if task_type != TaskType.REGRESSION else None)
+    assert choose_validation(spec, _profile(["x"], ["patient"]), train, test) == "group:patient"
+    # номера объектов целыми числами — тоже группы
+    train["patient"], test["patient"] = train["patient"].str[1:].astype(int), test["patient"].str[1:].astype(int)
+    assert choose_validation(spec, _profile(["x", "patient"]), train, test) == "group:patient"
+
+
+def test_row_identifier_is_not_groups():
+    """Номер строки в test тоже весь новый, но в train не повторяется — это не объекты."""
+    rng = np.random.default_rng(2)
+    train = pd.DataFrame({"row_no": np.arange(300), "x": rng.normal(size=300), "y": rng.normal(size=300)})
+    test = pd.DataFrame({"row_no": np.arange(300, 400), "x": rng.normal(size=100)})
+    assert choose_validation(_spec(), _profile(["row_no", "x"]), train, test) == "kfold"
+
+
+def test_seen_values_and_few_values_are_not_groups():
+    """Значения test встречаются в train — не группы; новых много, но значений мало (регион) — тоже нет."""
+    train, test = _objects()
+    test["patient"] = train["patient"].sample(len(test), replace=True, random_state=0).to_numpy()
+    assert choose_validation(_spec(), _profile(["x"], ["patient"]), train, test) == "kfold"
+    train, test = _objects(n_objects=8, per_object=40)  # 6 значений в train
+    assert choose_validation(_spec(), _profile(["x"], ["patient"]), train, test) == "kfold"
+
+
+def test_continuous_shifted_number_is_not_groups():
+    """Погода нового года в test — новые числа, но это не объект (public/regression без колонки времени)."""
+    rng = np.random.default_rng(4)
+    temp = np.repeat(rng.normal(size=40).round(4), 10)
+    train = pd.DataFrame({"temp": temp[:300], "x": rng.normal(size=300), "y": rng.normal(size=300)})
+    test = pd.DataFrame({"temp": temp[300:], "x": rng.normal(size=100)})
+    assert choose_validation(_spec(), _profile(["temp", "x"]), train, test) == "kfold"
+
+
+def test_groups_without_working_folds_fall_back():
+    """Каждый объект — один класс, а классов в train два, но один из них у единственного объекта: фолды по группам
+    с одним классом → прежнее поведение."""
+    train, test = _objects(task_type=TaskType.BINARY)
+    train["y"] = "a"
+    train.loc[train["patient"] == train["patient"].iloc[0], "y"] = "b"
+    spec = _spec(TaskType.BINARY, ["a", "b"])
+    assert choose_validation(spec, _profile(["x"], ["patient"]), train, test) == "stratified"
+
+
+def test_time_still_wins_over_groups():
+    """Дата, у которой в test только новые дни, — время, а не группы: время проверяется первым."""
+    days = np.repeat(pd.date_range("2020-01-01", periods=100, freq="D").strftime("%Y-%m-%d"), 4)
+    rng = np.random.default_rng(6)
+    train = pd.DataFrame({"sold": days[:300], "x": rng.normal(size=300), "y": rng.normal(size=300)})
+    test = pd.DataFrame({"sold": days[300:], "x": rng.normal(size=100)})
+    assert choose_validation(_spec(), _profile(["x"], ["sold"]), train, test) == "time:sold"
