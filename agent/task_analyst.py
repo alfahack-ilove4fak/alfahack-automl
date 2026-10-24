@@ -26,6 +26,7 @@ from runtime.log import get_logger
 log = get_logger("task_analyst")
 
 ANALYST_ENV = "AGENT_LLM_TASK"  # "0" — не спрашивать LLM
+APPLY_ENV = "AGENT_ANALYST_APPLY"  # "1" — LLM заменяет угаданные поля; по умолчанию только заметки (#276, штраф −8)
 MAX_TOKENS = 600
 MAX_WAIT = 90.0  # сек: разбор идёт до шага 0 (тривиального ответа) — дольше ждать нельзя
 MAX_TEXT_CHARS = 8000
@@ -41,6 +42,26 @@ SYSTEM = (
 
 def enabled() -> bool:
     return os.getenv(ANALYST_ENV, "1") != "0"
+
+
+def apply_enabled() -> bool:
+    """Может ли аналитик заменить угаданные target/id/метрику. По умолчанию нет: только заполнить пустое (#276)."""
+    return os.getenv(APPLY_ENV, "0") == "1"
+
+
+def _only_fill_gaps(accepted: dict[str, str], heuristic: dict[str, str | None]) -> tuple[dict[str, str], list[str]]:
+    """Без AGENT_ANALYST_APPLY=1 оставить только поля, где разбор по данным ничего не нашёл; прочее — в заметки.
+
+    Метрику не заполняем и при None: в parse_task она «угадана» только тогда, когда её нет в тексте, а на этот
+    случай есть метрика по типу задачи — иначе выключатель для метрики не срабатывал бы никогда (#276).
+    """
+    kept = {k: v for k, v in accepted.items() if k != "metric" and heuristic.get(k) is None}
+    notes = [
+        f"предлагает {key}={value} вместо {heuristic[key] or 'значения по умолчанию'} — не применено ({APPLY_ENV}=1 включает)"
+        for key, value in accepted.items()
+        if key not in kept
+    ]
+    return kept, notes
 
 
 def _columns(cols: list[str]) -> str:
@@ -182,6 +203,9 @@ def reconcile(
     if isinstance(constraints, list):
         notes += [" ".join(str(c).split())[:MAX_NOTE_CHARS] for c in constraints[:3] if str(c).strip()]
 
+    if not apply_enabled():
+        accepted, kept_back = _only_fill_gaps(accepted, heuristic)
+        notes += kept_back
     log.info("%s: %s", PREFIX, ", ".join(checks) or "поля не распознаны")
     for note in notes:
         log.info("%s: %s", PREFIX, note)
