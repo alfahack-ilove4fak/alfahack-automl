@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import pandas as pd
 
+from agent import confirm
 from agent.acceptance import accept
 from agent.critic import estimated_seconds, review
 from agent.fallback import fallback_hypotheses, is_fallback
@@ -60,8 +61,19 @@ def run_autoresearch(
     # Схему валидации выбрали один раз до цикла и посчитали в ней бейзлайн (#151, ADR 0008 D1, ADR 0013):
     # все гипотезы идут в ней же, иначе acceptance не сравнит их с бейзлайном
     validation = best[0].params.get("validation")
+    # AGENT_CONFIRM / AGENT_LLM_CONFIRM (#276): CV — на части train, новый лучший подтверждается на отложенном куске
+    confirm_mode = confirm.mode()
+    holdout, holdout_best = None, None
+    if confirm_mode:
+        best, train, holdout, holdout_best = _prepare_holdout(spec, profile, train, budget, best, validation)
+        baseline_seconds = best[1].fit_seconds
+    patience = confirm.patience()
+    since_accept = 0  # итераций с экспериментом подряд без нового лучшего
     llm_turn_at = time.monotonic() + budget.seconds_left() * LLM_TURN_SHARE
     for iteration in range(1, max_iterations + 1):
+        if patience is not None and since_accept >= patience:
+            log.info("%d итераций подряд без нового лучшего — останавливаю цикл (AGENT_CONFIRM, #276)", patience)
+            break
         # Не успеваем даже эксперимент ценой в бейзлайн — дальше пробовать нечего
         if not budget.has_time(needed_seconds=baseline_seconds * 1.2):
             log.info("Время на исходе — завершаю цикл после %d итераций", iteration - 1)
@@ -127,13 +139,22 @@ def run_autoresearch(
         run_hyp = with_validation(hyp, validation)
         result = run_experiment(spec, profile, run_hyp, train, budget)
         history.append((hyp, result))
+        since_accept += 1
         if result.status != ExperimentStatus.OK:
             log.info("  ✗ %s: %s", result.status.value, result.error)
             memory.record(hyp.id, False, result.status.value)
             continue
-        accepted, reason = accept(result, best[1], gib)
+        n_tested = sum(r.status == ExperimentStatus.OK for _, r in history[1:])  # сравнений с лучшим, без бейзлайна
+        # LLM — строже; AGENT_CONFIRM=1 — порог растёт с числом сравнений (#276)
+        accepted, reason = accept(result, best[1], gib, strict=hyp.source == "llm", n_tested=n_tested)
+        if accepted and holdout is not None and (confirm_mode == "all" or hyp.source == "llm"):
+            accepted, note, score = _confirm(spec, profile, run_hyp, result, train, holdout, holdout_best, budget)
+            reason = f"{reason}; {note}"
+            if accepted and score is not None:
+                holdout_best = score
         memory.record(hyp.id, accepted, reason)  # причина (t, k/5 фолдов) видна LLM в истории
         if accepted:
+            since_accept = 0
             log.info("  ✓ лучше: %.5f → %.5f — %s", best[1].mean_score, result.mean_score, reason)
             best = (run_hyp, result)
             on_new_best(run_hyp, result)
@@ -187,6 +208,53 @@ def _skipped(hyp: Hypothesis, spec: TaskSpec, reason: str) -> ExperimentResult:
     return ExperimentResult(
         hypothesis_id=hyp.id, status=ExperimentStatus.SKIPPED, metric_name=spec.metric.name, error=reason
     )
+
+
+SERVICE_PARAMS = ("_best_iteration", "_train_fraction", "_proba_weights")  # run_experiment считает их заново
+
+
+def _prepare_holdout(spec, profile, train, budget, best, validation):
+    """Отрезать кусок для подтверждения и пересчитать бейзлайн на остальной части (иначе фолды несравнимы).
+
+    → (лучший, часть для CV, кусок, метрика лучшего на куске). Не вышло — всё как было и кусок None.
+    """
+    try:
+        parts = confirm.split_holdout(spec, profile, train, validation)
+        if parts is None:
+            log.info("Подтверждение на отложенной части выключено: мало строк или периодов для куска")
+            return best, train, None, None
+        cv_part, holdout = parts
+        params = {k: v for k, v in best[0].params.items() if k not in SERVICE_PARAMS}
+        base = with_validation(best[0].model_copy(update={"params": params}), validation)
+        result = run_experiment(spec, profile, base, cv_part, budget)
+        if result.status != ExperimentStatus.OK:
+            log.warning("Бейзлайн на части train не посчитался (%s) — без подтверждения", result.error)
+            return best, train, None, None
+        score = confirm.holdout_score(spec, profile, base, cv_part, holdout)
+    except Exception:  # noqa: BLE001 — подтверждение — страховка, без него цикл работает как раньше
+        log.exception("Отложенная часть не подготовлена — цикл без подтверждения")
+        return best, train, None, None
+    log.info(
+        "Подтверждение (#276): CV на %d строках, отложено %d; бейзлайн CV %.5f, на куске %.5f",
+        len(cv_part), len(holdout), result.mean_score, score,
+    )  # fmt: skip
+    return (base, result), cv_part, holdout, score
+
+
+def _confirm(spec, profile, hyp, result, cv_part, holdout, holdout_best, budget):
+    """Подтвердить принятую по CV гипотезу на отложенном куске. → (принять, заметка, метрика на куске)."""
+    needed = (result.fit_seconds or 0.0) / max(1, len(result.fold_scores)) * 1.5  # одно обучение ≈ один фолд
+    if not budget.has_time(needed_seconds=needed):
+        return True, "на отложенной части не проверена: не успеет", None
+    try:
+        score = confirm.holdout_score(spec, profile, hyp, cv_part, holdout)
+    except Exception as exc:  # noqa: BLE001 — сбой проверки не должен стоить честной гипотезы
+        log.warning("Проверка на отложенной части упала (%s) — принимаем по CV", exc)
+        return True, "на отложенной части не проверена: сбой", None
+    gib = spec.metric.greater_is_better
+    if confirm.better(score, holdout_best, gib):
+        return True, f"подтверждена на отложенной части: {holdout_best:.5g} → {score:.5g}", score
+    return False, f"не подтверждена на отложенной части: {score:.5g} против {holdout_best:.5g}", score
 
 
 def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:

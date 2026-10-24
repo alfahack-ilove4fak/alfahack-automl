@@ -108,7 +108,7 @@ FEATURE_ANSWER = {"id": "ratio_ab", "title": "Отношение a к b", "ratio
 
 
 def test_propose_feature_hypothesis_takes_best(spec, profile, monkeypatch):
-    monkeypatch.delenv(FEATURE_ENV, raising=False)
+    monkeypatch.setenv(FEATURE_ENV, "1")
     best = Hypothesis(id="best", kind=HypothesisKind.HYPERPARAMS, title="b", params={"model": "xgboost"})
     h = propose_feature_hypothesis(spec, profile, [], FakeLLM(FEATURE_ANSWER), best, RunBudget())
     assert h.kind == HypothesisKind.FEATURES and h.code == RATIO
@@ -151,7 +151,7 @@ def run_loop(spec, profile, monkeypatch, llm, n_batches=4):
 
 
 def test_loop_asks_for_feature_code_after_first_batch_at_most_max(spec, profile, monkeypatch):
-    monkeypatch.delenv(FEATURE_ENV, raising=False)
+    monkeypatch.setenv(FEATURE_ENV, "1")
     llm = FakeLLM(FEATURE_ANSWER)
     seen = run_loop(spec, profile, monkeypatch, llm)
     features = [h for h in seen if h.kind == HypothesisKind.FEATURES]
@@ -168,9 +168,37 @@ def test_loop_without_feature_code_when_disabled(spec, profile, monkeypatch):
 
 def test_feature_code_only_after_playbook_exhausted(spec, profile, monkeypatch):
     """ADR 0014: пока в пачке есть гипотезы playbook, код признаков у LLM не просим — он идёт после playbook."""
-    monkeypatch.delenv(FEATURE_ENV, raising=False)
+    monkeypatch.setenv(FEATURE_ENV, "1")
     seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER), n_batches=3)
     kinds = [h.kind for h in seen]
     first_feature = kinds.index(HypothesisKind.FEATURES)
     assert all(h.source == "playbook" for h in seen[:first_feature])
     assert first_feature == 3  # все три пачки playbook прошли раньше кода признаков
+
+
+def test_feature_code_disabled_by_default(spec, profile, monkeypatch):
+    """#276: без переменной код признаков у LLM не просим — безопасное значение по умолчанию."""
+    monkeypatch.delenv(FEATURE_ENV, raising=False)
+    llm = FakeLLM(FEATURE_ANSWER)
+    assert propose_feature_hypothesis(spec, profile, [], llm, None) is None
+    assert llm.requests == 0
+    seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER))
+    assert all(h.kind != HypothesisKind.FEATURES for h in seen)
+
+
+def test_loop_accepts_llm_hypotheses_strictly(spec, profile, monkeypatch):
+    """#276: цикл передаёт в правило принятия strict=True только для гипотез от LLM."""
+    monkeypatch.setenv(FEATURE_ENV, "1")
+    calls, counts = [], []
+
+    def fake_accept(new, best, gib, strict=False, n_tested=1):
+        calls.append((new.hypothesis_id, strict))
+        counts.append(n_tested)
+        return False, "тест"
+
+    monkeypatch.setattr(loop, "accept", fake_accept)
+    seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER))
+    by_id = {h.id: h.source for h in seen}
+    assert any(strict for _, strict in calls) and any(not strict for _, strict in calls)
+    assert all(strict == (by_id[hid] == "llm") for hid, strict in calls)
+    assert counts == list(range(1, len(counts) + 1))  # каждое сравнение с лучшим увеличивает счётчик (#276)

@@ -4,7 +4,22 @@ import math
 
 import pytest
 
-from agent.acceptance import MIN_REL_GAIN, T_MIN, TIME_MIN_REL_GAIN, accept, corrected_t, fold_gains
+from agent.acceptance import (
+    LLM_GAIN_ENV,
+    LLM_T_ENV,
+    LLM_T_MIN,
+    LLM_TIME_MIN_REL_GAIN,
+    MIN_REL_GAIN,
+    MULTI_ENV,
+    T_MIN,
+    T_MULTI_MAX,
+    TIME_MIN_REL_GAIN,
+    accept,
+    corrected_t,
+    fold_gains,
+    multi_factor,
+    thresholds,
+)
 from interfaces.schemas import ExperimentResult, ExperimentStatus
 
 
@@ -170,3 +185,92 @@ def test_time_scheme_gain_above_time_threshold_accepted():
     assert corrected_t(fold_gains(new, best, greater_is_better=False)) < T_MIN
     ok, reason = accept(new, best, greater_is_better=False)
     assert ok and "последнем периоде" in reason
+
+
+# ---------- гипотезы LLM: строгий порог (#276, штраф −8) ----------
+# Улучшение на 5/5 фолдах с t ≈ 2.5: проходит обычный порог 2, но не порог LLM 3
+MID_T_GAINS = [0.3, 0.1, 0.25, 0.05, 0.2]
+MID_T_NEW = res([b - g for b, g in zip(BEST.fold_scores, MID_T_GAINS, strict=True)])
+
+
+def test_llm_strict_threshold_rejects_mid_t(monkeypatch):
+    monkeypatch.delenv(LLM_T_ENV, raising=False)
+    assert T_MIN <= corrected_t(MID_T_GAINS) < LLM_T_MIN
+    assert accept(MID_T_NEW, BEST, greater_is_better=False)[0]
+    ok, reason = accept(MID_T_NEW, BEST, greater_is_better=False, strict=True)
+    assert not ok and "порог 3" in reason and "LLM" in reason
+
+
+def test_llm_strict_threshold_from_env(monkeypatch):
+    monkeypatch.setenv(LLM_T_ENV, "2")  # как у playbook — прежнее поведение
+    assert accept(MID_T_NEW, BEST, greater_is_better=False, strict=True)[0]
+
+
+@pytest.mark.parametrize("garbage", ["", "abc", "-1", "nan", "inf"])
+def test_llm_thresholds_garbage_env_uses_defaults(monkeypatch, garbage):
+    monkeypatch.setenv(LLM_T_ENV, garbage)
+    monkeypatch.setenv(LLM_GAIN_ENV, garbage)
+    assert thresholds(strict=True) == (LLM_T_MIN, LLM_TIME_MIN_REL_GAIN)
+    assert thresholds(strict=False) == (T_MIN, TIME_MIN_REL_GAIN)
+
+
+def test_llm_time_scheme_needs_bigger_gain(monkeypatch):
+    monkeypatch.delenv(LLM_GAIN_ENV, raising=False)
+    gains = [0.2, 0.7, 1.4]  # +1.5%: выше обычного порога 1%, ниже порога LLM 2%
+    new, best = time_pair(gains)
+    assert accept(new, best, greater_is_better=False)[0]
+    assert not accept(new, best, greater_is_better=False, strict=True)[0]
+    new, best = time_pair([0.2, 1.8, 3.2])  # +3.5% — проходит и для LLM
+    assert accept(new, best, greater_is_better=False, strict=True)[0]
+
+
+# --- #276, гипотеза штрафа −7: поправка на число сравнений (AGENT_CONFIRM=1) ---
+
+
+@pytest.fixture
+def multi_on(monkeypatch):
+    monkeypatch.setenv(MULTI_ENV, "1")
+    for name in (LLM_T_ENV, LLM_GAIN_ENV):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_multi_off_by_default(monkeypatch):
+    monkeypatch.delenv(MULTI_ENV, raising=False)
+    assert multi_factor(300) == 1.0
+    assert thresholds(False, 300) == (T_MIN, TIME_MIN_REL_GAIN)
+
+
+@pytest.mark.parametrize("m, t_expected", [(1, 2.0), (20, 3.05), (100, 3.51), (300, 3.79), (10**6, T_MULTI_MAX)])
+def test_multi_threshold_grows_with_tested(multi_on, m, t_expected):
+    t_min, gain = thresholds(False, m)
+    assert t_min == pytest.approx(t_expected, abs=0.01)
+    assert gain == pytest.approx(TIME_MIN_REL_GAIN * t_min / T_MIN)
+
+
+def test_multi_llm_threshold_is_max_of_both(multi_on):
+    assert thresholds(True, 1) == (LLM_T_MIN, LLM_TIME_MIN_REL_GAIN)
+    t_min, gain = thresholds(True, 300)  # 3.79 > 3: поправка строже порога LLM
+    assert t_min == pytest.approx(3.79, abs=0.01) and gain == LLM_TIME_MIN_REL_GAIN  # 2% строже, чем 1% · 1.89
+
+
+def test_multi_rejects_late_marginal_gain(multi_on):
+    """t ≈ 2.6 проходит в начале прогона и не проходит после 100 сравнений."""
+    gains = [0.3, 0.1, 0.25, 0.05, 0.2]
+    new = res([b - g for b, g in zip(BEST.fold_scores, gains, strict=True)])
+    assert accept(new, BEST, greater_is_better=False, n_tested=1)[0]
+    ok, reason = accept(new, BEST, greater_is_better=False, n_tested=100)
+    assert not ok and "m=100" in reason
+
+
+def test_multi_strong_gain_still_accepted_late(multi_on):
+    new = res([f - 0.19 + d for f, d in zip(BEST.fold_scores, [0.02, -0.03, 0.01, 0.0, -0.01], strict=True)])
+    assert accept(new, BEST, greater_is_better=False, n_tested=300)[0]
+
+
+def test_multi_short_time_scheme_does_not_freeze(multi_on):
+    """3 фолда: time-правило работает и после 300 сравнений, если выигрыш ≥ 1% · 3.79/2 ≈ 1.9%."""
+    new, best = time_pair([0.2, 1.8, 3.2])  # +3.5%
+    assert accept(new, best, greater_is_better=False, n_tested=300)[0]
+    new, best = time_pair([0.2, 0.6, 1.4])  # +1.5%: проходит в начале, но не после 300 сравнений
+    assert accept(new, best, greater_is_better=False, n_tested=1)[0]
+    assert not accept(new, best, greater_is_better=False, n_tested=300)[0]
