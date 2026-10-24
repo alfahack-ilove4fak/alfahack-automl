@@ -69,7 +69,7 @@ from interfaces.schemas import (
     TaskType,
 )
 from ml.class_weights import cross_fit_scores, fit_weights
-from ml.features import apply_feature_ops, parse_feature_ops
+from ml.features import apply_feature_ops, parse_feature_ops, with_history_time
 from ml.profiling import make_matrix
 from ml.validation import make_folds, parse_validation
 from runtime.budget import used_ram_mb
@@ -733,6 +733,7 @@ def run_experiment(
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scheme, column = parse_validation(params.get("validation"), spec)
+        ops = with_history_time(ops, column if scheme == "time" else None)
         features = profile.numeric_features + profile.categorical_features
         if params.get("optuna") and params.get("ensemble"):
             raise ValueError("optuna и ensemble вместе не поддерживаются: подбор идёт для одной модели")
@@ -948,7 +949,8 @@ def fit_predict_final(
     x_test = _hide_unseen(hypothesis, x, x_test)
     y = _encode_target(spec, train[spec.target])
     y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
-    ops = params.get("feature_ops")
+    scheme, column = parse_validation(params.get("validation"), spec)
+    ops = with_history_time(params.get("feature_ops"), column if scheme == "time" else None)
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
     n_estimators = _final_estimators(params.get("_best_iteration"), _trees_scale(params))

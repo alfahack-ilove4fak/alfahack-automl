@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ml.features import ObjectHistory, apply_feature_ops, object_history_candidates, parse_feature_ops
+from ml.features import (
+    ObjectHistory,
+    apply_feature_ops,
+    object_history_candidates,
+    parse_feature_ops,
+    with_history_time,
+)
 
 
 def _panel(n_objects: int = 60, n_periods: int = 5, seed: int = 0) -> tuple[pd.DataFrame, np.ndarray]:
@@ -94,3 +100,26 @@ def test_bad_params_fail_before_training():
     x, y = _panel()
     with pytest.raises(ValueError):
         ObjectHistory(key=["missing"], time="Year_Factor").fit(x, y, classification=False)
+
+
+def test_time_hint_from_time_scheme_is_used():
+    """Схема time:<колонка> подсказывает время, даже если имя колонки не «про время»."""
+    x, y = _panel()
+    x = x.rename(columns={"Year_Factor": "season_no"})  # имя без слова «год/дата» — само правило его не взяло бы
+    assert object_history_candidates(x) == []
+    op = ObjectHistory(time_hint="season_no").fit(x, y, classification=False)
+    assert op.time == "season_no"
+    assert "floor_area" in op.key
+
+
+def test_missing_time_hint_falls_back_to_search():
+    x, y = _panel()
+    op = ObjectHistory(time_hint="no_such_column").fit(x, y, classification=False)
+    assert op.time == "Year_Factor"
+
+
+def test_with_history_time_fills_only_object_history():
+    ops = with_history_time(["pair_ops", {"op": "object_history", "key": ["floor_area"]}], "Year Factor")
+    assert ops == [("pair_ops", {}), ("object_history", {"key": ["floor_area"], "time_hint": "Year Factor"})]
+    assert with_history_time(["object_history"], None) == [("object_history", {})]
+    assert parse_feature_ops(ops) == ops  # разобранный список принимается повторно

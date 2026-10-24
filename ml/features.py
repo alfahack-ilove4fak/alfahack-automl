@@ -21,6 +21,7 @@ fit видит только train-часть фолда (в CV) или весь 
 
 Формат params.feature_ops: имя, список имён или словари с параметрами, например
   feature_ops: [missing_flags, {op: target_encoding, smoothing: 50}, {op: pair_ops, top_k: 3}]
+При схеме валидации time:<колонка> object_history без явного time берёт эту колонку (with_history_time).
 Неизвестная операция, параметр или его значение → ошибка до обучения → гипотеза получает FAILED.
 """
 
@@ -306,14 +307,15 @@ class ObjectHistory:
     временем строго меньше: текущая строка, её период и будущее не видны ни в train, ни в валидации, ни в test.
     """
 
-    def __init__(self, key: list[str] | str | None = None, time: str | None = None):
+    def __init__(self, key: list[str] | str | None = None, time: str | None = None, time_hint: str | None = None):
+        """key, time — явный выбор (LLM): нет колонки → ошибка. time_hint — колонка схемы time:, если она есть."""
         if isinstance(key, str):
             key = [key]
         if key is not None and (not isinstance(key, list | tuple) or not key):
             raise ValueError("object_history: key — непустой список колонок")
         if time is not None and not isinstance(time, str):
             raise ValueError("object_history: time — имя колонки")
-        self.key_param, self.time_param = (list(key) if key else None), time
+        self.key_param, self.time_param, self.time_hint = (list(key) if key else None), time, time_hint
 
     @staticmethod
     def _column(x: pd.DataFrame, name: str) -> str | None:
@@ -325,23 +327,24 @@ class ObjectHistory:
 
     def fit(self, x: pd.DataFrame, y: np.ndarray, classification: bool) -> ObjectHistory:
         self.key, self.time = [], None
-        if self.key_param or self.time_param:
-            time = self._column(x, self.time_param) if self.time_param else None
-            key = [self._column(x, k) for k in self.key_param or []]
-            if (self.time_param and time is None) or None in key:
-                raise ValueError(f"object_history: нет колонок key={self.key_param} time={self.time_param}")
-            if not key or time is None:
-                # Задано только одно из двух — второе ищем правилом
-                found = [c for c in object_history_candidates(x) if time is None or c["time"] == time]
-                found = [c for c in found if not key or c["key"] == key] or found
-                if not found:
-                    return self
-                key, time = key or found[0]["key"], time or found[0]["time"]
-        else:
-            found = object_history_candidates(x)
+        time = self._column(x, self.time_param) if self.time_param else None
+        key = [self._column(x, k) for k in self.key_param or []]
+        if (self.time_param and time is None) or None in key:
+            raise ValueError(f"object_history: нет колонок key={self.key_param} time={self.time_param}")
+        if time is None and self.time_hint:
+            time = self._column(x, self.time_hint)  # колонки схемы может не быть среди признаков — тогда ищем сами
+        if time is None:
+            found = [c for c in object_history_candidates(x) if not key or c["key"] == key]
             if not found:
                 return self
-            key, time = found[0]["key"], found[0]["time"]
+            time = found[0]["time"]
+            key = key or found[0]["key"]
+        elif not key:
+            head = x.iloc[:HISTORY_SEARCH_ROWS]
+            t_head = _history_times(head[time])
+            key = _search_key(head, t_head, time)[0] if t_head is not None else []
+            if not key:
+                return self
         t = _history_times(x[time])
         if t is None:
             return self
@@ -407,6 +410,8 @@ def parse_feature_ops(raw) -> list[tuple[str, dict]]:
         raise ValueError(f"feature_ops: ожидается имя или список, получено {raw!r}")
     ops, unknown = [], []
     for item in raw:
+        if isinstance(item, tuple) and len(item) == 2:  # уже разобранная (имя, параметры) — из with_history_time
+            item = {"op": item[0], **item[1]}
         if isinstance(item, str):
             name, options = item, {}
         elif isinstance(item, dict) and "op" in item:
@@ -423,6 +428,20 @@ def parse_feature_ops(raw) -> list[tuple[str, dict]]:
     if unknown:
         raise ValueError(f"неизвестные feature_ops {unknown}, доступны: {sorted(FEATURE_OPS)}")
     return ops
+
+
+def with_history_time(raw, time_column: str | None) -> list[tuple[str, dict]]:
+    """Операциям object_history без явного time — колонка времени из схемы валидации time:<колонка>.
+
+    История по тому же времени, по которому режутся фолды: «прошлое» признака и «прошлое» валидации совпадают.
+    """
+    ops = parse_feature_ops(raw)
+    if not time_column:
+        return ops
+    return [
+        (name, {**options, "time_hint": time_column}) if name == "object_history" else (name, options)
+        for name, options in ops
+    ]
 
 
 def apply_feature_ops(
