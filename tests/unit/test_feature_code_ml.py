@@ -184,3 +184,19 @@ def test_feature_code_disabled_by_default(spec, profile, monkeypatch):
     assert llm.requests == 0
     seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER))
     assert all(h.kind != HypothesisKind.FEATURES for h in seen)
+
+
+def test_loop_accepts_llm_hypotheses_strictly(spec, profile, monkeypatch):
+    """#276: цикл передаёт в правило принятия strict=True только для гипотез от LLM."""
+    monkeypatch.setenv(FEATURE_ENV, "1")
+    calls = []
+
+    def fake_accept(new, best, gib, strict=False):
+        calls.append((new.hypothesis_id, strict))
+        return False, "тест"
+
+    monkeypatch.setattr(loop, "accept", fake_accept)
+    seen = run_loop(spec, profile, monkeypatch, FakeLLM(FEATURE_ANSWER))
+    by_id = {h.id: h.source for h in seen}
+    assert any(strict for _, strict in calls) and any(not strict for _, strict in calls)
+    assert all(strict == (by_id[hid] == "llm") for hid, strict in calls)

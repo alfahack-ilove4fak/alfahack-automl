@@ -4,7 +4,19 @@ import math
 
 import pytest
 
-from agent.acceptance import MIN_REL_GAIN, T_MIN, TIME_MIN_REL_GAIN, accept, corrected_t, fold_gains
+from agent.acceptance import (
+    LLM_GAIN_ENV,
+    LLM_T_ENV,
+    LLM_T_MIN,
+    LLM_TIME_MIN_REL_GAIN,
+    MIN_REL_GAIN,
+    T_MIN,
+    TIME_MIN_REL_GAIN,
+    accept,
+    corrected_t,
+    fold_gains,
+    thresholds,
+)
 from interfaces.schemas import ExperimentResult, ExperimentStatus
 
 
@@ -170,3 +182,40 @@ def test_time_scheme_gain_above_time_threshold_accepted():
     assert corrected_t(fold_gains(new, best, greater_is_better=False)) < T_MIN
     ok, reason = accept(new, best, greater_is_better=False)
     assert ok and "последнем периоде" in reason
+
+
+# ---------- гипотезы LLM: строгий порог (#276, штраф −8) ----------
+# Улучшение на 5/5 фолдах с t ≈ 2.5: проходит обычный порог 2, но не порог LLM 3
+MID_T_GAINS = [0.3, 0.1, 0.25, 0.05, 0.2]
+MID_T_NEW = res([b - g for b, g in zip(BEST.fold_scores, MID_T_GAINS, strict=True)])
+
+
+def test_llm_strict_threshold_rejects_mid_t(monkeypatch):
+    monkeypatch.delenv(LLM_T_ENV, raising=False)
+    assert T_MIN <= corrected_t(MID_T_GAINS) < LLM_T_MIN
+    assert accept(MID_T_NEW, BEST, greater_is_better=False)[0]
+    ok, reason = accept(MID_T_NEW, BEST, greater_is_better=False, strict=True)
+    assert not ok and "порог 3" in reason and "LLM" in reason
+
+
+def test_llm_strict_threshold_from_env(monkeypatch):
+    monkeypatch.setenv(LLM_T_ENV, "2")  # как у playbook — прежнее поведение
+    assert accept(MID_T_NEW, BEST, greater_is_better=False, strict=True)[0]
+
+
+@pytest.mark.parametrize("garbage", ["", "abc", "-1", "nan", "inf"])
+def test_llm_thresholds_garbage_env_uses_defaults(monkeypatch, garbage):
+    monkeypatch.setenv(LLM_T_ENV, garbage)
+    monkeypatch.setenv(LLM_GAIN_ENV, garbage)
+    assert thresholds(strict=True) == (LLM_T_MIN, LLM_TIME_MIN_REL_GAIN)
+    assert thresholds(strict=False) == (T_MIN, TIME_MIN_REL_GAIN)
+
+
+def test_llm_time_scheme_needs_bigger_gain(monkeypatch):
+    monkeypatch.delenv(LLM_GAIN_ENV, raising=False)
+    gains = [0.2, 0.7, 1.4]  # +1.5%: выше обычного порога 1%, ниже порога LLM 2%
+    new, best = time_pair(gains)
+    assert accept(new, best, greater_is_better=False)[0]
+    assert not accept(new, best, greater_is_better=False, strict=True)[0]
+    new, best = time_pair([0.2, 1.8, 3.2])  # +3.5% — проходит и для LLM
+    assert accept(new, best, greater_is_better=False, strict=True)[0]
