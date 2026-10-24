@@ -110,6 +110,10 @@ def true_metric(meta: dict, answers: pd.DataFrame, sub: pd.DataFrame, classes: l
     ys, ps = y.astype(str).to_numpy(), p.astype(str).to_numpy()
     if m == "balanced_accuracy":
         return float(skm.balanced_accuracy_score(ys, ps))
+    if m == "accuracy":
+        return float(skm.accuracy_score(ys, ps))
+    if m == "f1_macro":
+        return float(skm.f1_score(ys, ps, average="macro", zero_division=0))
     if m == "qwk":
         return float(skm.cohen_kappa_score(y.astype(int), pd.to_numeric(p).round().astype(int), weights="quadratic"))
     if m == "f2":
