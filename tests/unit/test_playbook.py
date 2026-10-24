@@ -60,7 +60,7 @@ def test_playbook_item_schema(item):
     HypothesisKind(item["kind"])
     assert item["title"] and item["rationale"]
     assert set(item.get("task_types", TASK_TYPES)) <= TASK_TYPES
-    assert item.get("requires") in (None, "categorical", "imbalance")
+    assert item.get("requires") in (None, "categorical", "imbalance", "metric_objective")
     assert (
         set(item["params"]) <= SUPPORTED_PARAMS
     ), f"новые ключи согласовать с ml: {set(item['params']) - SUPPORTED_PARAMS}"

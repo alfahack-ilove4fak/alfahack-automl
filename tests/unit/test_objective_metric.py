@@ -16,7 +16,13 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
-from ml.experiment import _objective_params, fit_predict_final, metric_objective_kind, run_experiment
+from ml.experiment import (
+    _objective_params,
+    fit_predict_final,
+    has_metric_objective,
+    metric_objective_kind,
+    run_experiment,
+)
 
 
 def _spec(metric: str, task_type: TaskType = TaskType.REGRESSION) -> TaskSpec:
@@ -143,3 +149,30 @@ def test_wrong_objective_value_is_failed_not_crash():
     train, _, profile = _skewed()
     result = run_experiment(_spec("mae"), profile, _hyp(objective="l1"), train, RunBudget())
     assert result.status == ExperimentStatus.FAILED and "objective" in result.error
+
+
+@pytest.mark.parametrize(
+    "metric, model, expected",
+    [
+        ("pinball@0.1", "xgboost", True),
+        ("pinball@0.1", "catboost", True),
+        ("mape", "xgboost", False),  # у XGBoost нет цели MAPE — был бы повтор на L2
+        ("mape", "catboost", True),
+        ("rmse", "lightgbm", False),
+        ("rmsle", "catboost", False),
+        ("mae", "linear", False),
+    ],
+)
+def test_has_metric_objective(metric, model, expected):
+    assert has_metric_objective(_spec(metric), {"model": model, "objective": "metric"}) is expected
+
+
+def test_playbook_metric_objective_only_when_it_changes_something():
+    """requires: metric_objective — гипотеза берётся, только если у метрики есть своя цель для её модели (#237)."""
+    from agent.hypotheses import _applies
+
+    profile = DataProfile(n_train=10, n_test=5, numeric_features=["a"], categorical_features=[])
+    item = {"task_types": ["regression"], "requires": "metric_objective", "params": {"model": "xgboost"}}
+    assert _applies(item, _spec("pinball@0.9"), profile)
+    assert not _applies(item, _spec("mape"), profile)
+    assert not _applies(item, _spec("rmse"), profile)

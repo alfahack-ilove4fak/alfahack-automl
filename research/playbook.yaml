@@ -8,7 +8,7 @@
 #   title       — что делаем, по-русски
 #   rationale   — почему это может помочь
 #   task_types  — [regression, binary, multiclass]; нет поля — подходит всем
-#   requires    — categorical | imbalance (необязательно)
+#   requires    — categorical | imbalance | metric_objective (у метрики есть своя цель для модели params, #237)
 #   params      — то, что понимает ml/experiment.py (список поддерживаемых — в его docstring)
 #
 # v2 (22.10): порядок — по стенду в схеме агента (choose_validation + acceptance.accept) на 10 задачах
@@ -16,7 +16,8 @@
 # (цифры, ложные принятия и что не вошло — docs/research/playbook-v2.md). Новое: модели xgboost / catboost / hist_gb,
 # lgbm_default (страховка, #206) и комбинации с xgboost. xgboost_balanced_proba_weights — строго после
 # balanced_proba_weights: против бейзлайна на payments её принимают зря, против balanced_proba_weights — нет.
-# objective_metric (#255) — цель под метрику с любым α, первой в блоке; objective_* (#237) — запасные: цель обучения под метрику, только регрессия; стенд на 8 задачах — ложных принятий нет
+# objective_metric (#255) и {xgboost,catboost}_objective_metric (#237) — цель под метрику с любым α, первыми в блоке, только
+# когда у метрики есть своя цель для модели (requires: metric_objective); objective_* (#237) — запасные: цель обучения под метрику, только регрессия; стенд на 8 задачах — ложных принятий нет
 # (неподходящая цель видна в CV хуже и отклоняется). Порядок блока — по стенду (docs/research/objective-metric.md).
 # Цикл проверяет гипотезы по отдельности и не складывает выигрыши (issue #87), поэтому есть комбинации.
 # Проверка: uv run pytest tests/unit/test_playbook.py; стенд: uv run python research/bench_playbook.py
@@ -64,7 +65,24 @@ hypotheses:
     title: LightGBM с целью обучения под метрику задачи
     rationale: Цель подбирается по метрике (ml/experiment.METRIC_OBJECTIVES) — pinball@α → квантиль с этим α, MAE/WAPE → L1, MAPE, Huber, девиансы; у метрик без своей цели (RMSE) — L2, как бейзлайн. Покрывает любые α, в отличие от objective_quantile_90 (#237, #255)
     task_types: [regression]
+    requires: metric_objective
     params: {model: lightgbm, objective: metric}
+
+  - id: xgboost_objective_metric
+    kind: model
+    title: XGBoost с целью обучения под метрику задачи
+    rationale: Другой бустинг на той же потере, что и метрика (quantile α, L1, Huber, Poisson/Gamma/Tweedie); у XGBoost нет цели MAPE — на MAPE гипотеза не берётся (#237)
+    task_types: [regression]
+    requires: metric_objective
+    params: {model: xgboost, objective: metric}
+
+  - id: catboost_objective_metric
+    kind: model
+    title: CatBoost с целью обучения под метрику задачи
+    rationale: CatBoost умеет почти все цели (quantile α, MAE, MAPE, Huber, Poisson, Tweedie) и сильнее на категориях; комбинация «модель + цель», цикл сам выигрыши не складывает (#87, #237)
+    task_types: [regression]
+    requires: metric_objective
+    params: {model: catboost, objective: metric}
 
   - id: objective_poisson
     kind: hyperparams

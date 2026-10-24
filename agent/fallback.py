@@ -3,6 +3,8 @@
 Без них агент выходил из цикла через 4–8 минут из 180: «Гипотезы закончились». Набор и порядок — список danil
 (стенд на 10 задачах, комментарий в #200), дальше — направления без предела по числу, чтобы время не простаивало.
 Все строятся от текущего лучшего (его предобработка и код признаков сохраняются) и работают без LLM:
+  0. цель обучения под метрику (objective: metric, #237) для лучшей модели, xgboost и catboost — только если у
+     метрики есть своя цель для модели (pinball, MAE, MAPE, Huber, девиансы), на RMSE направления нет;
   1. другие модели и ансамбли: xgboost → ансамбль [лучшая, LightGBM/XGBoost] → catboost → Optuna лучшей модели →
      ансамбль из трёх → hist_gb → Optuna LightGBM;
   2. комбинации «почти прошедших»: лучше текущего лучшего на ≥ NEAR_MIN_WINS фолдах, но правило принятия
@@ -24,7 +26,14 @@ import os
 from itertools import combinations
 
 from agent.acceptance import fold_gains
-from agent.hypotheses import DEFAULT_MODEL, _applies, load_playbook, params_key, with_task_defaults
+from agent.hypotheses import (
+    DEFAULT_MODEL,
+    _applies,
+    _metric_objective_differs,
+    load_playbook,
+    params_key,
+    with_task_defaults,
+)
 from interfaces.schemas import (
     DataProfile,
     ExperimentResult,
@@ -140,7 +149,9 @@ def _fits(item: dict, spec: TaskSpec, profile: DataProfile | None) -> bool:
     if profile is not None:
         return _applies(item, spec, profile)
     types = item.get("task_types")
-    return not types or spec.task_type.value in types
+    if types and spec.task_type.value not in types:
+        return False
+    return item.get("requires") != "metric_objective" or _metric_objective_differs(spec, item.get("params") or {})
 
 
 class _Directions:
@@ -168,6 +179,23 @@ class _Directions:
                 "другое семейство моделей с тем, что уже помогло лучшему (#200)",
                 {**self.common, "model": model},
             )
+
+    def metric_objective(self, model: str, spec: TaskSpec) -> None:
+        """Модель с целью обучения под метрику (#237): pinball −71%, MAPE −28% на стенде. Только если цель своя."""
+        if model == self.model and not self.single:
+            return
+        base = self.tuned if model == self.model else {**self.common, "model": model}
+        params = {**base, "objective": "metric"}
+        if self.base.get("objective") == "metric" and model == self.model:
+            return  # у лучшего цель уже под метрику
+        if not _metric_objective_differs(spec, params):
+            return  # у метрики нет своей цели для этой модели — был бы повтор на L2
+        self.add(
+            HypothesisKind.HYPERPARAMS,
+            f"{model} с целью обучения под метрику {spec.metric.name}",
+            "самый дешёвый рычаг качества: модель учится на той же потере, по которой её оценят (#237)",
+            params,
+        )
 
     def ensemble(self, size: int) -> None:
         if not self.single:
@@ -252,9 +280,13 @@ def fallback_hypotheses(
     if os.getenv(FALLBACK_ENV, "1") == "0":
         return []
     d = _Directions(best[0], budget)
+    # 0. цель под метрику (#237) — дешевле и сильнее смены модели там, где L2 не та потеря; на RMSE не добавляется
+    d.metric_objective(d.model, spec)
+    d.metric_objective("xgboost", spec)
     # 1. модели и ансамбли — порядок danil по стенду (#200): дешёвые и сильные раньше
     d.other_model("xgboost")
     d.ensemble(2)
+    d.metric_objective("catboost", spec)
     d.other_model("catboost")
     d.optuna(d.model)
     d.ensemble(3)

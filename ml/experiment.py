@@ -228,6 +228,19 @@ def metric_objective_kind(spec: TaskSpec, params: dict) -> tuple[str, float] | N
     return kind, float(level) if level else 0.5
 
 
+def has_metric_objective(spec: TaskSpec, params: dict) -> bool:
+    """objective="metric" что-то меняет для модели params.model: у метрики есть своя цель и модель её умеет.
+
+    Иначе гипотеза учится на L2 — та же модель без ключа, и гоняющий её агент тратит время на повтор (#237).
+    Таргет здесь не смотрим: Poisson на отрицательных узнаётся только при обучении.
+    """
+    resolved = metric_objective_kind(spec, {**params, "objective": "metric"})
+    if resolved is None:
+        return False
+    model = str(params.get("model") or "lightgbm").lower()
+    return model in _objective_by_model(*resolved)
+
+
 def _objective_params(spec: TaskSpec, hypothesis: Hypothesis, model: str, y: np.ndarray | None) -> dict:
     """Параметры цели под метрику для модели model (или {}): см. params.objective в шапке модуля.
 

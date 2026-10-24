@@ -88,9 +88,20 @@ def _applies(item: dict, spec: TaskSpec, profile: DataProfile) -> bool:
         return False
     if item.get("requires") == "categorical" and not profile.categorical_features:
         return False
+    if item.get("requires") == "metric_objective":
+        return _metric_objective_differs(spec, item.get("params") or {})
     if item.get("requires") == "imbalance" and spec.task_type != TaskType.REGRESSION:
         return profile.target_summary.get("imbalance_ratio", 1) > 3
     return item.get("requires") != "imbalance"
+
+
+def _metric_objective_differs(spec: TaskSpec, params: dict) -> bool:
+    """У метрики есть своя цель для модели гипотезы (#237): иначе objective: metric — повтор той же модели на L2."""
+    try:
+        from ml.experiment import has_metric_objective
+    except Exception:  # noqa: BLE001 — без ml не отсекаем: лишняя гипотеза лучше потерянной
+        return True
+    return has_metric_objective(spec, params)
 
 
 DEFAULT_MODEL = "lightgbm"  # как ml/experiment.py: без model — LightGBM

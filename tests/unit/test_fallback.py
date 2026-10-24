@@ -274,3 +274,35 @@ def test_loop_rebuilds_fallback_from_new_best(spec, monkeypatch):
     # второй шёл уже от xgboost: ансамбль начинается с него, а не с LightGBM прошлого лучшего
     assert ran[1].params["ensemble"][0] == "xgboost"
     assert len(ran) > loop.FALLBACK_CHUNK  # порций было несколько
+
+
+def _metric_spec(spec, metric):
+    return spec.model_copy(update={"metric": spec.metric.model_copy(update={"name": metric})})
+
+
+def test_metric_objective_first_for_best_xgboost_catboost(spec):
+    """#237: цель под метрику — первой у лучшей модели и xgboost, у catboost — перед сменой модели на catboost."""
+    best = (hyp("best", model="lightgbm"), result("b", BASE))
+    hyps = fallback_hypotheses(_metric_spec(spec, "pinball@0.1"), [best], best, RunBudget(total_seconds=3600))
+    objective = [(i, h.params["model"]) for i, h in enumerate(hyps) if h.params.get("objective") == "metric"]
+    assert objective[:2] == [(0, "lightgbm"), (1, "xgboost")]
+    catboost = next(i for i, m in objective if m == "catboost")
+    assert catboost < next(i for i, h in enumerate(hyps) if _short(h) == "catboost" and "objective" not in h.params)
+
+
+def test_metric_objective_skipped_without_own_objective(spec):
+    """RMSE учится на L2 и так; у XGBoost нет цели MAPE — повтор на L2 не добавляем."""
+    best = (hyp("best", model="lightgbm"), result("b", BASE))
+    rmse = fallback_hypotheses(spec, [best], best, RunBudget(total_seconds=3600))
+    assert not any(h.params.get("objective") == "metric" for h in rmse)
+    mape = fallback_hypotheses(_metric_spec(spec, "mape"), [best], best, RunBudget(total_seconds=3600))
+    models = {h.params["model"] for h in mape if h.params.get("objective") == "metric" and "model" in h.params}
+    assert models == {"lightgbm", "catboost"}
+
+
+def test_metric_objective_not_repeated_for_best_with_it(spec):
+    best = (hyp("best", model="xgboost", objective="metric"), result("b", BASE))
+    hyps = fallback_hypotheses(_metric_spec(spec, "mae"), [best], best, RunBudget(total_seconds=3600))
+    assert {"model": "xgboost", "objective": "metric"} not in [h.params for h in hyps]
+    # цель лучшего (objective) — его предобработка: её наследуют и другие модели
+    assert all(h.params.get("objective") == "metric" for h in hyps)
