@@ -144,12 +144,15 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
             id_column = ROW_ID_COLUMN
             notes.append("В шаблоне ответа нет id: строки ответа идут в порядке test.csv")
         if target not in train_cols:
-            # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
+            # В шаблоне не target: либо «колонка на класс» (id, класс_1, …, класс_k) — вероятности классов,
+            # либо одна колонка ответа с другим именем (id, prediction) — solution.to_template пишет в неё (#276)
             target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
             guessed.add("target")
-            notes.append(
-                f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
-            )
+            answer_cols = [c for c in submission_columns if c != id_column]
+            if len(answer_cols) == 1:
+                notes.append(f"Колонка ответа «{answer_cols[0]}» названа не как таргет: target={target}")
+            else:
+                notes.append(f"Ответ — колонка на класс ({len(answer_cols)} шт.): нужны вероятности, target={target}")
     else:
         target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
         id_column = _guess_id(test_cols, dictionary, files["test"])
