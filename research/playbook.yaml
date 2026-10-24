@@ -20,9 +20,16 @@
 # когда у метрики есть своя цель для модели (requires: metric_objective); objective_* (#237) — запасные: цель обучения под метрику, только регрессия; стенд на 8 задачах — ложных принятий нет
 # (неподходящая цель видна в CV хуже и отклоняется). Порядок блока — по стенду (docs/research/objective-metric.md).
 # Цикл проверяет гипотезы по отдельности и не складывает выигрыши (issue #87), поэтому есть комбинации.
+# drop_group_column (#294) — первой: запускается только при схеме group:<колонка>, иначе критик пропускает её без запуска.
 # Проверка: uv run pytest tests/unit/test_playbook.py; стенд: uv run python research/bench_playbook.py
 
 hypotheses:
+  - id: drop_group_column
+    kind: preprocessing
+    title: Без колонки групп в признаках
+    rationale: Схема group:<колонка> — в test другие объекты, все значения колонки новые; модель на ней переобучается. BeyondArena grouped — без неё на test лучше в 4 из 5 (video_game rmse 0.110 → 0.020, sat11 3.78 → 2.07); решает CV по группам. При другой схеме агент её пропускает (#294)
+    params: {model: lightgbm, drop_group_column: true}
+
   - id: balanced_proba_weights
     kind: hyperparams
     title: Веса классов + множители вероятностей под метрику по меткам

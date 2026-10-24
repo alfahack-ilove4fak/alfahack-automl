@@ -33,6 +33,9 @@
   ensemble       — список моделей, прогноз — среднее их прогнозов (вероятностей у классификации): ["lightgbm", "xgboost"]
                    или [{model: xgboost, model_params: {...}}, ...]; у каждой своя ранняя остановка и число деревьев.
                    Остальные params (log_target, class_weight, feature_ops, proba_weights…) — общие для всех моделей
+  drop_group_column — true: при схеме group:<колонка> колонка групп не идёт в признаки (#294). В test все её
+                   значения новые, а модель на ней переобучается: BeyondArena grouped — без неё на test лучше в 4 из 5
+                   (video_game rmse 0.110 → 0.020). При другой схеме не действует (агент такую гипотезу пропускает)
   objective      — "metric": цель обучения под метрику задачи для выбранной модели (регрессия; #186, #237): MAE/MedAE/
                    WAPE → L1, pinball@α → квантиль α, Huber → Huber δ=1, MAPE → MAPE, девиансы → Poisson/Gamma/Tweedie
                    (METRIC_OBJECTIVES). Нет своей цели у метрики или модели, обучение на log1p(y), цель задана в
@@ -70,7 +73,7 @@ from interfaces.schemas import (
 from ml.class_weights import cross_fit_scores, fit_weights
 from ml.features import apply_feature_ops, parse_feature_ops
 from ml.profiling import make_matrix
-from ml.validation import make_folds, parse_validation
+from ml.validation import DUPLICATES, make_folds, parse_validation
 from runtime.budget import used_ram_mb
 from runtime.log import get_logger
 
@@ -742,6 +745,7 @@ def run_experiment(
         if rows is not None:
             train, y = train.iloc[rows], y[rows]
         profile, train, _ = with_feature_code(spec, profile, hypothesis, train)
+        profile = _without_group_column(spec, profile, params)
         x, _ = make_matrix(profile, train, train.head(0))
         y_fit = np.log1p(np.clip(y, 0, None)) if log_target else y
         scheme, column = parse_validation(params.get("validation"), spec)
@@ -949,6 +953,29 @@ def _trees_scale(params: dict) -> float:
     return min(MAX_TREES_SCALE, max(1.0, CV_TRAIN_SHARE / float(fraction)))
 
 
+def group_column_to_drop(spec: TaskSpec, params: dict, profile: DataProfile) -> str | None:
+    """Колонка групп, которую params.drop_group_column убирает из признаков, или None — ключ ничего не меняет."""
+    if not params.get("drop_group_column"):
+        return None
+    scheme, column = parse_validation(params.get("validation"), spec)
+    if scheme != "group" or column == DUPLICATES:
+        return None
+    return column if column in profile.numeric_features + profile.categorical_features else None
+
+
+def _without_group_column(spec: TaskSpec, profile: DataProfile, params: dict) -> DataProfile:
+    """Профиль без колонки групп (params.drop_group_column). Фолды строятся по train[колонка] — им это не мешает."""
+    column = group_column_to_drop(spec, params, profile)
+    if column is None:
+        return profile
+    return profile.model_copy(
+        update={
+            "numeric_features": [c for c in profile.numeric_features if c != column],
+            "categorical_features": [c for c in profile.categorical_features if c != column],
+        }
+    )
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
@@ -956,6 +983,7 @@ def fit_predict_final(
     params = hypothesis.params
     log_target = _use_log_target(spec, params)
     profile, train, test = with_feature_code(spec, profile, hypothesis, train, test)
+    profile = _without_group_column(spec, profile, params)
     x, x_test = make_matrix(profile, train, test)
     x_test = _hide_unseen(hypothesis, x, x_test)
     y = _encode_target(spec, train[spec.target])

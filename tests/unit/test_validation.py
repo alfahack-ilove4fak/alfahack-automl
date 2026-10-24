@@ -273,3 +273,48 @@ def test_time_still_wins_over_groups():
     train = pd.DataFrame({"sold": days[:300], "x": rng.normal(size=300), "y": rng.normal(size=300)})
     test = pd.DataFrame({"sold": days[300:], "x": rng.normal(size=100)})
     assert choose_validation(_spec(), _profile(["x"], ["sold"]), train, test) == "time:sold"
+
+
+def test_drop_group_column_only_under_group_scheme():
+    """#294: drop_group_column убирает колонку групп из признаков только при схеме group:<колонка>."""
+    from ml.experiment import _without_group_column, group_column_to_drop
+
+    profile = _profile(["x"], ["patient"])
+    on = {"drop_group_column": True, "validation": "group:patient"}
+    assert group_column_to_drop(_spec(), on, profile) == "patient"
+    assert _without_group_column(_spec(), profile, on).categorical_features == []
+    for params in (
+        {"drop_group_column": True},
+        {**on, "validation": "group:duplicates"},
+        {**on, "validation": "time:x"},
+        {"validation": "group:patient"},
+    ):
+        assert group_column_to_drop(_spec(), params, profile) is None
+        assert _without_group_column(_spec(), profile, params) is profile
+
+
+def test_drop_group_column_experiment_and_final():
+    """CV по группам и финал без колонки групп работают; финал не видит колонку (в test она вся новая)."""
+    from interfaces.schemas import ExperimentStatus, Hypothesis, HypothesisKind, RunBudget
+    from ml import experiment
+
+    train, test = _objects()
+    train["id"], test["id"] = np.arange(len(train)), np.arange(len(test))
+    profile = _profile(["x"], ["patient"])
+    params = {
+        "drop_group_column": True,
+        "validation": "group:patient",
+        "n_folds": 3,
+        "model_params": {"n_estimators": 30},
+    }
+    hyp = Hypothesis(id="h", kind=HypothesisKind.PREPROCESSING, title="без групп", params=params)
+    seen = []
+    original = experiment.make_matrix
+    experiment.make_matrix = lambda p, *a: (seen.append(p.categorical_features), original(p, *a))[1]
+    try:
+        result = experiment.run_experiment(_spec(), profile, hyp, train, RunBudget())
+        answer = experiment.fit_predict_final(_spec(), profile, hyp, train, test)
+    finally:
+        experiment.make_matrix = original
+    assert result.status == ExperimentStatus.OK and result.validation.startswith("group:patient")
+    assert len(answer) == len(test) and seen and all(c == [] for c in seen)

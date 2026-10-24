@@ -132,7 +132,9 @@ def test_duplicates_inside_answer_and_k_limit():
     assert [h.id for h in out] == ["lgbm_l2", "other"]
 
 
-def test_playbook_skips_params_already_proposed_by_llm(spec, profile):
+def test_playbook_skips_params_already_proposed_by_llm(spec, profile, monkeypatch):
+    # механика LLM-части; при порядке ADR 0014 (playbook первым) LLM до первой гипотезы playbook не доходит
+    monkeypatch.setenv("AGENT_LLM_FIRST", "1")
     first = load_playbook()[0]
     same = {**GOOD, "id": "llm_copy", "kind": first["kind"], "params": first["params"]}
     out = propose_hypotheses(spec, profile, baseline_history(), k=5, llm=FakeLLM([same]))

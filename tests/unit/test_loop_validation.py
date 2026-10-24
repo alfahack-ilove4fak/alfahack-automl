@@ -182,3 +182,21 @@ def test_service_keys_not_part_of_repeat_key():
 
     lgbm = {"model": "lightgbm", "model_params": {"num_leaves": 15}}
     assert params_key({**lgbm, "_best_iteration": 87, "_proba_weights": [1, 2], "_optuna_best": {}}) == params_key(lgbm)
+
+
+def test_idle_group_drop_skipped_without_group_scheme():
+    """drop_group_column при схеме не по группам ничего не меняет — критик цикла пропускает её (#294)."""
+    from pathlib import Path
+
+    from agent.loop import idle_group_drop
+    from interfaces.schemas import DataProfile, Hypothesis, HypothesisKind
+    from interfaces.stubs import stub_task_spec
+
+    spec = stub_task_spec(Path("tasks/demo"))
+    profile = DataProfile(n_train=10, n_test=5, numeric_features=["x"], categorical_features=["patient"])
+    hyp = Hypothesis(id="h", kind=HypothesisKind.PREPROCESSING, title="t", params={"drop_group_column": True})
+    assert idle_group_drop(hyp, spec, profile, None) is not None
+    assert idle_group_drop(hyp, spec, profile, "time:x") is not None
+    assert idle_group_drop(hyp, spec, profile, "group:patient") is None
+    plain = Hypothesis(id="p", kind=HypothesisKind.HYPERPARAMS, title="t", params={})
+    assert idle_group_drop(plain, spec, profile, None) is None

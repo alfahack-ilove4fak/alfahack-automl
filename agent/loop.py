@@ -21,7 +21,7 @@ from agent.llm_critic import critique
 from agent.llm_hypotheses import reflect
 from agent.memory import ResearchMemory
 from interfaces.schemas import DataProfile, ExperimentResult, ExperimentStatus, Hypothesis, RunBudget, TaskSpec
-from ml.experiment import run_experiment
+from ml.experiment import group_column_to_drop, run_experiment
 from runtime.log import get_logger
 
 log = get_logger("loop")
@@ -112,7 +112,9 @@ def run_autoresearch(
             break
         hyp = queue.pop(0)
         log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
-        reason = review(hyp, spec) or foreign_validation(hyp, validation)
+        reason = (
+            review(hyp, spec) or foreign_validation(hyp, validation) or idle_group_drop(hyp, spec, profile, validation)
+        )
         needed = estimated_seconds(hyp, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
             reason = f"не успеет: оценка {needed:.0f} с, осталось {budget.seconds_left():.0f} с"
@@ -202,6 +204,16 @@ def with_validation(hyp: Hypothesis, validation: str | None) -> Hypothesis:
 
 
 PLAIN_VALIDATION = ("kfold", "stratified")  # обычная CV — то же, что без validation
+
+
+def idle_group_drop(hyp: Hypothesis, spec: TaskSpec, profile: DataProfile, validation: str | None) -> str | None:
+    """Причина пропустить drop_group_column, которая ничего не меняет: схема прогона не group:<колонка> (#294)."""
+    if not hyp.params.get("drop_group_column"):
+        return None
+    params = {**hyp.params, "validation": hyp.params.get("validation") or validation}
+    if group_column_to_drop(spec, params, profile) is None:
+        return "drop_group_column действует только при схеме group:<колонка> признака — здесь совпадёт без ключа"
+    return None
 
 
 def foreign_validation(hyp: Hypothesis, validation: str | None) -> str | None:
