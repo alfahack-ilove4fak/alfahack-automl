@@ -73,10 +73,12 @@ class Run:
     detail: str = ""
     t: float | None = None
 
-    def state(self, stale_sec: float) -> str:
+    def state(self, stale_sec: float, grace_sec: float = 0) -> str:
+        """Живой, пока лог менялся недавно или ещё не вышел бюджет: длинный шаг CV пишет в лог редко."""
         if self.finished:
             return "готов"
-        return "идёт" if self.age < stale_sec else "брошен?"
+        quiet = max(stale_sec, (self.budget or 0) - self.elapsed + grace_sec)
+        return "идёт" if self.age < quiet else "брошен?"
 
 
 @dataclass
@@ -325,8 +327,8 @@ def evaluate(plan: dict) -> dict:
         all_recs += [("ловушки", r) for r in (leak_after or {}).values()]
 
     checks = []
-    active = [r for r in runs if r.state(crit["stale_sec"]) == "идёт"]
-    stale = [r for r in runs if r.state(crit["stale_sec"]) == "брошен?"]
+    active = [r for r in runs if r.state(crit["stale_sec"], crit["grace_sec"]) == "идёт"]
+    stale = [r for r in runs if r.state(crit["stale_sec"], crit["grace_sec"]) == "брошен?"]
     if active:
         checks.append(check("К1", "Прогоны завершены", WAIT, "идут: " + ", ".join(r.name for r in active)))
     elif stale:
@@ -457,11 +459,17 @@ def render(snapshot: dict, markdown: bool = False) -> str:
             markdown,
         ),
     ]
-    active = [r for r in snapshot["runs"] if r.state(crit["stale_sec"]) != "готов"]
+    active = [r for r in snapshot["runs"] if r.state(crit["stale_sec"], crit["grace_sec"]) != "готов"]
     out += ["", h + "Идут сейчас"]
     if active:
         rows = [
-            [r.name, r.state(crit["stale_sec"]), f"{r.elapsed:.0f} / {r.budget or '?'} с", r.iteration, r.best or NA]
+            [
+                r.name,
+                r.state(crit["stale_sec"], crit["grace_sec"]),
+                f"{r.elapsed:.0f} / {r.budget or '?'} с",
+                r.iteration,
+                r.best or NA,
+            ]
             for r in active
         ]
         out.append(_table(["Прогон", "Состояние", "Прошло", "Итерация", "Лучший CV"], rows, markdown))

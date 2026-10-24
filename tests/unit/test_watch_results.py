@@ -79,6 +79,13 @@ def test_running_and_stale_runs(tmp_path):
     assert stale.state(180) == "брошен?"
 
 
+def test_quiet_log_is_alive_until_budget_runs_out(tmp_path):
+    # длинный шаг CV: лог молчит 250 с, но до конца бюджета (300 с, последняя отметка 10 с) ещё есть время
+    quiet = wr.parse_log(_log(tmp_path, "a", _iter(1, "x"), final=False, age=250), "object_history", "a")
+    assert quiet.state(180, 90) == "идёт"
+    assert quiet.state(180, 90) != wr.Run(name="b", age=400, elapsed=10, budget=300).state(180, 90)
+
+
 def test_same_as_logged_uses_precision_of_the_log():
     assert wr.same_as_logged("0.76961", 0.7696078695714696)
     assert wr.same_as_logged("1234.5", 1234.53)
