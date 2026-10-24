@@ -290,3 +290,24 @@ def test_missing_plan_files_are_named_instead_of_silent_wait(tmp_path):
     verdict, _ = wr.summary(snap)
     assert verdict.startswith("На этой машине нет ни одного файла из плана")
     assert "Нет на этой машине: 3 из 3" in wr.render(snap, "html")
+
+
+def test_export_then_snapshot_shows_same_result_on_another_machine(tmp_path, capsys):
+    plan_path = tmp_path / "plan.json"
+    plan = _plan(tmp_path, [_row("r", 10.0, 20.0)], [_row("r", 12.0, 10.0)])
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    snap_file = tmp_path / "снимок.json"
+    assert wr.main(["--plan", str(plan_path), "--export", str(snap_file)]) == 1  # К3 ❌
+    for name in ("b.csv", "a.csv"):  # «другая машина»: файлов прогонов нет, есть только снимок
+        (tmp_path / name).unlink()
+    capsys.readouterr()
+    assert wr.main(["--snapshot", str(snap_file), "--once", "--markdown"]) == 1
+    text = capsys.readouterr().out
+    assert "Снимок из файла снимок.json" in text and "| К3 | Без потерь | ❌ |" in text
+    page = wr.load_view(None, snap_file, "html")[0]
+    assert "Итог сейчас" in page and "Есть проблемы" in page
+
+
+def test_plan_or_snapshot_is_required(tmp_path):
+    with pytest.raises(SystemExit):
+        wr.main(["--once"])

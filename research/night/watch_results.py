@@ -4,6 +4,8 @@
     uv run python research/night/watch_results.py --plan runs/oh/plan.json --once       # один снимок
     uv run python research/night/watch_results.py --plan runs/oh/plan.json --once --markdown > report.md
     uv run python research/night/watch_results.py --plan runs/oh/plan.json --serve      # http://127.0.0.1:8765
+    uv run python research/night/watch_results.py --plan runs/oh/plan.json --export snapshot.json  # снимок в файл
+    uv run python research/night/watch_results.py --snapshot snapshot.json --serve     # показать его на другой машине
 
 Скрипт только читает файлы (agent.log, CSV харнесса, jsonl run_alien, gate.md) — прогонам не мешает.
 --serve — страница в браузере: на каждое обновление (раз в --interval секунд) файлы читаются заново;
@@ -676,7 +678,30 @@ def render(snapshot: dict, fmt: str = "text") -> str:
     return "\n".join(out) + "\n"
 
 
-def make_handler(plan: dict, refresh: float) -> type[BaseHTTPRequestHandler]:
+def export_snapshot(snapshot: dict) -> dict:
+    """Готовый снимок во всех форматах — чтобы показать его на другой машине (--export → --snapshot)."""
+    return {
+        "version": 1,
+        "generated": datetime.now().strftime("%d.%m %H:%M:%S"),
+        "exit_code": exit_code(snapshot),
+        **{fmt: render(snapshot, fmt) for fmt in FORMATS},
+    }
+
+
+def load_view(plan: dict | None, snapshot_file: Path | None, fmt: str) -> tuple[str, int]:
+    """Снимок в нужном формате и код выхода: свежий по плану или готовый из файла (перечитывается каждый раз)."""
+    if snapshot_file is None:
+        snapshot = evaluate(plan or {})
+        return render(snapshot, fmt), exit_code(snapshot)
+    data = json.loads(snapshot_file.read_text(encoding="utf-8"))
+    note = f"Снимок из файла {snapshot_file.name}, собран {data['generated']} на машине, где идут прогоны."
+    note += " Положи новую версию файла — страница покажет её при следующем обновлении."
+    text = data[fmt]
+    text = f'<p class="help">{escape(note)}</p>\n{text}' if fmt == "html" else f"{note}\n\n{text}"
+    return text, int(data.get("exit_code", 2))
+
+
+def make_handler(plan: dict | None, refresh: float, snapshot_file: Path | None = None) -> type[BaseHTTPRequestHandler]:
     """Обработчик для --serve: на каждый запрос заново читает файлы и отдаёт страницу (/) или markdown (/report.md)."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -686,12 +711,11 @@ def make_handler(plan: dict, refresh: float) -> type[BaseHTTPRequestHandler]:
                 self.send_error(404)
                 return
             try:
-                snapshot = evaluate(plan)
                 if path == "/":
-                    body = PAGE.format(refresh=max(1, int(refresh)), body=render(snapshot, "html"))
+                    body = PAGE.format(refresh=max(1, int(refresh)), body=load_view(plan, snapshot_file, "html")[0])
                     ctype = "text/html; charset=utf-8"
                 else:
-                    body, ctype = render(snapshot, "markdown"), "text/markdown; charset=utf-8"
+                    body, ctype = load_view(plan, snapshot_file, "markdown")[0], "text/markdown; charset=utf-8"
             except Exception as exc:  # noqa: BLE001 — страница не падает от недописанного файла
                 body = f"Снимок не собрался: {type(exc).__name__}: {exc}"
                 ctype = "text/plain; charset=utf-8"
@@ -711,7 +735,9 @@ def make_handler(plan: dict, refresh: float) -> type[BaseHTTPRequestHandler]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--plan", type=Path, required=True, help="JSON-план: что и с какими порогами проверяем")
+    parser.add_argument("--plan", type=Path, help="JSON-план: что и с какими порогами проверяем")
+    parser.add_argument("--snapshot", type=Path, help="показать готовый снимок (файл от --export) вместо плана")
+    parser.add_argument("--export", type=Path, help="сохранить снимок по плану в файл для другой машины и выйти")
     parser.add_argument("--once", action="store_true", help="один снимок и выход (код: 0 / 1 — есть ❌ / 2 — идёт)")
     parser.add_argument("--markdown", action="store_true", help="markdown — для комментария в PR или issue")
     parser.add_argument("--interval", type=float, default=15, help="период обновления, секунд (по умолчанию 15)")
@@ -719,14 +745,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="адрес для --serve (по умолчанию только этот компьютер)")
     parser.add_argument("--port", type=int, default=8765, help="порт для --serve (по умолчанию 8765)")
     args = parser.parse_args(argv)
-    plan = json.loads(args.plan.read_text(encoding="utf-8"))
+    if (args.plan is None) == (args.snapshot is None):
+        parser.error("укажи --plan (прогоны на этой машине) или --snapshot (готовый снимок), но не оба")
+    if args.export and args.plan is None:
+        parser.error("--export собирает снимок по --plan")
+    plan = json.loads(args.plan.read_text(encoding="utf-8")) if args.plan else None
     fmt = "markdown" if args.markdown else "text"
-    if args.once:
+    if args.export:
         snapshot = evaluate(plan)
-        print(render(snapshot, fmt), end="")
+        args.export.write_text(json.dumps(export_snapshot(snapshot), ensure_ascii=False), encoding="utf-8")
+        print(f"Снимок сохранён: {args.export}")
         return exit_code(snapshot)
+    if args.once:
+        text, code = load_view(plan, args.snapshot, fmt)
+        print(text, end="")
+        return code
     if args.serve:
-        server = ThreadingHTTPServer((args.host, args.port), make_handler(plan, args.interval))
+        server = ThreadingHTTPServer((args.host, args.port), make_handler(plan, args.interval, args.snapshot))
         print(f"Открой http://{args.host}:{server.server_port} — markdown: /report.md · Ctrl+C — выход", flush=True)
         try:
             server.serve_forever()
@@ -737,8 +772,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         while True:
-            snapshot = evaluate(plan)
-            sys.stdout.write("\033[2J\033[H" + render(snapshot, fmt))
+            sys.stdout.write("\033[2J\033[H" + load_view(plan, args.snapshot, fmt)[0])
             sys.stdout.write(f"\nобновление каждые {args.interval:g} с · Ctrl+C — выход\n")
             sys.stdout.flush()
             time.sleep(args.interval)
