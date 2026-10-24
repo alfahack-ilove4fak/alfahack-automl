@@ -184,6 +184,12 @@ hypotheses:
     rationale: Деревья плохо строят отношения признаков сами; 5 лучших признаков → 20 новых колонок
     params: {model: lightgbm, feature_ops: [pair_ops]}
 
+  - id: object_history
+    kind: features
+    title: История объекта по прошлым периодам
+    rationale: Когда один объект повторяется из периода в период, его прошлый target — сильный признак; ключ и время ищутся правилом по данным, история — строго из прошлых периодов и только по train-части фолда. Нет повторяющихся объектов — операция ничего не добавляет
+    params: {model: lightgbm, feature_ops: [object_history]}
+
   - id: hist_gb
     kind: model
     title: HistGradientBoosting из scikit-learn
