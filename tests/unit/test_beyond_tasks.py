@@ -1,7 +1,7 @@
 """Генератор BeyondArena (research/external/make_beyond_tasks.py): без сети — данные подменены.
 
-Проверяем временное разбиение (test строго позже train, дата не делится), формат задачи и разбор агентом,
-а также проверку схемы валидации в report.py.
+Проверяем временное разбиение (test строго позже train, дата не делится), групповое (группы test не встречаются
+в train, ≈ TEST_SHARE строк), формат задачи и разбор агентом, а также проверку схемы валидации в report.py.
 """
 
 import importlib.util
@@ -37,6 +37,7 @@ def fake_frame(kind: str, numeric_time: bool = False) -> pd.DataFrame:
     days = pd.Timestamp("2020-01-01") + pd.to_timedelta(rng.integers(0, 120, n), unit="D")
     frame = pd.DataFrame({"a": rng.normal(size=n), "b": rng.choice(["x", "y", "z"], n)})
     frame["when"] = rng.integers(1990, 2010, n) if numeric_time else days
+    frame["patient"] = [f"p{i}" for i in rng.zipf(1.6, n) % 90]  # группы очень разного размера, как в musk
     if kind == "regression":
         frame["target"] = frame["a"] * 3 + rng.normal(size=n)
     elif kind == "binary":
@@ -51,9 +52,11 @@ def test_manifest_is_valid():
     tasks = manifest["tasks"]
     assert manifest["revision"] == beyond.REVISION and len(beyond.REVISION) == 40
     assert len(tasks) >= 5 and len({t["name"] for t in tasks}) == len(tasks)
-    assert all(t["time_on"] and t["target"] and t["folder"].startswith(t["name"]) for t in tasks)
-    core = [t for t in tasks if t.get("core")]
-    assert 5 <= len(core) <= 6 and {t["task_type"] for t in core} == {"regression", "binary", "multiclass"}
+    assert all(t["target"] and t["folder"].startswith(t["name"]) for t in tasks)
+    assert all(t["time_on"] if t["split"] == "temporal" else t["group_on"] for t in tasks)
+    for split in beyond.SETS:
+        core = [t for t in tasks if t.get("core") and t["split"] == split]
+        assert 5 <= len(core) <= 6 and {t["task_type"] for t in core} == {"regression", "binary", "multiclass"}
 
 
 def test_readme_rows_parses_table():
@@ -81,6 +84,17 @@ def test_time_split_keeps_order_and_dates_whole(numeric_time):
     assert train["when"].max() < test["when"].min()  # одна дата целиком по одну сторону
 
 
+@pytest.mark.parametrize("kind", ["regression", "binary", "multiclass"])
+def test_group_split_keeps_groups_whole(kind):
+    frame = fake_frame(kind)
+    train, test, info = beyond.group_split(frame, "patient", "target", kind, seed=7)
+    assert len(train) + len(test) == len(frame) and info.startswith("групп в test")
+    assert not set(train["patient"]) & set(test["patient"])
+    assert abs(len(test) / len(frame) - beyond.TEST_SHARE) < 0.05  # подбор разбиения по доле строк
+    again, _, _ = beyond.group_split(frame, "patient", "target", kind, seed=7)
+    assert again.equals(train)  # детерминировано
+
+
 def test_time_split_with_many_rows_on_cutoff_date():
     frame = pd.DataFrame({"when": pd.to_datetime(["2020-01-01"] * 20 + ["2020-02-01"] * 80), "x": range(100)})
     train, test, _ = beyond.time_split(frame, "when")
@@ -89,22 +103,29 @@ def test_time_split_with_many_rows_on_cutoff_date():
 
 @pytest.mark.parametrize("name", ["alpha one", "kick", "gamma", "delta"])
 @pytest.mark.parametrize("kind", ["regression", "binary", "multiclass"])
-def test_generated_task_is_temporal_and_parsed_like_meta(tmp_path, monkeypatch, name, kind):
+@pytest.mark.parametrize(("split", "column"), [("temporal", "when"), ("grouped", "patient")])
+def test_generated_task_is_split_and_parsed_like_meta(tmp_path, monkeypatch, name, kind, split, column):
     monkeypatch.setattr(beyond, "OUT", tmp_path)
     monkeypatch.setattr(beyond, "load", lambda entry: fake_frame(kind))
-    entry = {"name": name, "task_type": kind, "target": "target", "time_on": "when", "folder": f"{name}/uuid"}
+    key = "time_on" if split == "temporal" else "group_on"
+    entry = {"name": name, "task_type": kind, "target": "target", "split": split, key: column, "folder": f"{name}/u"}
     slug = beyond.make(entry)
     assert slug is not None
-    meta = json.loads((tmp_path / "_answers" / f"{slug}.json").read_text(encoding="utf-8"))
-    train = pd.read_csv(tmp_path / slug / "train.csv", parse_dates=["when"])
-    test = pd.read_csv(tmp_path / slug / "test.csv", parse_dates=["when"])
-    answers = pd.read_csv(tmp_path / "_answers" / f"{slug}.csv")
-    assert meta["expected_validation"] == "time:when" and meta["split"] == "temporal"
-    assert train["when"].max() < test["when"].min()
+    out = tmp_path / beyond.SETS[split]
+    meta = json.loads((out / "_answers" / f"{slug}.json").read_text(encoding="utf-8"))
+    train = pd.read_csv(out / slug / "train.csv", parse_dates=["when"])
+    test = pd.read_csv(out / slug / "test.csv", parse_dates=["when"])
+    answers = pd.read_csv(out / "_answers" / f"{slug}.csv")
+    scheme = "time" if split == "temporal" else "group"
+    assert meta["expected_validation"] == f"{scheme}:{column}" and meta["split"] == split
+    if split == "temporal":
+        assert train["when"].max() < test["when"].min()
+    else:
+        assert not set(train["patient"]) & set(test["patient"])
     assert len(answers) == len(test) and "target" not in test.columns
-    text = (tmp_path / slug / "task.md").read_text(encoding="utf-8")
-    assert any(h.format(col="when").strip() in text for h in beyond.HINT) == meta["hint_in_text"]
-    spec = parse_task(tmp_path / slug / "task.md", use_analyst=False)
+    text = (out / slug / "task.md").read_text(encoding="utf-8")
+    assert any(h.format(col=column) in text for h in beyond.HINTS[split]) == meta["hint_in_text"]
+    spec = parse_task(out / slug / "task.md", use_analyst=False)
     assert spec.target == "target"
     assert spec.metric.name == meta["metric"]
 
@@ -122,3 +143,18 @@ def test_report_checks_validation_scheme(log_line, expected):
     row = {"log": {"validation": log_line}}
     assert report.validation_ok(row, {"expected_validation": "time:when"}) is expected
     assert report.validation_ok(row, {}) is None
+
+
+@pytest.mark.parametrize(
+    ("log_line", "expected"),
+    [
+        ("по группам (patient) — значения test не встречаются в train", True),
+        ("group:patient-5", True),
+        ("группы дубликатов — 45% строк train повторяются", False),
+        ("по группам (doctor) — значения test не встречаются в train", False),
+        ("по времени (patient) — test лежит после train", False),
+        ("stratified — времени и заметных дубликатов нет", False),
+    ],
+)
+def test_report_checks_group_scheme(log_line, expected):
+    assert report.validation_ok({"log": {"validation": log_line}}, {"expected_validation": "group:patient"}) is expected

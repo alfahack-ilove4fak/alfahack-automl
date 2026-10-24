@@ -4,14 +4,15 @@
     uv run python research/external/report.py                                # таблица + сравнение с базой
     uv run python research/external/report.py --update-baseline              # текущий результат → новая база
     uv run python research/external/report.py --set beyond                   # BeyondArena (make_beyond_tasks.py)
+    uv run python research/external/report.py --set beyond_grouped           # BeyondArena, группы
 
 Что смотрим (код выхода 1, если нарушено):
   1. нули (агент упал, ответ невалиден или «балл к сильному бейзлайну» ≤ 0) — число не выросло и ни одна задача
      с баллом не стала нулём;
   2. разбор: метрика и таргет, которые понял агент, совпадают с теми, что записаны в task.md (meta);
   3. балл любой задачи не упал больше чем на NOISE относительно базы;
-  4. схема валидации: если в meta есть expected_validation (time:<колонка>, набор beyond), агент в agent.log
-     выбрал схему по времени именно по этой колонке.
+  4. схема валидации: если в meta есть expected_validation (time:<колонка> — набор beyond, group:<колонка> —
+     beyond_grouped), агент в agent.log выбрал эту схему именно по этой колонке.
 База — docs/<набор>_baseline.json (docs/external_baseline.json для external); без неё печатаем только таблицу. Подгонять playbook под этот набор нельзя:
 он для гейта «стало ли хуже», а не для настройки параметров.
 """
@@ -29,9 +30,12 @@ RESULTS = ROOT / "runs" / "night" / "external_results.jsonl"
 ANSWERS = ROOT / "runs" / "night" / "external" / "_answers"
 BASELINE = ROOT / "docs" / "external_baseline.json"
 NOISE = 2.0
-TIME_SCHEME = re.compile(
-    r"по времени \((.+?)\)"
-)  # ml/validation.choose_validation: «Схема валидации: по времени (col)»
+# ml/validation.choose_validation: «Схема валидации: по времени (col) — …». Для групп агент сейчас умеет только
+# «группы дубликатов»; формат «по группам (col)» — предложение ML (как у времени), group:col тоже засчитываем
+SCHEMES = {
+    "time": re.compile(r"по времени \((.+?)\)"),
+    "group": re.compile(r"по группам \((.+?)\)|group:([^\s,;)]+?)(?:-\d+)?(?=$|[\s,;)])"),
+}
 
 
 def validation_ok(row: dict, meta: dict) -> bool | None:
@@ -40,8 +44,9 @@ def validation_ok(row: dict, meta: dict) -> bool | None:
     if not expected:
         return None
     scheme, _, column = expected.partition(":")
-    found = TIME_SCHEME.search((row.get("log") or {}).get("validation") or "")
-    return scheme == "time" and found is not None and found.group(1) == column
+    pattern = SCHEMES.get(scheme)
+    found = pattern.search((row.get("log") or {}).get("validation") or "") if pattern else None
+    return found is not None and column in found.groups()
 
 
 def is_zero(row: dict) -> bool:
@@ -123,7 +128,9 @@ def table(current: dict[str, dict], base: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--update-baseline", action="store_true")
-    parser.add_argument("--set", default="external", help="набор run_alien.py --set: external | beyond")
+    parser.add_argument(
+        "--set", default="external", help="набор run_alien.py --set: external | beyond | beyond_grouped"
+    )
     args = parser.parse_args()
     global RESULTS, ANSWERS, BASELINE
     RESULTS = ROOT / "runs" / "night" / f"{args.set}_results.jsonl"
