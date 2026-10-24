@@ -417,7 +417,9 @@ def evaluate(plan: dict) -> dict:
     status = FAIL if late else (OK if all_recs else NA)
     checks.append(check("К8", "Время", status, ", ".join(late) or f"всё ≤ бюджет + {crit['grace_sec']} с"))
 
+    missing = [p for p in plan_paths(plan) if not Path(p).exists()]
     return {
+        "missing": missing,
         "plan": plan,
         "crit": crit,
         "runs": runs,
@@ -436,6 +438,34 @@ def exit_code(snapshot: dict) -> int:
 
 FORMATS = ("text", "markdown", "html")
 CELL_CLASS = {FAIL: "bad", "🔴": "bad", WARN: "warn", WAIT: "wait", OK: "good", "🟢": "good"}
+LEGEND = (
+    f"{OK} пройдено · {WARN} с оговоркой · {FAIL} не пройдено · {WAIT} ещё идёт или нет данных · {NA} нечего проверять"
+)
+# Что проверяет каждая проверка — для страницы; {…} подставляются из criteria плана
+CHECK_HELP = {
+    "К1": "Все ли прогоны агента закончились. Пока что-то идёт, остальные итоги предварительные.",
+    "К2": "Ни один прогон не упал и не сдал невалидный ответ: на платформе это ноль.",
+    "К3": "Ни одна задача не стала хуже больше чем на шум (±{noise} балла к сильному бейзлайну): гипотеза не вредит.",
+    "К4": "Метрика лучше хотя бы на {min_gain_pct}% минимум на {min_tasks} задачах — критерий синка. "
+    "Выигрыш на одной задаче может оказаться подгонкой.",
+    "К5": "Где гипотезу приняли, статистика убедительна: t ≥ {t_min}. Ниже — её приняли по правилу «лучше на "
+    "последнем периоде», и выигрыш может не перенестись на платформу.",
+    "К6": "Гейт перед сабмитом не стал хуже. Провал, который повторяется и на dev, — не от ветки.",
+    "К7": "На задачах со спрятанной утечкой ветка не хуже dev: новая операция не подхватывает утечку.",
+    "К8": "Каждый прогон уложился в бюджет времени: на платформе за перерасход обрывают без ответа.",
+}
+SECTION_HELP = {
+    "runs": "Прогоны агента, которые ещё пишут agent.log: сколько прошло из бюджета, какая гипотеза сейчас "
+    "проверяется и лучший CV на этот момент.",
+    "pairs": "Те же задачи и то же разбиение: агент без гипотезы («до», dev) и с ней («после», ветка). "
+    "«Метрика лучше на» — изменение в процентах с учётом направления метрики; «балл к сильному» — как в гейте, "
+    "разница меньше ±{noise} — шум.",
+    "decisions": "Что агент решил по гипотезе в каждом прогоне. «CV = бейзлайну» — операция не нашла, что "
+    "добавить, и ничего не изменила; «не дошла» — до неё не хватило времени.",
+    "gate": "Провалы гейта и перепроверка тех же задач на dev. Повторилось на dev — дело не в ветке, а в машине "
+    "или в самом dev.",
+    "leak": "Синтетические задачи со спрятанной утечкой. Результат как у dev — гипотеза утечку не добавила.",
+}
 PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{refresh}"><title>Контроль результата</title>
@@ -450,11 +480,19 @@ th, td {{ border: 1px solid var(--line); padding: 4px 8px; text-align: left; ver
 th {{ background: var(--head); }} td.good {{ background: var(--good); }} td.bad {{ background: var(--bad); }}
 td.warn {{ background: var(--warn); }} td.wait {{ background: var(--wait); }}
 h1 {{ font-size: 20px; }} h2 {{ font-size: 16px; margin-top: 22px; }} .muted {{ opacity: .7; }}
+.help {{ opacity: .75; font-size: 13px; margin: 2px 0 6px; max-width: 75ch; }} td .help {{ margin: 2px 0 0; }}
+.summary {{ border: 1px solid var(--line); background: var(--head); padding: 4px 14px 8px; margin: 8px 0;
+  max-width: 1100px; }} .summary h2 {{ margin-top: 8px; }} .verdict {{ font-weight: 600; }}
+.missing {{ margin: 8px 0; }} .missing summary {{ cursor: pointer; }} code {{ font-size: 12px; word-break: break-all; }}
 </style></head><body>
 {body}
 <p class="muted">Страница обновляется каждые {refresh} с · данные — файлы прогонов на этой машине</p>
 </body></html>
 """
+
+
+class Raw(str):
+    """Готовый HTML для ячейки таблицы — не экранируется."""
 
 
 def _cell_class(text: str) -> str:
@@ -465,14 +503,17 @@ def _cell_class(text: str) -> str:
 
 
 def _table(headers: list[str], rows: list[list], fmt: str) -> str:
-    cells = [[str(c) for c in row] for row in rows]
+    cells = [[c if isinstance(c, Raw) else str(c) for c in row] for row in rows]
     if fmt == "markdown":
         lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
         return "\n".join(lines + ["| " + " | ".join(r) + " |" for r in cells])
     if fmt == "html":
         head = "".join(f"<th>{escape(h)}</th>" for h in headers)
         body = "".join(
-            "<tr>" + "".join(f"<td{_cell_class(c)}>{escape(c)}</td>" for c in row) + "</tr>" for row in cells
+            "<tr>"
+            + "".join(f"<td{_cell_class(c)}>{c if isinstance(c, Raw) else escape(c)}</td>" for c in row)
+            + "</tr>"
+            for row in cells
         )
         return f"<table><tr>{head}</tr>{body}</table>"
     widths = [max(len(h), *(len(r[i]) for r in cells)) if cells else len(h) for i, h in enumerate(headers)]
@@ -486,33 +527,101 @@ def _num(value: float | None) -> str:
     return NA if value is None else f"{value:.5g}"
 
 
+def plan_paths(plan: dict) -> list[str]:
+    """Все файлы и папки, которые читает план."""
+    paths = list(plan.get("runs", []))
+    for item in [*plan.get("pairs", []), *plan.get("rechecks", []), plan.get("leak") or {}]:
+        paths += [item[k] for k in ("before", "after") if item.get(k)]
+    gate = plan.get("gate") or {}
+    paths += [gate["report"]] if gate.get("report") else []
+    return paths + list(gate.get("results", []))
+
+
+def summary(snapshot: dict) -> tuple[str, list[str]]:
+    """Итог простыми словами и список того, на что смотреть."""
+    checks = snapshot["checks"]
+    statuses = {c["status"] for c in checks}
+    paths = plan_paths(snapshot["plan"])
+    if paths and len(snapshot.get("missing", [])) == len(paths):
+        verdict = (
+            "На этой машине нет ни одного файла из плана — показывать нечего. Замеры, которые идут на другой "
+            "машине, отсюда не видны: смотри их там или укажи в плане свои прогоны."
+        )
+    elif FAIL in statuses:
+        verdict = "Есть проблемы (❌): в таком виде гипотезу не берём, сначала разбираемся с ними."
+    elif WAIT in statuses:
+        verdict = "Замер ещё идёт (⏳): итог предварительный."
+    elif WARN in statuses:
+        verdict = "Проблем нет, но есть оговорки (⚠️): решение — с их учётом."
+    elif statuses <= {NA}:
+        verdict = "Проверять пока нечего."
+    else:
+        verdict = "Все проверки пройдены: гипотезу можно брать."
+    items = [f"{c['code']} {c['title']}: {c['detail']}" for c in checks if c["status"] in (FAIL, WARN, WAIT)]
+    return verdict, items
+
+
 def render(snapshot: dict, fmt: str = "text") -> str:
-    """Снимок как текст для терминала, markdown для PR/issue или HTML-фрагмент для страницы --serve."""
+    """Снимок как текст для терминала, markdown для PR/issue или HTML-фрагмент страницы (с объяснениями)."""
     plan, crit = snapshot["plan"], snapshot["crit"]
+    html = fmt == "html"
 
     def head(text: str, level: int = 2) -> str:
-        if fmt == "html":
+        if html:
             return f"<h{level}>{escape(text)}</h{level}>"
         return ("#" * level + " " if fmt == "markdown" else ("" if level == 1 else "== ")) + text
 
-    def para(text: str) -> str:
-        return f"<p>{escape(text)}</p>" if fmt == "html" else text
+    def para(text: str, css: str = "") -> str:
+        if not html:
+            return text
+        return f'<p class="{css}">{escape(text)}</p>' if css else f"<p>{escape(text)}</p>"
+
+    def explain(key: str) -> list[str]:
+        return [para(SECTION_HELP[key].format(**crit), "help")] if html else []
 
     counts = {s: sum(c["status"] == s for c in snapshot["checks"]) for s in (OK, WARN, FAIL, WAIT)}
     now = datetime.now().strftime("%H:%M:%S")
+    verdict, items = summary(snapshot)
     out = [
         head(f"{plan.get('title', 'Контроль результата')} · гипотеза «{plan.get('hypothesis', '')}»", 1),
-        para(f"{now} · " + " · ".join(f"{s} {n}" for s, n in counts.items())),
-        "",
-        head("Контроль"),
-        _table(
-            ["", "Проверка", "Итог", "Подробности"],
-            [[c["code"], c["title"], c["status"], c["detail"]] for c in snapshot["checks"]],
-            fmt,
-        ),
+        para(f"{now} · " + " · ".join(f"{s} {n}" for s, n in counts.items()), "stamp"),
     ]
+    if html:
+        lis = "".join(f"<li>{escape(i)}</li>" for i in items)
+        out.append(
+            f'<section class="summary"><h2>Итог сейчас</h2><p class="verdict">{escape(verdict)}</p>'
+            + (f"<p>На что смотреть:</p><ul>{lis}</ul>" if lis else "")
+            + "</section>"
+        )
+        if snapshot.get("missing"):
+            lis = "".join(f"<li><code>{escape(m)}</code></li>" for m in snapshot["missing"])
+            out.append(
+                f'<details class="missing"><summary>Нет на этой машине: {len(snapshot["missing"])} из '
+                f"{len(plan_paths(plan))} файлов плана</summary><p>Пути берутся от папки, из которой запущен "
+                "скрипт. Укажи в плане свои прогоны (пример — research/night/control_plan.example.json).</p>"
+                f"<ul>{lis}</ul></details>"
+            )
+    else:
+        out += ["", f"Итог: {verdict}", *[f"  · {i}" for i in items]]
+    out += ["", head("Контроль")]
+    if html:
+        out.append(para(LEGEND, "help"))
+        rows = [
+            [
+                c["code"],
+                Raw(
+                    f'<b>{escape(c["title"])}</b><div class="help">{escape(CHECK_HELP[c["code"]].format(**crit))}</div>'
+                ),
+                c["status"],
+                c["detail"],
+            ]
+            for c in snapshot["checks"]
+        ]
+    else:
+        rows = [[c["code"], c["title"], c["status"], c["detail"]] for c in snapshot["checks"]]
+    out.append(_table(["", "Проверка", "Итог", "Подробности"], rows, fmt))
     active = [r for r in snapshot["runs"] if r.state(crit["stale_sec"], crit["grace_sec"]) != "готов"]
-    out += ["", head("Идут сейчас")]
+    out += ["", head("Идут сейчас"), *explain("runs")]
     if active:
         rows = [
             [
@@ -527,8 +636,8 @@ def render(snapshot: dict, fmt: str = "text") -> str:
         out.append(_table(["Прогон", "Состояние", "Прошло", "Итерация", "Лучший CV"], rows, fmt))
     else:
         out.append(para("нет живых прогонов"))
-    for pair in snapshot["pairs"]:
-        out += ["", head(f"До/после: {pair['name']}")]
+    for i, pair in enumerate(snapshot["pairs"]):
+        out += ["", head(f"До/после: {pair['name']}"), *(explain("pairs") if i == 0 else [])]
         rows = [
             [
                 short(r["task"]),
@@ -545,15 +654,15 @@ def render(snapshot: dict, fmt: str = "text") -> str:
         out.append(_table(headers, rows, fmt) if rows else para(f"{WAIT} результатов ещё нет"))
     decided = [r for r in snapshot["runs"] if r.decision]
     if decided and plan.get("hypothesis"):
-        out += ["", head(f"Решения по «{plan['hypothesis']}»")]
+        out += ["", head(f"Решения по «{plan['hypothesis']}»"), *explain("decisions")]
         out.append(_table(["Прогон", "Решение", "Подробности"], [[r.name, r.decision, r.detail] for r in decided], fmt))
     if snapshot["gate"] and not snapshot["gate"]["passed"]:
-        out += ["", head("Провалы гейта")]
+        out += ["", head("Провалы гейта"), *explain("gate")]
         rows = [[a["name"], a["status"], a["text"]] for a in snapshot["attribution"]]
         failures = [[f] for f in snapshot["gate"]["failures"]]
         out.append(_table(["Задача", "Итог", "Перепроверка"], rows, fmt) if rows else _table(["Провал"], failures, fmt))
     if snapshot["leak"]:
-        out += ["", head("Ловушки утечек")]
+        out += ["", head("Ловушки утечек"), *explain("leak")]
         rows = [
             [
                 short(r["task"]),

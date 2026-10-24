@@ -268,3 +268,25 @@ def test_serve_returns_page_and_markdown(tmp_path):
         server.server_close()
     assert '<meta http-equiv="refresh" content="5">' in page and "К4" in page
     assert report.startswith("# ") and "| К1 |" in report
+
+
+def test_page_explains_checks_and_gives_plain_verdict(tmp_path):
+    before = [_row("r", 10.0, 20.0)]
+    after = [_row("r", 12.0, 10.0)]
+    html = wr.render(wr.evaluate(_plan(tmp_path, before, after)), "html")
+    assert "Итог сейчас" in html and "Есть проблемы" in html  # К3 ❌
+    assert "Ни одна задача не стала хуже больше чем на шум (±2.0" in html  # пояснение к К3 с порогом из плана
+    assert "пройдено с оговоркой" in html or "с оговоркой" in html  # легенда
+
+
+def test_missing_plan_files_are_named_instead_of_silent_wait(tmp_path):
+    plan = {
+        "hypothesis": "h",
+        "runs": [str(tmp_path / "нет_папки")],
+        "pairs": [{"name": "15 мин", "before": str(tmp_path / "b.csv"), "after": str(tmp_path / "a.csv")}],
+    }
+    snap = wr.evaluate(plan)
+    assert len(snap["missing"]) == 3
+    verdict, _ = wr.summary(snap)
+    assert verdict.startswith("На этой машине нет ни одного файла из плана")
+    assert "Нет на этой машине: 3 из 3" in wr.render(snap, "html")
