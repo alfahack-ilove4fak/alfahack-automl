@@ -20,7 +20,8 @@
   log_target     — для регрессии: учиться на log1p(y), предсказывать expm1. Не задан — включён для метрик на
                    лог-шкале (RMSLE, MSLE: это RMSE/MSE на log1p — обучение сразу под метрику, #206), иначе выключен
   class_weight   — для классификации: "balanced" или None
-  feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops;
+  feature_ops    — список преобразований признаков: missing_flags | freq_encoding | target_encoding | pair_ops |
+                   object_history;
                    элемент — имя или {op: имя, параметр: значение} (ml/features.py); обучаются только на train-части
                    фолда, без утечки
   validation     — схема CV: kfold | stratified | group:<колонка> | group:duplicates | time:<колонка> (ml/validation.py);

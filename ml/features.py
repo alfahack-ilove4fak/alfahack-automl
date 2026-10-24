@@ -12,6 +12,12 @@ fit видит только train-часть фолда (в CV) или весь 
                      частых). Параметры: smoothing (20), folds (5)
   pair_ops         — разности и отношения пар самых информативных числовых признаков. Параметр: top_k (5 признаков
                      → 20 колонок)
+  object_history   — история объекта: по строкам того же объекта строго из прошлых периодов — среднее и последнее
+                     значение target, число прошлых строк и время с последнего периода. Ключ объекта ищется по данным
+                     (колонки, которые вместе отличают объекты внутри периода и повторяются из периода в период), без
+                     имён колонок в коде; колонка времени — по имени «про время» и тому же правилу. Параметры: key
+                     (список колонок), time (колонка) — их может выбрать LLM из object_history_candidates; не нашли
+                     ключ или время — операция ничего не добавляет
 
 Формат params.feature_ops: имя, список имён или словари с параметрами, например
   feature_ops: [missing_flags, {op: target_encoding, smoothing: 50}, {op: pair_ops, top_k: 3}]
@@ -20,12 +26,15 @@ fit видит только train-часть фолда (в CV) или весь 
 
 from __future__ import annotations
 
+import re
 from itertools import combinations
 
 import numpy as np
 import pandas as pd
 from sklearn.feature_selection import f_classif
 from sklearn.model_selection import KFold
+
+from ml.validation import TIME_MIN_PERIODS, TIME_NAME_HINT, time_values
 
 SEED = 42
 TE_SMOOTHING = 20.0  # вес априорного среднего: категория из 20 объектов — наполовину своё среднее, наполовину общее
@@ -34,6 +43,13 @@ TE_MAX_CLASSES = 20
 PAIR_TOP_K = 5
 MAX_FLAGS = 100  # больше флагов пропусков не добавляем: на широких данных они раздувают матрицу
 MISSING_STRINGS = ["nan", "None", "<NA>"]  # так astype(str) в make_matrix записывает пропуск в категории
+HISTORY_MAX_KEY_COLS = 4  # ключ объекта — не больше стольких колонок
+HISTORY_CANDIDATE_COLS = 30  # в ключ пробуем столько колонок с наибольшим числом значений
+HISTORY_SEARCH_ROWS = 200_000  # поиск ключа — на первых строках: дальше он только дольше, а не точнее
+HISTORY_MIN_UNIQUE = 0.8  # доля строк, где (объект, период) встречается один раз
+HISTORY_MIN_REPEAT = 0.3  # доля строк, чей объект есть больше чем в одном периоде
+HISTORY_ATTR_SHARE = 0.95  # атрибут объекта постоянен хотя бы в такой доле повторяющихся объектов
+HISTORY_SCORE_TIE = 0.02  # кандидаты времени с такой разницей качества считаем равными
 
 
 def _categorical(x: pd.DataFrame) -> list[str]:
@@ -167,11 +183,213 @@ class PairOps:
         return pd.DataFrame(out, index=x.index)
 
 
+def _history_times(series: pd.Series) -> np.ndarray | None:
+    """Колонка → числа для упорядочивания по времени; категории сначала в строки (пропуск → NaN)."""
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        series = series.astype(object).where(~series.isin(MISSING_STRINGS))
+    return time_values(series)
+
+
+def _column_hashes(x: pd.DataFrame, cols: list[str]) -> dict[str, np.ndarray]:
+    return {c: pd.util.hash_pandas_object(x[c].astype(object), index=False).to_numpy() for c in cols}
+
+
+def _key_hash(hashes: dict[str, np.ndarray], cols: list[str]) -> np.ndarray:
+    """Хеш набора колонок из хешей отдельных колонок (переполнение uint64 — нормально)."""
+    out = np.zeros(len(next(iter(hashes.values()))), dtype=np.uint64)
+    with np.errstate(over="ignore"):
+        for c in cols:
+            out = out * np.uint64(1_000_003) + hashes[c]
+    return out
+
+
+def _key_quality(key: np.ndarray, t_codes: np.ndarray, n_periods: int) -> tuple[float, float]:
+    """(доля строк с единственной парой «объект, период», доля строк, чей объект есть в нескольких периодах)."""
+    k_codes, k_uniques = pd.factorize(key)
+    pair_codes, pairs = pd.factorize(k_codes.astype(np.int64) * n_periods + t_codes)
+    unique = float((np.bincount(pair_codes)[pair_codes] == 1).mean())
+    periods = np.bincount(pairs // n_periods, minlength=len(k_uniques))  # различные пары → периодов у объекта
+    return unique, float((periods[k_codes] > 1).mean())
+
+
+def _has_attribute(x: pd.DataFrame, key: list[str], time_col: str) -> bool:
+    """Есть колонка вне ключа, постоянная внутри объекта (город магазина, штат здания) и разная у объектов.
+
+    Без такого «атрибута» совпадения ключа — скорее разные объекты с одинаковым значением (площадь квартиры).
+    """
+    groups = pd.Series(_key_hash(_column_hashes(x, key), key), index=x.index)
+    repeated = groups.duplicated(keep=False).to_numpy()
+    if not repeated.any():
+        return False
+    rest = x.loc[repeated, [c for c in x.columns if c not in key and c != time_col]]
+    by = groups[repeated].to_numpy()
+    for c in rest.columns:
+        values = rest[c].astype(object)
+        if values.nunique() > 1 and (values.groupby(by).nunique(dropna=False) == 1).mean() >= HISTORY_ATTR_SHARE:
+            return True
+    return False
+
+
+def _search_key(
+    x: pd.DataFrame, t: np.ndarray, time_col: str, hashes: dict[str, np.ndarray] | None = None
+) -> tuple[list[str], float]:
+    """Жадно собрать ключ объекта: на каждом шаге колонка, лучше всего поднимающая unique·repeat.
+
+    Постоянные внутри объекта колонки (площадь, год постройки, тип) вместе отличают объекты внутри периода
+    и повторяются из периода в период. Меняющиеся (погода, показания) уникальны, но не повторяются — repeat
+    низкий; общие для многих объектов (штат) повторяются, но не уникальны. Target не используется.
+    """
+    hashes = hashes if hashes is not None else _column_hashes(x, list(x.columns))
+    ok = ~np.isnan(t)
+    x, t = x[ok], t[ok]
+    if len(x) == 0:
+        return [], 0.0
+    t_codes, periods = pd.factorize(t)
+    hashes = {c: h[ok] for c, h in hashes.items() if c != time_col}
+    cardinality = {c: len(pd.unique(h)) for c, h in hashes.items()}
+    cols = sorted((c for c, n in cardinality.items() if n > 1), key=lambda c: -cardinality[c])
+    cols = cols[:HISTORY_CANDIDATE_COLS]
+    if not cols:
+        return [], 0.0
+    key, best, unique, repeat = [], 0.0, 0.0, 0.0
+    while len(key) < HISTORY_MAX_KEY_COLS:
+        scored = []
+        for c in cols:
+            if c not in key:
+                u, r = _key_quality(_key_hash(hashes, [*key, c]), t_codes, len(periods))
+                scored.append((u * r, u, r, c))
+        if not scored:
+            break
+        score, u, r, col = max(scored, key=lambda s: s[0])
+        if score <= best + 1e-3:
+            break
+        key, best, unique, repeat = [*key, col], score, u, r
+        if unique >= 0.999:
+            break
+    if unique < HISTORY_MIN_UNIQUE or repeat < HISTORY_MIN_REPEAT or not _has_attribute(x, key, time_col):
+        return [], 0.0
+    return key, best
+
+
+def object_history_candidates(x: pd.DataFrame) -> list[dict]:
+    """Кандидаты для object_history, найденные правилами: [{time, key, score}], лучший первым.
+
+    Время — колонки с именем «про время», которые читаются как числа или даты и имеют ≥ 3 периодов; из почти
+    равных по качеству первым идёт самое крупное (меньше периодов).
+    Отсюда LLM выбирает key и time для гипотезы; признаки считает наш код.
+    """
+    x = x.iloc[:HISTORY_SEARCH_ROWS]
+    hashes = None  # хеши колонок — один раз на всех кандидатов времени
+    out = []
+    for col in x.columns:
+        if not TIME_NAME_HINT.search(str(col)):
+            continue
+        t = _history_times(x[col])
+        if t is None or len(np.unique(t[~np.isnan(t)])) < TIME_MIN_PERIODS:
+            continue
+        hashes = hashes if hashes is not None else _column_hashes(x, list(x.columns))
+        key, score = _search_key(x, t, col, hashes)
+        if key:
+            out.append(
+                {"time": col, "key": key, "score": round(score, 4), "periods": int(len(np.unique(t[~np.isnan(t)])))}
+            )
+    if not out:
+        return []
+    # Из почти равных по качеству берём самое крупное время: погода по году (градусо-дни) делит строки почти
+    # как сам год, но «прошлое» по ней — не прошлое
+    top = max(c["score"] for c in out)
+    return sorted(out, key=lambda c: (c["score"] < top - HISTORY_SCORE_TIE, c["periods"], -c["score"]))
+
+
+class ObjectHistory:
+    """Признаки по прошлым периодам того же объекта. Для любой строки — только строки fit с тем же ключом и
+    временем строго меньше: текущая строка, её период и будущее не видны ни в train, ни в валидации, ни в test.
+    """
+
+    def __init__(self, key: list[str] | str | None = None, time: str | None = None):
+        if isinstance(key, str):
+            key = [key]
+        if key is not None and (not isinstance(key, list | tuple) or not key):
+            raise ValueError("object_history: key — непустой список колонок")
+        if time is not None and not isinstance(time, str):
+            raise ValueError("object_history: time — имя колонки")
+        self.key_param, self.time_param = (list(key) if key else None), time
+
+    @staticmethod
+    def _column(x: pd.DataFrame, name: str) -> str | None:
+        """Имя колонки в матрице: как есть или после замены спецсимволов (make_matrix переименовывает)."""
+        if name in x.columns:
+            return name
+        safe = re.sub(r"\W+", "_", name).strip("_")
+        return safe if safe in x.columns else None
+
+    def fit(self, x: pd.DataFrame, y: np.ndarray, classification: bool) -> ObjectHistory:
+        self.key, self.time = [], None
+        if self.key_param or self.time_param:
+            time = self._column(x, self.time_param) if self.time_param else None
+            key = [self._column(x, k) for k in self.key_param or []]
+            if (self.time_param and time is None) or None in key:
+                raise ValueError(f"object_history: нет колонок key={self.key_param} time={self.time_param}")
+            if not key or time is None:
+                # Задано только одно из двух — второе ищем правилом
+                found = [c for c in object_history_candidates(x) if time is None or c["time"] == time]
+                found = [c for c in found if not key or c["key"] == key] or found
+                if not found:
+                    return self
+                key, time = key or found[0]["key"], time or found[0]["time"]
+        else:
+            found = object_history_candidates(x)
+            if not found:
+                return self
+            key, time = found[0]["key"], found[0]["time"]
+        t = _history_times(x[time])
+        if t is None:
+            return self
+        self.key, self.time = key, time
+        targets = TargetEncoding._targets(y, classification)
+        rows = pd.DataFrame({"_k": _key_hash(_column_hashes(x, key), key), "_t": t})
+        rows = pd.concat([rows, targets.set_axis(rows.index)], axis=1).dropna(subset=["_t"])
+        self.target_cols = list(targets.columns)
+        # Таблица периодов объекта: сумма и число строк за период, накопленные суммы до периода включительно
+        per = rows.groupby(["_k", "_t"]).agg({**{c: "sum" for c in self.target_cols}, "_t": "size"})
+        per = per.rename(columns={"_t": "_n"}).reset_index()
+        cum = per.groupby("_k")[[*self.target_cols, "_n"]].cumsum()
+        table = pd.DataFrame({"_k": per["_k"], "_t": per["_t"], "_last_t": per["_t"], "_cnt": cum["_n"]})
+        for c in self.target_cols:
+            table[f"_mean_{c}"] = cum[c] / cum["_n"]
+            table[f"_last_{c}"] = per[c] / per["_n"]
+        self.table = table.sort_values("_t", kind="stable").reset_index(drop=True)
+        return self
+
+    def transform(self, x: pd.DataFrame) -> pd.DataFrame:
+        if not self.key:
+            return pd.DataFrame(index=x.index)
+        t = _history_times(x[self.time])
+        query = pd.DataFrame({"_k": _key_hash(_column_hashes(x, self.key), self.key), "_t": np.nan if t is None else t})
+        query["_row"] = np.arange(len(x))
+        known = query.dropna(subset=["_t"]).sort_values("_t", kind="stable")
+        # Последний период того же объекта строго раньше строки: allow_exact_matches=False не берёт её период
+        joined = (
+            pd.merge_asof(known, self.table, on="_t", by="_k", direction="backward", allow_exact_matches=False)
+            .set_index("_row")
+            .reindex(np.arange(len(x)))
+        )
+        out = {}
+        for c in self.target_cols:
+            out[f"hist__{c}__mean"] = joined[f"_mean_{c}"].to_numpy(np.float32)
+            out[f"hist__{c}__last"] = joined[f"_last_{c}"].to_numpy(np.float32)
+        out["hist__count"] = joined["_cnt"].fillna(0).to_numpy(np.float32)
+        since = query["_t"].to_numpy() - joined["_last_t"].to_numpy()
+        out["hist__since_last"] = since.astype(np.float32)
+        return pd.DataFrame(out, index=x.index)
+
+
 FEATURE_OPS = {
     "missing_flags": MissingFlags,
     "freq_encoding": FreqEncoding,
     "target_encoding": TargetEncoding,
     "pair_ops": PairOps,
+    "object_history": ObjectHistory,
 }
 
 
