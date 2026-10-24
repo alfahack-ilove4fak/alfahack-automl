@@ -1,0 +1,64 @@
+{
+ "tasks": {
+  "asp_potassco_classification": {
+   "zero": true,
+   "score": 0.0,
+   "seconds": 226.7,
+   "type": "multiclass",
+   "metric": "f1_macro",
+   "parsed_metric": "f1_macro",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "stratified — времени и заметных дубликатов нет",
+   "validation_ok": false
+  },
+  "mice_protein_trisomy_discrim": {
+   "zero": false,
+   "score": 12.42,
+   "seconds": 229.9,
+   "type": "multiclass",
+   "metric": "balanced_accuracy",
+   "parsed_metric": "balanced_accuracy",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "stratified — времени и заметных дубликатов нет",
+   "validation_ok": false
+  },
+  "musk": {
+   "zero": false,
+   "score": 6.81,
+   "seconds": 189.6,
+   "type": "binary",
+   "metric": "roc_auc",
+   "parsed_metric": "roc_auc",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "stratified — времени и заметных дубликатов нет",
+   "validation_ok": false
+  },
+  "sat11_hand_algo_runtime": {
+   "zero": false,
+   "score": 47.14,
+   "seconds": 248.9,
+   "type": "regression",
+   "metric": "rmse",
+   "parsed_metric": "rmse",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "kfold — времени и заметных дубликатов нет",
+   "validation_ok": false
+  },
+  "video_game_fps_prediction": {
+   "zero": false,
+   "score": 26.16,
+   "seconds": 246.0,
+   "type": "regression",
+   "metric": "rmse",
+   "parsed_metric": "rmse",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "kfold — времени и заметных дубликатов нет",
+   "validation_ok": false
+  }
+ }
+}
