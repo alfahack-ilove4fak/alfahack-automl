@@ -33,6 +33,14 @@ def test_per_class_names_mismatch_noted(tmp_path):
     assert any("не совпадают" in note for note in spec.notes)
 
 
+def test_single_answer_column_not_target_noted_as_such(tmp_path):
+    """#276: шаблон `id, prediction` — одна колонка ответа с другим именем, а не «колонка на класс (1 шт.)»."""
+    spec = make_task(tmp_path, ["prediction"])
+    assert spec.target == "label" and spec.submission_columns == ["id", "prediction"]
+    assert any("«prediction» названа не как таргет" in note for note in spec.notes)
+    assert not any("колонка на класс" in note for note in spec.notes)
+
+
 def test_usual_layout_unchanged(tmp_path):
     pd.DataFrame({"id": range(4), "x": range(4), "label": ["a", "b", "a", "b"]}).to_csv(
         tmp_path / "train.csv", index=False
