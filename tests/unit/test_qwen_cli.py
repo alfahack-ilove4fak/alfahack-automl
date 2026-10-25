@@ -327,6 +327,15 @@ def test_check_quick_skips_long_answer(llm_env, monkeypatch, capsys):
     assert "--quick" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("argv", [["run", "task.md"], ["compare"]])
+def test_run_and_compare_preflight_runs_full_check(llm_env, monkeypatch, argv):
+    # #250: --quick объявлен только у check, а preflight run/compare вызывает cmd_check → AttributeError
+    calls = _check_env(monkeypatch, [qwen.ChatResult(True, "3 с", 3.0), qwen.ChatResult(True, "34 с", 34.0)])
+    args = qwen.build_parser().parse_args(argv)
+    assert qwen.preflight(args, set())[0] == 0
+    assert calls == [qwen.CHECK_PROMPT, qwen.LONG_PROMPT]
+
+
 def test_summary_counts_failed_requests_and_hints_disconnect():
     # реальный хвост лога regression 22.10: 5 коротких запросов прошли, 6 запросов гипотез оборвались
     cut = (

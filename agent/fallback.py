@@ -24,7 +24,7 @@ import os
 from itertools import combinations
 
 from agent.acceptance import fold_gains
-from agent.hypotheses import DEFAULT_MODEL, _applies, load_playbook, params_key, with_task_defaults
+from agent.hypotheses import DEFAULT_MODEL, _applies, load_playbook, params_key, run_scheme, with_task_defaults
 from interfaces.schemas import (
     DataProfile,
     ExperimentResult,
@@ -41,6 +41,8 @@ MAX_NEAR = 3  # сколько почти прошедших комбиниру�
 OPTUNA_MAX_SECONDS = 600.0  # как DEFAULTS["timeout"] в ml/tuning.py
 OPTUNA_BUDGET_SHARE = 0.3  # как BUDGET_SHARE в ml/tuning.py: подбор не съедает весь остаток
 OPTUNA_MIN_SECONDS = 30.0  # меньше — подбор не успеет ни одного осмысленного испытания
+# схемы, где Optuna переобучается под фолды: на public/regression (time:) честно 53.1 против 44.5 без неё (#236)
+NO_OPTUNA_SCHEMES = ("time:", "group:")
 OPTUNA_TRIALS = 30  # как DEFAULTS["trials"] в ml/tuning.py
 OPTUNA_DEEPER = (2, 4, 8)  # подбор глубже: ×2, ×4, ×8 испытаний — TPE с тем же seed продолжает тот же поиск
 # усреднение seed: 3 → 5 → 8 → 13 копий лучшей модели. Принималось на гейте (leak_column_auc, mape_in_words) и,
@@ -146,8 +148,9 @@ def _fits(item: dict, spec: TaskSpec, profile: DataProfile | None) -> bool:
 class _Directions:
     """Сборщик запасных гипотез от одного лучшего: общие params и помощники для каждого направления."""
 
-    def __init__(self, best_hyp: Hypothesis, budget: RunBudget):
+    def __init__(self, best_hyp: Hypothesis, budget: RunBudget, scheme: str | None = None):
         self.best = best_hyp
+        self.scheme = scheme or ""
         self.base = base_params(best_hyp.params)
         # лучший без optuna: его подобранные model_params уже в base — подбирать заново при каждом наложении незачем
         self.tuned = {k: v for k, v in self.base.items() if k != "optuna"}
@@ -183,6 +186,8 @@ class _Directions:
     def optuna(self, model: str, depth: int = 1) -> None:
         if self.timeout < OPTUNA_MIN_SECONDS or (model == self.model and not self.single):
             return
+        if self.scheme.startswith(NO_OPTUNA_SCHEMES):
+            return  # подбор на таких схемах хуже бейзлайна
         cfg: dict = {"timeout": round(self.timeout)}
         if depth > 1:
             cfg["trials"] = OPTUNA_TRIALS * depth
@@ -251,7 +256,7 @@ def fallback_hypotheses(
     """
     if os.getenv(FALLBACK_ENV, "1") == "0":
         return []
-    d = _Directions(best[0], budget)
+    d = _Directions(best[0], budget, run_scheme(history))
     # 1. модели и ансамбли — порядок danil по стенду (#200): дешёвые и сильные раньше
     d.other_model("xgboost")
     d.ensemble(2)
