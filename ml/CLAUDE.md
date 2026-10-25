@@ -7,7 +7,7 @@
 |---|---|
 | `profiling.py` | загрузка CSV, `DataProfile`, матрица признаков (`make_matrix`) |
 | `shift.py` | сдвиг train→test (#294): AUC «строка из train или из test» и признаки сдвига → `agent.log` и `DataProfile.warnings` строкой `adversarial_auc=0.88; …` (AUC без колонки времени/групп, выбранной `choose_validation`); только измерение, решений не меняет; `AGENT_SHIFT=0` выключает |
-| `experiment.py` | `run_experiment` (CV по гипотезе → `ExperimentResult`) и `fit_predict_final` (весь train → ответ) |
+| `experiment.py` | `run_experiment` (CV по гипотезе → `ExperimentResult`) и `fit_predict_final` (весь train → ответ; для одиночных LightGBM/XGBoost/CatBoost — среднее нескольких сидов, `AGENT_FINAL_SEEDS`: по умолчанию 5 до 10 млн ячеек, 3 до 25 млн, больше один, `1` — выключено, #261). Модели: lightgbm, catboost, xgboost, hist_gb, linear, random_forest, extra_trees |
 
 ## Контракты
 - Создаёшь: `DataProfile`, `ExperimentResult`, предсказания для сабмита. Читаешь: `TaskSpec`, `Hypothesis`, `RunBudget`.

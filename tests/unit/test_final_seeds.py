@@ -23,10 +23,13 @@ def _answer(monkeypatch, seeds, hyp, spec=None, data=None):
 
 def test_final_seeds_env(monkeypatch):
     monkeypatch.delenv(experiment.FINAL_SEEDS_ENV, raising=False)
-    assert final_seeds() == experiment.DEFAULT_FINAL_SEEDS == 3
-    for value, expected in [("1", 1), ("0", 1), ("-4", 1), ("5", 5), ("99", experiment.MAX_FINAL_SEEDS), ("мусор", 3)]:
+    # по умолчанию — по размеру таблицы: до 10 млн ячеек 5, до 25 млн 3, больше один
+    assert [final_seeds(c) for c in (0, 10_000_000, 10_000_001, 25_000_000, 25_000_001)] == [5, 5, 3, 3, 1]
+    for value, expected in [("1", 1), ("0", 1), ("-4", 1), ("4", 4), ("99", experiment.MAX_FINAL_SEEDS)]:
         monkeypatch.setenv(experiment.FINAL_SEEDS_ENV, value)
-        assert final_seeds() == expected
+        assert final_seeds(10**9) == expected  # явное число — независимо от размера
+    monkeypatch.setenv(experiment.FINAL_SEEDS_ENV, "мусор")
+    assert final_seeds(100) == 5  # мусор — как не задано
 
 
 def test_regression_mean_of_separate_seeds(monkeypatch):
@@ -87,11 +90,13 @@ def test_ensembles_and_deterministic_models_are_not_multiplied(monkeypatch):
 
 
 def test_huge_tables_use_one_seed(monkeypatch):
-    monkeypatch.setattr(experiment, "FINAL_SEEDS_MAX_CELLS", 100)
+    monkeypatch.delenv(experiment.FINAL_SEEDS_ENV, raising=False)
+    monkeypatch.setattr(experiment, "FINAL_SEEDS_BY_CELLS", ((100, 5),))
     calls = []
     original = experiment._fit_model
     monkeypatch.setattr(experiment, "_fit_model", lambda *a, **kw: (calls.append(1), original(*a, **kw))[1])
-    _answer(monkeypatch, 3, _hyp())
+    train, test, profile = _skewed()
+    fit_predict_final(_spec("rmse"), profile, _hyp(), train, test)  # AGENT_FINAL_SEEDS не задан: таблица > 100 ячеек
     assert len(calls) == 1
 
 

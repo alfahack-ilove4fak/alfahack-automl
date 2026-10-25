@@ -99,9 +99,10 @@ EARLY_STOPPING = 100
 # Сиды финала (#261, E3): среднее нескольких моделей с разными seed устойчивее одной — меньше дисперсия подвыборок
 # строк и признаков. AGENT_FINAL_SEEDS=1 — как раньше (один seed, ответ тот же байт в байт)
 FINAL_SEEDS_ENV = "AGENT_FINAL_SEEDS"
-DEFAULT_FINAL_SEEDS = 3
+# По умолчанию число сидов зависит от размера таблицы (строк × признаков): замер research/final_seeds.py на 12 задачах —
+# 5 сидов лучше одного на 10 из 12 (multiclass F1 0.581 → 0.596, финал 7 → 30 с), 3 сида — на 7 из 12
+FINAL_SEEDS_BY_CELLS = ((10_000_000, 5), (25_000_000, 3))  # (до стольки ячеек, сидов); больше — один seed
 MAX_FINAL_SEEDS = 10
-FINAL_SEEDS_MAX_CELLS = 25_000_000  # строк × признаков: больше — один seed (финал и так минуты, выигрыш от сидов мал)
 FINAL_SEED_KEYS = {"lightgbm": "random_state", "xgboost": "random_state", "catboost": "random_seed"}
 FINAL_TREES_MARGIN = 1.1  # на всём train деревьев нужно чуть больше, чем в фолде CV
 CV_TRAIN_SHARE = 0.8  # доля train в фолде kfold-5 — под неё подобран FINAL_TREES_MARGIN
@@ -1035,12 +1036,16 @@ def _without_group_column(spec: TaskSpec, profile: DataProfile, params: dict) ->
     )
 
 
-def final_seeds() -> int:
-    """Сколько сидов в финале: AGENT_FINAL_SEEDS (по умолчанию 3, 1 — выключено, мусор — по умолчанию)."""
+def final_seeds(cells: int = 0) -> int:
+    """Сколько сидов в финале для таблицы из cells ячеек.
+
+    AGENT_FINAL_SEEDS задаёт число явно (1 — выключено, но не больше MAX_FINAL_SEEDS); не задан или мусор — по размеру
+    таблицы (FINAL_SEEDS_BY_CELLS): на больших финал и так минуты, а выигрыш от сидов мал.
+    """
     try:
-        return max(1, min(MAX_FINAL_SEEDS, int(os.getenv(FINAL_SEEDS_ENV, DEFAULT_FINAL_SEEDS))))
-    except ValueError:
-        return DEFAULT_FINAL_SEEDS
+        return max(1, min(MAX_FINAL_SEEDS, int(os.environ[FINAL_SEEDS_ENV])))
+    except (KeyError, ValueError):
+        return next((n for limit, n in FINAL_SEEDS_BY_CELLS if cells <= limit), 1)
 
 
 def _fit_final(spec: TaskSpec, hypothesis: Hypothesis, x: pd.DataFrame, y: np.ndarray, n_estimators):
@@ -1052,8 +1057,8 @@ def _fit_final(spec: TaskSpec, hypothesis: Hypothesis, x: pd.DataFrame, y: np.nd
     """
     model_name = str(hypothesis.params.get("model") or DEFAULT_MODEL).lower()
     key = FINAL_SEED_KEYS.get(model_name)
-    n = final_seeds()
-    if n == 1 or key is None or hypothesis.params.get("ensemble") or x.shape[0] * x.shape[1] > FINAL_SEEDS_MAX_CELLS:
+    n = final_seeds(x.shape[0] * x.shape[1])
+    if n == 1 or key is None or hypothesis.params.get("ensemble"):
         return _fit_model(spec, hypothesis, x, y, n_estimators=n_estimators)[0]
     model_params = dict(hypothesis.params.get("model_params") or {})
     first = int(model_params.get(key, SEED))

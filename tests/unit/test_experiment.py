@@ -81,12 +81,12 @@ def test_unknown_model_fails_instead_of_silent_lightgbm():
     spec = _spec(TaskType.REGRESSION, "rmse", greater=False)
     train, test, profile = _data(TaskType.REGRESSION)
 
-    result = run_experiment(spec, profile, _hyp(model="random_forest"), train, RunBudget())
+    result = run_experiment(spec, profile, _hyp(model="gradient_pigeon"), train, RunBudget())
 
     assert result.status == ExperimentStatus.FAILED
-    assert "random_forest" in result.error
+    assert "gradient_pigeon" in result.error
     with pytest.raises(ValueError, match="неизвестная модель"):
-        fit_predict_final(spec, profile, _hyp(model="random_forest"), train, test)
+        fit_predict_final(spec, profile, _hyp(model="gradient_pigeon"), train, test)
 
 
 # Модель → (пакет, который нужен; гиперпараметры для быстрого теста; ждём ли ≥ 1 дерева)
