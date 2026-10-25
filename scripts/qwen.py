@@ -360,7 +360,7 @@ def cmd_check(args: argparse.Namespace, from_shell: set[str]) -> int:
     chat = check_chat(key)
     show([models, Line(OK if chat.ok else FAIL, "chat/completions через LLMClient", chat.detail)])
     long, long_seconds = None, 0.0
-    if chat.ok and not args.quick:
+    if chat.ok and not getattr(args, "quick", False):
         long, long_seconds = check_long(key)
         show([long])
     try:

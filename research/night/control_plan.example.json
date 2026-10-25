@@ -1,0 +1,16 @@
+{
+  "title": "Гипотеза object_history (#276): до/после, гейт, ловушки",
+  "hypothesis": "object_history",
+  "runs": ["runs/oh/before_runs", "runs/oh/after_runs", "../wt-oh/runs/night/alien_runs", "../wt-oh/runs/night/leak_runs"],
+  "pairs": [
+    {"name": "харнесс 15 мин", "before": "runs/oh/before.csv", "after": "runs/oh/after.csv"},
+    {"name": "multiclass 5 мин (перепроверка)", "before": "runs/oh/mc5_dev.csv", "after": "runs/oh/mc5_oh.csv", "criterion": false}
+  ],
+  "gate": {"report": "runs/oh/gate/gate.md", "results": ["runs/oh/gate/harness.csv", "../wt-oh/runs/night/alien_results.jsonl"]},
+  "rechecks": [
+    {"name": "multiclass 5 мин", "before": "runs/oh/mc5_dev.csv", "after": "runs/oh/mc5_oh.csv"},
+    {"name": "wide_1500 на dev", "before": "../wt-dev/runs/night/alien_results.jsonl"}
+  ],
+  "leak": {"before": "../wt-dev/runs/night/leak_results.jsonl", "after": "../wt-oh/runs/night/leak_results.jsonl"},
+  "criteria": {"min_gain_pct": 2.0, "min_tasks": 2, "noise": 2.0, "t_min": 2.0, "grace_sec": 90, "stale_sec": 180}
+}

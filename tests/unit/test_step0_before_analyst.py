@@ -56,7 +56,7 @@ def make_task(folder, test_cols=("id", "a", "b"), train_extra=(), n=40, n_test=1
 
 @pytest.fixture(autouse=True)
 def no_real_llm(monkeypatch):
-    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV):
+    for var in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "LLM_MOCK", ANALYST_ENV, "AGENT_ANALYST_APPLY"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -136,6 +136,7 @@ def test_analyst_changes_metric_step0_is_rewritten(tmp_path, monkeypatch):
     assert spec.metric.name == "rmse"  # без LLM метрика по умолчанию для регрессии
     fake = FakeLLM({"target": "y", "id_column": "id", "metric": "mae"})
     monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("AGENT_ANALYST_APPLY", "1")  # явно: с AGENT_ANALYST_APPLY=0 угаданное не меняется (#276)
 
     new_spec, new_train, new_test = refine_with_analyst(task_md, spec, train, test, keeper, log)
 
@@ -193,3 +194,32 @@ def test_spec_changed_sees_metric_and_columns(tmp_path):
     assert spec_changed(spec, spec.model_copy(update={"id_column": "row_id"}))
     other_metric = spec.metric.model_copy(update={"name": "mae"})
     assert spec_changed(spec, spec.model_copy(update={"metric": other_metric}))
+
+
+def test_ambiguous_target_has_fallback_answer_on_disk_before_analyst(tmp_path, monkeypatch):
+    """Разбор по данным упал, аналитик зависает до 90 с: к его запросу на диске уже есть ответ (#239)."""
+    task_md = make_task(tmp_path, train_extra=["y_leak"])
+    seen = {}
+
+    class HangingLLM(FakeLLM):
+        def chat_json(self, messages, **kwargs):
+            seen["on_disk"] = (tmp_path / "submission.csv").exists()
+            return super().chat_json(messages, **kwargs)
+
+    fake = HangingLLM({"target": "y", "id_column": "id"})
+    monkeypatch.setattr("agent.llm_client.LLMClient", lambda *args, **kwargs: fake)
+
+    class Stop(Exception):
+        pass
+
+    def stop_after_step0(*args, **kwargs):
+        raise Stop
+
+    monkeypatch.setattr(solution, "profile_data", stop_after_step0)
+    started = time.time()
+    budget = make_budget(started)
+    with pytest.raises(Stop):
+        run_pipeline(task_md, budget, plan_stages(budget), AnswerKeeper(task_md), started)
+    assert seen["on_disk"] is True
+    answer = pd.read_csv(tmp_path / "submission.csv")
+    assert len(answer) == 10 and "y" in answer.columns
