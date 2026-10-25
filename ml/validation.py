@@ -22,6 +22,7 @@ import pandas as pd
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
 from interfaces.schemas import DataProfile, TaskSpec, TaskType
+from ml.shift import log_shift
 from runtime.log import get_logger
 
 log = get_logger("validation")
@@ -246,6 +247,13 @@ def _group_folds_ok(spec: TaskSpec, train: pd.DataFrame, column: str, features: 
 
 
 def choose_validation(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame, test: pd.DataFrame) -> str:
+    """Схема валидации (см. _choose_scheme) + замер сдвига train→test (ml/shift.py): только лог и profile.warnings."""
+    scheme = _choose_scheme(spec, profile, train, test)
+    log_shift(profile, train, test, scheme)  # после выбора схемы: колонку времени/групп из замера исключаем
+    return scheme
+
+
+def _choose_scheme(spec: TaskSpec, profile: DataProfile, train: pd.DataFrame, test: pd.DataFrame) -> str:
     """Схема по умолчанию, похожая на то, как устроен скрытый test. Вызывать один раз до цикла (ADR 0008, D1).
 
     1. Есть колонка времени, и test лежит после train → time:<колонка> (обучение на прошлом, проверка на будущем).
