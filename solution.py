@@ -377,12 +377,12 @@ def cpu_info() -> str:
     parts = [f"cpu_count={os.cpu_count()}"]
     try:
         parts.append(f"affinity={len(os.sched_getaffinity(0))}")
-    except (AttributeError, OSError):
+    except Exception:  # noqa: BLE001 — строка в лог не должна ронять агента до первого ответа
         pass
     for path in ("/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"):  # cgroup v2 / v1
         try:
             parts.append(f"{path}={Path(path).read_text().strip()}")
-        except OSError:
+        except Exception:  # noqa: BLE001 — нет файла, права, не UTF-8: просто нет этой части строки
             pass
     return ", ".join(parts)
 
