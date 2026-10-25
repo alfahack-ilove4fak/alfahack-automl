@@ -39,4 +39,3 @@ def test_cpu_info_shows_cgroup_quota(monkeypatch):
 def test_cpu_info_without_affinity(monkeypatch):
     monkeypatch.delattr(solution.os, "sched_getaffinity", raising=False)  # macOS/Windows
     assert "affinity" not in solution.cpu_info()
-
