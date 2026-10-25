@@ -108,7 +108,7 @@ def main(task_md: Path) -> None:
     for tr, va in StratifiedGroupKFold(5, shuffle=True, random_state=SEED).split(part, y_part, groups):
         oof[va] = fit_proba(part.iloc[tr], y_part[tr], part.iloc[va], features, k)
     w = fit_weights(metric, True, y_part, oof)
-    print("множители", dict(zip(classes, w.round(2))), flush=True)
+    print("множители", dict(zip(classes, w.round(2), strict=True)), flush=True)
 
     proba_hold = fit_proba(part, y_part, hold, features, k)
     rows = []
@@ -126,7 +126,7 @@ def main(task_md: Path) -> None:
         counts = rng.multinomial(len(hold), q / q.sum())
         return np.concatenate([rng.choice(by_class[c], counts[c]) for c in present if counts[c]])
 
-    for i in range(N_SHIFTS):
+    for _ in range(N_SHIFTS):
         q = np.zeros(k)
         q[present] = rng.dirichlet(np.ones(len(present)))
         score("случайные доли (Dirichlet)", resample(q))
@@ -147,11 +147,16 @@ def main(task_md: Path) -> None:
     known = g_te.isin(label.index).to_numpy()
     y_known = g_te[known].map(label).to_numpy()
     for method, pred in answers(proba_test, p_all, w).items():
-        rows.append({"проверка": f"test, строки с копией ({known.sum()})", "способ": method,
-                     "score": compute_metric(metric, y_known, pred[known])})
+        rows.append(
+            {
+                "проверка": f"test, строки с копией ({known.sum()})",
+                "способ": method,
+                "score": compute_metric(metric, y_known, pred[known]),
+            }
+        )
         if method in ("argmax", "em"):
             share = np.bincount(pred, minlength=k) / len(pred)
-            print(f"доли ответа на test, {method}:", dict(zip(classes, share.round(3))), flush=True)
+            print(f"доли ответа на test, {method}:", dict(zip(classes, share.round(3), strict=True)), flush=True)
 
     table = pd.DataFrame(rows).groupby(["проверка", "способ"], sort=False).score.agg(["mean", "std", "count"])
     print(table.round(4).to_string(), flush=True)
