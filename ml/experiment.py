@@ -9,7 +9,10 @@
 на time:Year_Factor — честно 45.92 (ADR 0013). Поэтому ключ снова открыт агенту (#200).
 
 Поддерживаемые params гипотезы (расширяйте — и документируйте в research/playbook.yaml):
-  model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear". Список — MODEL_FITTERS.
+  model          — "lightgbm" (по умолчанию) | "catboost" | "xgboost" | "hist_gb" | "linear" | "random_forest" |
+                   "extra_trees". Список — MODEL_FITTERS.
+                   random_forest / extra_trees — бэггинг деревьев из scikit-learn (#261): устойчивее бустинга при сдвиге
+                   test; model_params: n_estimators, max_features, min_samples_leaf…; ранней остановки нет
                    hist_gb — HistGradientBoosting из scikit-learn: самый быстрый бустинг, категории нативно
                    linear — Ridge (регрессия) / LogisticRegression (классы) с масштабированием и one-hot;
                    её model_params: alpha (Ridge), C (LogisticRegression)
@@ -93,6 +96,13 @@ BASE_PARAMS = {
     "n_jobs": min(os.cpu_count() or 1, 4),
 }
 EARLY_STOPPING = 100
+# Сиды финала (#261, E3): среднее нескольких моделей с разными seed устойчивее одной — меньше дисперсия подвыборок
+# строк и признаков. AGENT_FINAL_SEEDS=1 — как раньше (один seed, ответ тот же байт в байт)
+FINAL_SEEDS_ENV = "AGENT_FINAL_SEEDS"
+DEFAULT_FINAL_SEEDS = 3
+MAX_FINAL_SEEDS = 10
+FINAL_SEEDS_MAX_CELLS = 25_000_000  # строк × признаков: больше — один seed (финал и так минуты, выигрыш от сидов мал)
+FINAL_SEED_KEYS = {"lightgbm": "random_state", "xgboost": "random_state", "catboost": "random_seed"}
 FINAL_TREES_MARGIN = 1.1  # на всём train деревьев нужно чуть больше, чем в фолде CV
 CV_TRAIN_SHARE = 0.8  # доля train в фолде kfold-5 — под неё подобран FINAL_TREES_MARGIN
 MAX_TREES_SCALE = 3.0  # поправка на долю train не больше ×3: деревьев с данными растёт медленнее, чем линейно
@@ -452,6 +462,53 @@ def _fit_hist_gb(
     return model, int(estimator.n_iter_)
 
 
+FOREST_TREES = 200  # деревьев в лесу: больше почти не меняет скор, а время растёт линейно
+FOREST_MAX_ROWS = 100_000  # на больших train каждое дерево учится на подвыборке строк (bootstrap max_samples)
+
+
+def _fit_forest(
+    extra: bool, spec: TaskSpec, hypothesis: Hypothesis, x: pd.DataFrame, y: np.ndarray
+) -> tuple[object, int]:
+    """RandomForest (extra=False) или ExtraTrees (extra=True): бэггинг глубоких деревьев, среднее их прогнозов.
+
+    Категории → коды, пропуски → медиана (ExtraTrees в scikit-learn 1.5 пропуски не принимает). Деревьев-итераций у
+    леса нет: возвращает 0, как linear, а eval_set и n_estimators не нужны — число деревьев задаёт
+    model_params.n_estimators (по умолчанию FOREST_TREES). Бэггинг устойчивее бустинга при сдвиге test (замер капитана
+    на public/multiclass: −0.04 против −0.07…−0.10 Macro F1) и ошибается иначе — хороший участник ансамбля.
+    """
+    from sklearn.ensemble import (
+        ExtraTreesClassifier,
+        ExtraTreesRegressor,
+        RandomForestClassifier,
+        RandomForestRegressor,
+    )
+
+    params = {"n_estimators": FOREST_TREES, "n_jobs": min(os.cpu_count() or 1, 4), "random_state": SEED}
+    if len(x) > FOREST_MAX_ROWS:
+        params.update(bootstrap=True, max_samples=FOREST_MAX_ROWS / len(x))
+    params.update(hypothesis.params.get("model_params", {}))
+    if _is_classification(spec):
+        if hypothesis.params.get("class_weight") is not None:
+            params["class_weight"] = hypothesis.params["class_weight"]
+        estimator = (ExtraTreesClassifier if extra else RandomForestClassifier)(**params)
+    else:
+        estimator = (ExtraTreesRegressor if extra else RandomForestRegressor)(**params)
+    imputer = SimpleImputer(strategy="median", keep_empty_features=True)
+    model = make_pipeline(FunctionTransformer(_category_codes), imputer, estimator)
+    model.fit(x, y)
+    return model, 0
+
+
+def _fit_random_forest(spec, hypothesis, x, y, eval_set=None, n_estimators=None) -> tuple[object, int]:
+    """RandomForest из scikit-learn (_fit_forest). Сигнатура общая с остальными моделями реестра."""
+    return _fit_forest(False, spec, hypothesis, x, y)
+
+
+def _fit_extra_trees(spec, hypothesis, x, y, eval_set=None, n_estimators=None) -> tuple[object, int]:
+    """ExtraTrees из scikit-learn (_fit_forest): случайные пороги — ещё сильнее регуляризует, чем RandomForest."""
+    return _fit_forest(True, spec, hypothesis, x, y)
+
+
 # Модели, которые понимает params.model. Новая модель = функция _fit_<имя> с той же сигнатурой + строка здесь
 MODEL_FITTERS = {
     "lightgbm": _fit_lightgbm,
@@ -459,6 +516,8 @@ MODEL_FITTERS = {
     "xgboost": _fit_xgboost,
     "hist_gb": _fit_hist_gb,
     "linear": _fit_linear,
+    "random_forest": _fit_random_forest,
+    "extra_trees": _fit_extra_trees,
 }
 DEFAULT_MODEL = "lightgbm"
 
@@ -976,6 +1035,36 @@ def _without_group_column(spec: TaskSpec, profile: DataProfile, params: dict) ->
     )
 
 
+def final_seeds() -> int:
+    """Сколько сидов в финале: AGENT_FINAL_SEEDS (по умолчанию 3, 1 — выключено, мусор — по умолчанию)."""
+    try:
+        return max(1, min(MAX_FINAL_SEEDS, int(os.getenv(FINAL_SEEDS_ENV, DEFAULT_FINAL_SEEDS))))
+    except ValueError:
+        return DEFAULT_FINAL_SEEDS
+
+
+def _fit_final(spec: TaskSpec, hypothesis: Hypothesis, x: pd.DataFrame, y: np.ndarray, n_estimators):
+    """Финальная модель: среднее final_seeds() копий с соседними seed (_Ensemble) или одна, как до #261.
+
+    Несколько сидов — только у одиночных LightGBM, XGBoost и CatBoost: ансамбль уже усредняет (у усреднения seed в
+    запасных направлениях свои seed), а у hist_gb и linear в финале seed ничего не меняет. Первый seed — тот, что был
+    бы без сидов (model_params или SEED), поэтому AGENT_FINAL_SEEDS=1 даёт прежний ответ.
+    """
+    model_name = str(hypothesis.params.get("model") or DEFAULT_MODEL).lower()
+    key = FINAL_SEED_KEYS.get(model_name)
+    n = final_seeds()
+    if n == 1 or key is None or hypothesis.params.get("ensemble") or x.shape[0] * x.shape[1] > FINAL_SEEDS_MAX_CELLS:
+        return _fit_model(spec, hypothesis, x, y, n_estimators=n_estimators)[0]
+    model_params = dict(hypothesis.params.get("model_params") or {})
+    first = int(model_params.get(key, SEED))
+    models = []
+    for i in range(n):
+        params = {**hypothesis.params, "model_params": {**model_params, key: first + i}}
+        member = hypothesis.model_copy(update={"params": params})
+        models.append(_fit_model(spec, member, x, y, n_estimators=n_estimators)[0])
+    return _Ensemble(models, [False] * n)
+
+
 def fit_predict_final(
     spec: TaskSpec, profile: DataProfile, hypothesis: Hypothesis, train: pd.DataFrame, test: pd.DataFrame
 ) -> pd.DataFrame:
@@ -992,7 +1081,7 @@ def fit_predict_final(
     if ops:
         x, x_test = apply_feature_ops(ops, x, y, _is_classification(spec), x_test)
     n_estimators = _final_estimators(params.get("_best_iteration"), _trees_scale(params))
-    model, _ = _fit_model(spec, hypothesis, x, y_fit, n_estimators=n_estimators)
+    model = _fit_final(spec, hypothesis, x, y_fit, n_estimators)
     pred = _predict(spec, model, x_test, log_target)
     if _use_proba_weights(spec, params) and params.get("_proba_weights"):
         pred = (model.predict_proba(x_test) * np.asarray(params["_proba_weights"])).argmax(axis=1)

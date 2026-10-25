@@ -19,7 +19,14 @@ DEFAULT_FOLDS = 5
 TIME_SAFETY = 1.5
 MAX_SLOWDOWN = 20.0  # оценка не больше ×20 — дальше модель времени всё равно не верна
 # Во сколько раз модель дольше LightGBM при параметрах по умолчанию (замер ml, ревью #97; уточняется в #27)
-MODEL_SLOWDOWN = {"lightgbm": 1.0, "catboost": 8.0, "xgboost": 4.0, "linear": 2.0}
+MODEL_SLOWDOWN = {
+    "lightgbm": 1.0,
+    "catboost": 8.0,
+    "xgboost": 4.0,
+    "linear": 2.0,
+    "random_forest": 4.0,
+    "extra_trees": 3.0,
+}
 UNKNOWN_MODEL_SLOWDOWN = 4.0
 
 

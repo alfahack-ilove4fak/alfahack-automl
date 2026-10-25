@@ -45,7 +45,14 @@ from interfaces.schemas import (
     TaskSpec,
 )
 
-FALLBACK_MODELS = ("xgboost", "catboost", "hist_gb")
+FALLBACK_MODELS = ("xgboost", "catboost", "hist_gb", "random_forest", "extra_trees")
+TUNABLE_MODELS = (
+    "lightgbm",
+    "xgboost",
+    "catboost",
+    "hist_gb",
+    "linear",
+)  # у остальных нет пространства Optuna (ml/tuning.py)
 NEAR_MIN_WINS = 3  # «почти прошла»: лучше лучшего хотя бы на 3 фолдах из 5
 MAX_NEAR = 3  # сколько почти прошедших комбинируем: 3 по одной + 3 пары
 OPTUNA_MAX_SECONDS = 600.0  # как DEFAULTS["timeout"] в ml/tuning.py
@@ -217,7 +224,20 @@ class _Directions:
             {**self.common, "ensemble": [_member(m, self.base) for m in models]},
         )
 
+    def forest_ensemble(self) -> None:
+        """Лучшая модель + RandomForest: бэггинг и бустинг ошибаются по-разному (#261, замер капитана на сдвиге)."""
+        if not self.single or self.model == "random_forest":
+            return
+        self.add(
+            HypothesisKind.ENSEMBLE,
+            f"ансамбль {self.model} + random_forest",
+            "бустинг и бэггинг: ошибки разной природы, а при сдвиге test лес теряет меньше бустинга (#261)",
+            {**self.common, "ensemble": [_member(self.model, self.base), "random_forest"]},
+        )
+
     def optuna(self, model: str, depth: int = 1) -> None:
+        if model not in TUNABLE_MODELS:
+            return
         if self.timeout < OPTUNA_MIN_SECONDS or (model == self.model and not self.single):
             return
         if self.scheme.startswith(NO_OPTUNA_SCHEMES):
@@ -302,6 +322,9 @@ def fallback_hypotheses(
     d.optuna(d.model)
     d.ensemble(3)
     d.other_model("hist_gb")
+    d.other_model("random_forest")
+    d.forest_ensemble()
+    d.other_model("extra_trees")
     d.optuna(DEFAULT_MODEL)
     # 2. почти прошедшие (#87)
     near = near_misses(history, best, spec.metric.greater_is_better)

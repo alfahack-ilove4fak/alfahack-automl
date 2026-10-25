@@ -215,6 +215,18 @@ hypotheses:
     rationale: Самый быстрый бустинг, категории нативно; третья реализация бустинга — другие ошибки, кандидат в ансамбль
     params: {model: hist_gb}
 
+  - id: random_forest
+    kind: model
+    title: RandomForest (бэггинг глубоких деревьев)
+    rationale: Среднее независимых деревьев устойчивее бустинга при сдвиге test (по замеру капитана на public/multiclass лес теряет 0.04 Macro F1, бустинг 0.07–0.10) и ошибается иначе; кандидат в ансамбль (#261)
+    params: {model: random_forest}
+
+  - id: extra_trees
+    kind: model
+    title: ExtraTrees (бэггинг со случайными порогами)
+    rationale: Случайные пороги регуляризуют сильнее RandomForest и быстрее считаются; полезны на шумных данных и при сдвиге (#261)
+    params: {model: extra_trees}
+
   - id: lgbm_default
     kind: model
     title: LightGBM с параметрами библиотеки по умолчанию
