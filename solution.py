@@ -384,6 +384,21 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
     )
 
 
+def cpu_info() -> str:
+    """Сколько ядер реально у агента: os.cpu_count() в Docker показывает ядра хоста, а не лимит контейнера."""
+    parts = [f"cpu_count={os.cpu_count()}"]
+    try:
+        parts.append(f"affinity={len(os.sched_getaffinity(0))}")
+    except Exception:  # noqa: BLE001 — строка в лог не должна ронять агента до первого ответа
+        pass
+    for path in ("/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"):  # cgroup v2 / v1
+        try:
+            parts.append(f"{path}={Path(path).read_text().strip()}")
+        except Exception:  # noqa: BLE001 — нет файла, права, не UTF-8: просто нет этой части строки
+            pass
+    return ", ".join(parts)
+
+
 def main(argv: list[str]) -> int:
     started = time.time()
     run_dir = Path(os.environ["AGENT_RUN_DIR"]) if os.getenv("AGENT_RUN_DIR") else None
@@ -393,6 +408,7 @@ def main(argv: list[str]) -> int:
     task_md = Path(argv[1] if len(argv) > 1 else "task.md")
     log.info("Старт: %s, бюджет %.0f с, RAM %.0f МБ", task_md, budget.total_seconds, budget.ram_limit_mb)
     log.info("План этапов: %s", plan.describe())
+    log.info("CPU: %s", cpu_info())
 
     keeper = AnswerKeeper(task_md)
     watchdog = Watchdog(plan.hard_deadline, keeper.finalize, lock=keeper.lock)
