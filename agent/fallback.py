@@ -239,7 +239,7 @@ class _Directions:
                 HypothesisKind(item["kind"]),
                 f"{item['id']} поверх лучшего",
                 "идея playbook проверялась против бейзлайна, а вместе с тем, что уже принято, — нет (#87)",
-                with_task_defaults(merged, spec),
+                with_task_defaults(merged, spec, profile),
             )
 
 

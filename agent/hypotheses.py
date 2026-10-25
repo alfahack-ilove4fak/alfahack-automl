@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -26,6 +28,9 @@ from interfaces.schemas import (
     TaskSpec,
     TaskType,
 )
+from runtime.log import get_logger
+
+log = get_logger("hypotheses")
 
 PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "research" / "playbook.yaml"
 
@@ -36,25 +41,65 @@ PLAYBOOK_PATH = Path(__file__).resolve().parent.parent / "research" / "playbook.
 PROBA_WEIGHTS_SKIP = {"accuracy"}
 
 
-def wants_proba_weights(spec: TaskSpec | None) -> bool:
-    """Подбирать ли множители классов в этой задаче: классификация + метрика по меткам, кроме accuracy."""
+# Множители подбираются на OOF под доли классов train. Если test заметно отличается от train (классификатор
+# «строка из train или из test» различает их: AUC без колонки времени в DataProfile.warnings, ml/validation, #294),
+# доли в test другие и множители могут вредить (#276, public multiclass). AGENT_PROBA_SHIFT_AUC=0 — не проверять
+PROBA_SHIFT_ENV = "AGENT_PROBA_SHIFT_AUC"
+PROBA_SHIFT_AUC = 0.8
+SHIFT_AUC_RE = re.compile(r"^adversarial_auc=(\d*\.?\d+)")
+
+
+def shift_auc(profile: DataProfile | None) -> float | None:
+    """AUC сдвига train → test из DataProfile.warnings (строка «adversarial_auc=0.88; …») или None, если его нет."""
+    for warning in profile.warnings if profile is not None else []:
+        match = SHIFT_AUC_RE.match(warning)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def proba_shift_limit() -> float:
+    """Порог AUC сдвига из AGENT_PROBA_SHIFT_AUC; мусор → по умолчанию, ≤ 0 → проверка выключена."""
+    try:
+        limit = float(os.getenv(PROBA_SHIFT_ENV, PROBA_SHIFT_AUC))
+    except ValueError:
+        return PROBA_SHIFT_AUC
+    return limit if math.isfinite(limit) and limit > 0 else 0.0
+
+
+def shifted(profile: DataProfile | None) -> bool:
+    """test заметно отличается от train: AUC сдвига не ниже порога (нет AUC или проверка выключена — False)."""
+    limit, auc = proba_shift_limit(), shift_auc(profile)
+    return limit > 0 and auc is not None and auc >= limit
+
+
+def wants_proba_weights(spec: TaskSpec | None, profile: DataProfile | None = None) -> bool:
+    """Подбирать ли множители классов в этой задаче: классификация + метрика по меткам, кроме accuracy, без сдвига."""
     if spec is None or spec.task_type == TaskType.REGRESSION or spec.metric.name in PROBA_WEIGHTS_SKIP:
         return False
     try:
         metric = METRICS[spec.metric.name]  # не .get(): параметрические (fbeta@2, pinball@0.9) собирает __missing__
     except KeyError:
         return False
-    return metric.prediction == "label"
+    return metric.prediction == "label" and not shifted(profile)
 
 
-def baseline_hypothesis(spec: TaskSpec | None = None) -> Hypothesis:
+def baseline_hypothesis(spec: TaskSpec | None = None, profile: DataProfile | None = None) -> Hypothesis:
     """Бейзлайн — LightGBM по умолчанию; для метрик по меткам — с подбором множителей классов (#191).
 
     Без подбора ответ — argmax, то есть порог 0.5: при редком классе это лотерея (payments: F1 0.09 против 0.34).
+    При сдвиге train → test (shifted) множители не подбираем: их подгоняют под доли классов train.
     """
     params = {"model": "lightgbm"}
-    if wants_proba_weights(spec):
+    if wants_proba_weights(spec, profile):
         params["proba_weights"] = True
+    elif wants_proba_weights(spec):
+        log.info(
+            "Множители классов не подбираем: train и test различаются (AUC сдвига %.3f ≥ %g, %s)",
+            shift_auc(profile),
+            proba_shift_limit(),
+            PROBA_SHIFT_ENV,
+        )
     return Hypothesis(
         id="baseline",
         kind=HypothesisKind.BASELINE,
@@ -64,14 +109,14 @@ def baseline_hypothesis(spec: TaskSpec | None = None) -> Hypothesis:
     )
 
 
-def with_task_defaults(params: dict, spec: TaskSpec) -> dict:
+def with_task_defaults(params: dict, spec: TaskSpec, profile: DataProfile | None = None) -> dict:
     """params гипотезы + то, что у бейзлайна включено для этой задачи (#191).
 
     Бейзлайн подбирает множители классов, если метрика по меткам (wants_proba_weights). Гипотезы playbook и LLM —
     отдельные наборы params, не наследуют их от лучшего; без этого каждая сравнивалась бы с бейзлайном без множителей
     и проигрывала бы заведомо. Явное значение в гипотезе (proba_weights: false) не трогаем.
     """
-    if "proba_weights" in params or not wants_proba_weights(spec):
+    if "proba_weights" in params or not wants_proba_weights(spec, profile):
         return params
     return {**params, "proba_weights": True}
 
@@ -209,7 +254,7 @@ def _llm_part(spec, profile, history, k, llm, memory, budget) -> list[Hypothesis
     from agent.llm_hypotheses import llm_hypotheses  # здесь: llm_hypotheses сам импортирует этот модуль
 
     out = llm_hypotheses(spec, profile, history, k, llm, memory, budget)
-    return [h.model_copy(update={"params": with_task_defaults(h.params, spec)}) for h in out]
+    return [h.model_copy(update={"params": with_task_defaults(h.params, spec, profile)}) for h in out]
 
 
 def _dedup(hyps: list[Hypothesis], history, out: list[Hypothesis]) -> list[Hypothesis]:
@@ -236,7 +281,7 @@ def _playbook_part(spec, profile, history, k, out: list[Hypothesis]) -> list[Hyp
     for item in load_playbook():
         if len(picked) >= k:
             break
-        params = with_task_defaults(item.get("params", {}), spec)
+        params = with_task_defaults(item.get("params", {}), spec, profile)
         if item["id"] in tried or params_key(params, scheme) in seen_params or not _applies(item, spec, profile):
             continue
         picked.append(
