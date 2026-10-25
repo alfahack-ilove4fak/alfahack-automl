@@ -89,15 +89,22 @@ def test_observed_slowdown_from_finished_and_timeout_runs():
     assert observed_slowdown(hyp("o", "xgboost", optuna=True), finished, 100) == 1.0
 
 
-def test_expensive_hypothesis_skipped_by_cap(monkeypatch):
+def test_unmeasured_expensive_hypothesis_runs_under_cap(monkeypatch):
     monkeypatch.delenv(critic.HYP_TIME_SHARE_ENV, raising=False)
-    # бейзлайн 1000 с: XGBoost ≈ 1000 × 4 × 1.5 = 6000 с — в остаток (~9900 с) влезает, но это > 25% остатка
+    # бейзлайн 1000 с: XGBoost по таблице ≈ 6000 с > 25% остатка, но замера ещё нет — не пропускаем, а запускаем
+    # с бюджетом-потолком max(25% остатка, 3 бейзлайна) ≈ 3000 с: дорогую гипотезу оборвёт прогноз по фолду в ml/
     seen, results = run(monkeypatch, [hyp("xgb", "xgboost"), hyp("lgbm")], baseline_seconds=1000)
-    assert "xgb" not in seen
-    assert results["xgb"].status == ExperimentStatus.SKIPPED
-    assert "потолка гипотезы" in results["xgb"].error
-    # дешёвая гипотеза идёт, но ml/ видит бюджет с потолком: max(25% остатка, 3 бейзлайна) ≈ 3000 с
+    assert seen["xgb"] == pytest.approx(3000, abs=5)
     assert seen["lgbm"] == pytest.approx(3000, abs=5)
+    assert results["xgb"].status == ExperimentStatus.OK
+
+
+def test_ensemble_not_skipped_by_table_estimate(monkeypatch):
+    monkeypatch.delenv(critic.HYP_TIME_SHARE_ENV, raising=False)
+    # регрессия расчёта по прогону A: ансамбль из трёх моделей оценён в ×13 бейзлайна, на деле дешевле — не пропускать
+    ens = hyp("ens", ensemble=["lightgbm", "xgboost", "catboost"])
+    seen, results = run(monkeypatch, [ens], baseline_seconds=300)
+    assert "ens" in seen and results["ens"].status == ExperimentStatus.OK
 
 
 def test_cap_off_keeps_old_behaviour(monkeypatch):

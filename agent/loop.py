@@ -123,14 +123,18 @@ def run_autoresearch(
         reason = review(hyp, spec) or foreign_validation(hyp, validation)
         needed = estimated_seconds(hyp, baseline_seconds)
         share = hyp_time_share()
-        limit = None
+        limit, measured = None, 1.0
         if share > 0:  # потолок одной гипотезы (#276); AGENT_HYP_TIME_SHARE=0 — как раньше
-            needed *= observed_slowdown(hyp, history, baseline_seconds)
+            measured = observed_slowdown(hyp, history, baseline_seconds)
+            needed *= measured
             if not hyp.params.get("optuna"):  # подбор Optuna ограничен своей долей остатка (ml/tuning.py)
                 limit = hypothesis_limit(budget.seconds_left(), share, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
             reason = f"не успеет: оценка {needed:.0f} с, осталось {budget.seconds_left():.0f} с"
-        if reason is None and limit is not None and needed > limit:
+        # До запуска по потолку пропускаем, только если дороговизну подтвердил замер этой модели: табличная оценка
+        # завышает ансамбли в разы (multiclass, 180 мин: lightgbm+xgboost+catboost — оценка 1580 с, на деле 233 с).
+        # Без замера гипотеза идёт с бюджетом-потолком, и прогноз по первому фолду в ml/ оборвёт её, если она дорогая
+        if reason is None and limit is not None and needed > limit and measured > 1.0:
             reason = (
                 f"дороже потолка гипотезы: оценка {needed:.0f} с > {limit:.0f} с "
                 f"({share:.0%} остатка {budget.seconds_left():.0f} с, {HYP_TIME_SHARE_ENV})"
