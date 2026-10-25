@@ -22,40 +22,95 @@ from runtime.log import get_logger
 
 log = get_logger("task_parser")
 
-FILE_PATTERNS = {
-    "train": re.compile(r"^train.*\.csv$", re.I),
-    "test": re.compile(r"^test.*\.csv$", re.I),
-    "sample_submission": re.compile(r"^sample.*submission.*\.csv$", re.I),
-    "data_dictionary": re.compile(r"^(data_)?dictionary.*\.csv$", re.I),
+# Роль файла — по словам имени, без регистра: train.csv, TRAIN.CSV, data_train, learn; test, holdout (#276, приоритет 2)
+TABLE_SUFFIXES = (".csv", ".tsv", ".txt")
+COMPRESSED_SUFFIXES = (".gz", ".zip", ".bz2", ".xz")
+TRAIN_WORDS = ("train", "learn")
+TEST_WORDS = ("test", "holdout")
+CANONICAL = {
+    "train": "train",
+    "test": "test",
+    "sample_submission": "sample_submission",
+    "data_dictionary": "data_dictionary",
 }
+SKIP_DIRS = {"__MACOSX", ".git", "__pycache__", "runs"}
 DEFAULT_METRIC = {TaskType.REGRESSION: "rmse", TaskType.BINARY: "roc_auc", TaskType.MULTICLASS: "f1_macro"}
 LABEL_METRIC = {TaskType.BINARY: "accuracy", TaskType.MULTICLASS: "f1_macro"}  # когда в шаблоне метки
 MAX_CLASSES_FOR_NUMERIC_TARGET = 20
 
 
+def table_stem(name: str) -> str | None:
+    """Имя без расширений таблицы: «TRAIN.csv.gz» → «TRAIN». None — не таблица."""
+    lower = name.lower()
+    compressed = False
+    for suffix in COMPRESSED_SUFFIXES:
+        if lower.endswith(suffix):
+            name, lower, compressed = name[: -len(suffix)], lower[: -len(suffix)], True
+            break
+    for suffix in TABLE_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return name if compressed and "." not in name else None  # «test_data.zip» — таблица в архиве
+
+
+def file_role(name: str) -> str | None:
+    """train / test / sample_submission / data_dictionary по имени файла; None — не файл задачи."""
+    stem = table_stem(name)
+    if stem is None or stem.endswith(".tmp"):
+        return None
+    words = [w for w in re.split(r"[^a-zа-я0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", stem).lower()) if w]
+    joined = "_".join(words)
+    if joined == "submission":
+        return None  # наш собственный ответ
+    if "submission" in joined:
+        return "sample_submission"
+    if "dictionary" in joined:
+        return "data_dictionary"
+    is_train = any(w.startswith(TRAIN_WORDS) for w in words)
+    is_test = any(w.startswith(TEST_WORDS) for w in words)
+    if is_train != is_test:
+        return "train" if is_train else "test"
+    return None  # «train_test» и прочее непонятное — не угадываем
+
+
+def _preference(path: Path, task_dir: Path, role: str) -> tuple:
+    """Ближе к task.md, каноничное имя (train.csv), обычный .csv — раньше."""
+    stem = table_stem(path.name) or ""
+    return (
+        len(path.relative_to(task_dir).parts),
+        stem.lower() != CANONICAL[role],
+        path.suffix.lower() != ".csv",
+        path.name,
+    )
+
+
 def find_task_files(task_md: Path) -> dict[str, Path]:
     """Ищет файлы задачи: сначала по путям из текста, потом рекурсивно рядом с task.md.
 
-    Файлы не в обычном виде (cp1251, «;», десятичная запятая) подменяются обычной копией (agent/csv_dialect.py):
-    дальше их читают как есть все модули агента (#238).
+    Роль файла — по словам имени (`file_role`): data_train.csv, TRAIN.CSV, learn.csv.gz, holdout.tsv.
+    Файлы не в обычном виде (cp1251, «;», десятичная запятая, сжатые, .tsv) подменяются обычной копией
+    (agent/csv_dialect.py): дальше их читают как есть все модули агента (#238).
     """
     task_dir = task_md.parent
     text = read_text_any(task_md)
     found: dict[str, Path] = {}
     # 1) пути, упомянутые в тексте (`folder/train.csv`)
-    for mention in re.findall(r"`([^`\s]+\.csv)`", text):
+    for mention in re.findall(r"`([^`\s]+)`", text):
         candidate = task_dir / mention
-        if candidate.exists():
-            for key, pattern in FILE_PATTERNS.items():
-                if key not in found and pattern.match(candidate.name):
-                    found[key] = candidate
-    # 2) рекурсивный поиск, ближайшие файлы — первыми
-    for csv in sorted(task_dir.rglob("*.csv"), key=lambda p: (len(p.parts), p.name)):
-        if csv.name.lower() in ("submission.csv",) or csv.name.endswith(".tmp.csv"):
+        role = file_role(candidate.name)
+        if role and role not in found and candidate.is_file():
+            found[role] = candidate
+    # 2) рекурсивный поиск: ближайшие и каноничные файлы — первыми
+    candidates: dict[str, list[Path]] = {}
+    for path in task_dir.rglob("*"):
+        rel = path.relative_to(task_dir).parts
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel[:-1]) or not path.is_file():
             continue
-        for key, pattern in FILE_PATTERNS.items():
-            if key not in found and pattern.match(csv.name):
-                found[key] = csv
+        role = file_role(path.name)
+        if role and role not in found:
+            candidates.setdefault(role, []).append(path)
+    for role, paths in candidates.items():
+        found[role] = min(paths, key=lambda p, r=role: _preference(p, task_dir, r))
     return {key: standard_csv(path) for key, path in found.items()}
 
 
@@ -89,12 +144,15 @@ def parse_task(task_md: Path, llm=None, use_analyst: bool = True) -> TaskSpec:
             id_column = ROW_ID_COLUMN
             notes.append("В шаблоне ответа нет id: строки ответа идут в порядке test.csv")
         if target not in train_cols:
-            # Формат «колонка на класс» (id, класс_1, …, класс_k): в шаблоне не target, а вероятности классов
+            # В шаблоне не target: либо «колонка на класс» (id, класс_1, …, класс_k) — вероятности классов,
+            # либо одна колонка ответа с другим именем (id, prediction) — solution.to_template пишет в неё (#276)
             target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
             guessed.add("target")
-            notes.append(
-                f"Ответ — колонка на класс ({len(submission_columns) - 1} шт.): нужны вероятности, target={target}"
-            )
+            answer_cols = [c for c in submission_columns if c != id_column]
+            if len(answer_cols) == 1:
+                notes.append(f"Колонка ответа «{answer_cols[0]}» названа не как таргет: target={target}")
+            else:
+                notes.append(f"Ответ — колонка на класс ({len(answer_cols)} шт.): нужны вероятности, target={target}")
     else:
         target = _guess_target(train_cols, test_cols, dictionary, files["test"], strict=False)
         id_column = _guess_id(test_cols, dictionary, files["test"])

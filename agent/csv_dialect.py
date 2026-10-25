@@ -7,13 +7,21 @@
 
 Значения не трогаем, кроме десятичной запятой в числовых колонках: читаем всё строками, поэтому id «007»
 остаётся «007». Определение — по первым 64 КБ (идея и прототип — research/night/read_csv_any.py).
+
+Сжатые файлы (.gz, .zip, .bz2, .xz) и таблицы с другим расширением (.tsv, .txt) тоже переводим в обычную копию .csv:
+остальные модули читают пути из TaskSpec без догадок о формате (#276, приоритет 2). Десятичная запятая бывает и
+при разделителе «,» — тогда число в кавычках: «1,"10,5"».
 """
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import hashlib
+import lzma
 import re
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -30,11 +38,45 @@ NUMBER_WITH_COMMA = re.compile(r"-?\d+(,\d+)?")
 # («1 200,5») не обрабатываем: такая колонка останется строками, как без приведения
 MISSING_TOKENS = {"na", "n/a", "nan", "null", "none", "-", "?"}
 CACHE_DIR = Path(tempfile.gettempdir()) / "agent_csv"
+COMPRESSED = {".gz": gzip.open, ".bz2": bz2.open, ".xz": lzma.open}  # .zip — отдельно: внутри архива первый файл
+QUOTED_DECIMAL = re.compile(r'"-?\d+,\d+"')  # «"10,5"» при разделителе «,»
+
+
+def head_bytes(path: Path, n: int = SNIFF_BYTES) -> bytes:
+    """Первые n байт таблицы, в том числе из сжатого файла."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in COMPRESSED:
+        with COMPRESSED[suffix](path, "rb") as f:
+            return f.read(n)
+    if suffix == ".zip":
+        with zipfile.ZipFile(path) as z, z.open(_zip_member(z)) as f:
+            return f.read(n)
+    with open(path, "rb") as f:
+        return f.read(n)
+
+
+def _zip_member(z: zipfile.ZipFile) -> str:
+    names = [i.filename for i in z.infolist() if not i.is_dir() and not i.filename.startswith("__MACOSX")]
+    return names[0]
+
+
+def _read_all(path: Path, dialect: dict) -> pd.DataFrame:
+    """Вся таблица строками; .gz/.bz2/.xz pandas распаковывает сам, из .zip берём первый файл."""
+    kw = {"sep": dialect["sep"], "encoding": dialect["encoding"], "dtype": str, "keep_default_na": False}
+    if Path(path).suffix.lower() == ".zip":
+        with zipfile.ZipFile(path) as z, z.open(_zip_member(z)) as f:
+            return pd.read_csv(f, **kw)
+    return pd.read_csv(path, **kw)
+
+
+def is_plain_csv(path: Path) -> bool:
+    return Path(path).suffix.lower() == ".csv"
 
 
 def sniff(path: Path) -> dict:
     """Кодировка, разделитель и десятичный знак файла по его началу."""
-    raw = Path(path).read_bytes()[:SNIFF_BYTES]
+    raw = head_bytes(path)
     encoding = "latin-1"
     for candidate in ENCODINGS:
         try:
@@ -51,25 +93,29 @@ def sniff(path: Path) -> dict:
     lines = head.splitlines()
     header = re.sub(r'"[^"]*"', "", lines[0]) if lines else ""  # разделители внутри кавычек не считаем
     sep = max(SEPARATORS, key=header.count)
-    decimal = "," if sep != "," and re.search(r"\d,\d", "\n".join(lines[1:])) else "."
+    body = "\n".join(lines[1:])
+    if sep != ",":
+        decimal = "," if re.search(r"\d,\d", body) else "."
+    else:
+        decimal = "," if QUOTED_DECIMAL.search(body) else "."
     return {"encoding": encoding, "sep": sep, "decimal": decimal}
 
 
 def is_standard(dialect: dict) -> bool:
-    return dialect["encoding"] == "utf-8-sig" and dialect["sep"] == ","
+    return dialect["encoding"] == "utf-8-sig" and dialect["sep"] == "," and dialect["decimal"] == "."
 
 
 def standard_csv(path: Path) -> Path:
     """Путь к файлу в обычном виде: сам файл, если он уже такой, иначе — копия в CACHE_DIR. Сбой — исходный путь."""
     try:
         dialect = sniff(path)
-        if is_standard(dialect):
+        if is_standard(dialect) and is_plain_csv(path):
             return path
         stat = path.stat()
         key = hashlib.sha1(f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()).hexdigest()[:12]
-        out = CACHE_DIR / key / path.name
+        out = CACHE_DIR / key / plain_name(path)
         if not out.exists():
-            df = pd.read_csv(path, sep=dialect["sep"], encoding=dialect["encoding"], dtype=str, keep_default_na=False)
+            df = _read_all(path, dialect)
             if dialect["decimal"] == ",":
                 for column in df.columns:
                     values = df[column][~df[column].str.strip().str.lower().isin(MISSING_TOKENS | {""})]
@@ -87,6 +133,17 @@ def standard_csv(path: Path) -> Path:
     except Exception as exc:  # noqa: BLE001 — не смогли перевести: пусть читают как есть, это не хуже, чем было
         log.warning("%s: не удалось привести CSV к обычному виду (%s) — читаем как есть", path.name, exc)
         return path
+
+
+def plain_name(path: Path) -> str:
+    """Имя обычной копии: train.csv.gz → train.csv, data.tsv → data.csv."""
+    name = Path(path).name
+    for suffix in (*COMPRESSED, ".zip"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    stem = name[: -len(Path(name).suffix)] if Path(name).suffix.lower() in (".csv", ".tsv", ".txt") else name
+    return f"{stem}.csv"
 
 
 def read_text_any(path: Path) -> str:

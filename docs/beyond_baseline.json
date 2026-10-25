@@ -1,0 +1,64 @@
+{
+ "tasks": {
+  "anes_voting_2026": {
+   "zero": false,
+   "score": 5.69,
+   "seconds": 254.7,
+   "type": "binary",
+   "metric": "roc_auc",
+   "parsed_metric": "roc_auc",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "по времени (VCF0004) — test лежит после train; кандидаты: ['VCF0004']",
+   "validation_ok": true
+  },
+  "coffee_rating_prediction": {
+   "zero": true,
+   "score": 0.0,
+   "seconds": 193.8,
+   "type": "regression",
+   "metric": "rmse",
+   "parsed_metric": "rmse",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "по времени (review_date) — test лежит после train; кандидаты: ['review_date']",
+   "validation_ok": true
+  },
+  "garments_worker_productivity": {
+   "zero": true,
+   "score": 0.0,
+   "seconds": 154.0,
+   "type": "regression",
+   "metric": "rmse",
+   "parsed_metric": "rmse",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "по времени (date) — test лежит после train; кандидаты: ['date']",
+   "validation_ok": true
+  },
+  "ghanas_indigenous_intel": {
+   "zero": true,
+   "score": 0.0,
+   "seconds": 253.3,
+   "type": "multiclass",
+   "metric": "f1_macro",
+   "parsed_metric": "f1_macro",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "по времени (prediction_time) — test лежит после train; кандидаты: ['prediction_time']",
+   "validation_ok": true
+  },
+  "kick": {
+   "zero": false,
+   "score": 6.88,
+   "seconds": 251.2,
+   "type": "binary",
+   "metric": "roc_auc",
+   "parsed_metric": "roc_auc",
+   "parse_ok": true,
+   "problems": [],
+   "validation": "по времени (PurchDate) — test лежит после train; кандидаты: ['PurchDate']",
+   "validation_ok": true
+  }
+ }
+}
