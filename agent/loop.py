@@ -112,7 +112,7 @@ def run_autoresearch(
             break
         hyp = queue.pop(0)
         log.info("Итерация %d: %s — %s [%s]", iteration, hyp.id, hyp.title, hyp.source)
-        reason = review(hyp, spec) or foreign_validation(hyp, validation)
+        reason = review(hyp, spec, profile) or foreign_validation(hyp, validation)
         needed = estimated_seconds(hyp, baseline_seconds)
         if reason is None and not budget.has_time(needed_seconds=needed):
             reason = f"не успеет: оценка {needed:.0f} с, осталось {budget.seconds_left():.0f} с"
