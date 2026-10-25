@@ -10,9 +10,12 @@
      периоды; иначе случайно, но полные дубликаты строк держим по одну сторону (иначе оценка завышена);
   2. собираем копию задачи (task.md, остальной train, новый test без target, sample_submission)
      и запускаем solution.py отдельным процессом с бюджетом времени — как платформа;
-  3. считаем метрику задачи и два балла по формуле организаторов (evaluation/local_score.py): относительно
-     тривиального ответа (score) и относительно сильного бейзлайна — лучшего из LightGBM по умолчанию и
-     тривиального ответа (model_score); второй ближе к бейзлайну организаторов, по нему сверяемся с public.
+  3. считаем метрику задачи и баллы по формуле организаторов (evaluation/local_score.py): относительно
+     тривиального ответа (score), сильного бейзлайна — лучшего из LightGBM по умолчанию и тривиального ответа
+     (model_score) и сильнейшего из набора «тривиальный, LightGBM, RandomForest, линейная» (best_score, #276).
+Сдвиг test (#276): в каждой строке shift_auc — AUC классификатора «строка из train или из test». С --holdout test_like
+отложенная часть — группы строк train, самые похожие на test (если shift_auc ≥ 0.7; иначе обычная), с --holdout both —
+оба прогона подряд и «чувствительность к сдвигу» в отчёте. Метки test при этом не нужны: только его признаки.
 Ответы лежат вне папки задачи — агент их не видит. Результаты дописываются в runs/harness/leaderboard.csv.
 Из CLI .env в корне подхватывается сам (ключ для --llm); сравнить «без LLM / с Qwen» — scripts/qwen.py compare.
 """
@@ -37,7 +40,7 @@ import psutil
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 
 from agent.task_parser import parse_task
-from evaluation.local_score import organizer_score, score_submission
+from evaluation.local_score import DETERMINISTIC, MODEL_THREADS, organizer_score, score_submission
 from evaluation.submission import validate_submission
 from interfaces.schemas import TaskSpec, TaskType
 
@@ -48,12 +51,18 @@ COLUMNS = [
     "commit",
     "task",
     "split",
+    "shift_auc",
     "metric",
     "value",
     "baseline",
     "score",
     "model_baseline",
     "model_score",
+    "rf_baseline",
+    "linear_baseline",
+    "best_baseline",
+    "best_name",
+    "best_score",
     "status",
     "seconds",
     "peak_ram_mb",
@@ -67,6 +76,12 @@ COLUMNS = [
 SEED = 42
 DATE_SHARE = 0.95  # колонку считаем датой, если так разбирается не меньше этой доли значений (как в стенде research)
 GRACE_SEC = 60  # сколько ждём сверх бюджета, прежде чем считать, что агент «завис»
+# Сдвиг test (#276): на public/multiclass AUC 0.88, на regression 1.0 (год 6). Порог 0.7 — первая оценка капитана,
+# на других задачах не проверен
+SHIFT_AUC_MIN = 0.7
+SHIFT_MAX_ROWS = 50_000  # строк с каждой стороны для классификатора train/test (≈ 10–30 с на 4 потоках)
+SHIFT_FOLDS = 4
+HOLDOUTS = ("standard", "test_like")
 
 
 # --- 1. Отложенная часть
@@ -140,8 +155,86 @@ def holdout_mask(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame, frac: 
     return mask, "groups"
 
 
-def make_holdout_task(task_md: Path, out: Path, frac: float = 0.25, rows: int | None = None) -> dict:
-    """Собрать в out/task копию задачи с отложенной частью train вместо test; ответы — в out/answers.csv."""
+def shift_features(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> list[str]:
+    """Признаки для классификатора «train против test»: общие колонки без id, таргетов, констант и идентификаторов.
+
+    Идентификатор — целые числа или строки, все разные и в train, и в test: по нему test отделяется всегда (AUC 1.0),
+    хотя модели он не нужен. Дробные числа с уникальными значениями (площадь, сумма) — обычные признаки.
+    """
+    features = []
+    for col in train.columns:
+        if col in (*targets_of(spec), spec.id_column) or col not in test.columns:
+            continue
+        tr, te = train[col], test[col]
+        if tr.nunique(dropna=False) <= 1 and te.nunique(dropna=False) <= 1:
+            continue
+        id_like = not pd.api.types.is_float_dtype(tr) or not pd.api.types.is_float_dtype(te)
+        if id_like and tr.nunique(dropna=False) == len(tr) and te.nunique(dropna=False) == len(te):
+            continue
+        features.append(col)
+    return features
+
+
+def shift_probability(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame) -> tuple[float, np.ndarray] | None:
+    """AUC «train против test» по out-of-fold и вероятность «это test» для каждой строки train.
+
+    Классификатор учится на подвыборке до SHIFT_MAX_ROWS строк с каждой стороны; строкам train вне подвыборки —
+    среднее моделей фолдов. None — не из чего считать (нет признаков или строк).
+    """
+    import lightgbm as lgb
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import StratifiedKFold
+
+    features = shift_features(spec, train, test)
+    if not features or len(train) < 4 * SHIFT_FOLDS or len(test) < 4 * SHIFT_FOLDS:
+        return None
+    both = pd.concat([train[features], test[features]], ignore_index=True)
+    for col in features:
+        if not (pd.api.types.is_numeric_dtype(both[col]) or pd.api.types.is_bool_dtype(both[col])):
+            both[col] = both[col].astype(str).astype("category")  # общий словарь категорий train и test
+    x_train, x_test = both.iloc[: len(train)], both.iloc[len(train) :]
+    rng = np.random.default_rng(SEED)
+    tr_rows = np.sort(rng.choice(len(train), min(len(train), SHIFT_MAX_ROWS), replace=False))
+    te_rows = np.sort(rng.choice(len(test), min(len(test), SHIFT_MAX_ROWS), replace=False))
+    x = pd.concat([x_train.iloc[tr_rows], x_test.iloc[te_rows]], ignore_index=True)
+    is_test = np.r_[np.zeros(len(tr_rows)), np.ones(len(te_rows))]
+    rest = np.setdiff1d(np.arange(len(train)), tr_rows)
+    oof, p_train = np.zeros(len(x)), np.zeros(len(train))
+    for fit_rows, pred_rows in StratifiedKFold(SHIFT_FOLDS, shuffle=True, random_state=SEED).split(x, is_test):
+        model = lgb.LGBMClassifier(
+            n_estimators=150, learning_rate=0.1, random_state=SEED, n_jobs=MODEL_THREADS, verbose=-1, **DETERMINISTIC
+        )
+        model.fit(x.iloc[fit_rows], is_test[fit_rows])
+        oof[pred_rows] = model.predict_proba(x.iloc[pred_rows])[:, 1]
+        if len(rest):
+            p_train[rest] += model.predict_proba(x_train.iloc[rest])[:, 1] / SHIFT_FOLDS
+    p_train[tr_rows] = oof[: len(tr_rows)]
+    return float(roc_auc_score(is_test, oof)), p_train
+
+
+def shifted_holdout_mask(spec: TaskSpec, train: pd.DataFrame, test: pd.DataFrame, p_test: np.ndarray, frac: float):
+    """Отложенная часть «как test»: целые группы одинаковых строк train с наибольшей вероятностью «это test».
+
+    Группы — как в holdout_mask, поэтому копия строки не бывает по обе стороны. Берём группы по убыванию средней
+    вероятности, пока не наберётся frac строк.
+    """
+    features = [c for c in train.columns if c not in (*targets_of(spec), spec.id_column) and c in test.columns]
+    groups = pd.util.hash_pandas_object(train[features], index=False).to_numpy()
+    per_group = pd.Series(p_test).groupby(groups).agg(["mean", "size"])
+    per_group = per_group.sort_values("mean", ascending=False, kind="stable")
+    take = (per_group["size"].cumsum() <= frac * len(train)).to_numpy()
+    take[0] = True  # хотя бы одна группа, даже если она больше frac
+    return np.isin(groups, per_group.index[take])
+
+
+def make_holdout_task(
+    task_md: Path, out: Path, frac: float = 0.25, rows: int | None = None, holdout: str = "standard"
+) -> dict:
+    """Собрать в out/task копию задачи с отложенной частью train вместо test; ответы — в out/answers.csv.
+
+    holdout="test_like" — отложенная часть из строк, самых похожих на test (shifted_holdout_mask), если сдвиг есть
+    (shift_auc ≥ SHIFT_AUC_MIN); иначе обычная, а в split — пометка, почему.
+    """
     spec = parse_task(task_md)
     train = pd.read_csv(spec.train_path, low_memory=False)
     test = pd.read_csv(spec.test_path, low_memory=False, nrows=1000)
@@ -149,7 +242,18 @@ def make_holdout_task(task_md: Path, out: Path, frac: float = 0.25, rows: int | 
         train = train.sample(rows, random_state=SEED).sort_index()
     if spec.id_column not in train.columns:
         train.insert(0, spec.id_column, np.arange(len(train)))
-    mask, how = holdout_mask(spec, train, test, frac)
+    try:
+        shift = shift_probability(spec, train, pd.read_csv(spec.test_path, low_memory=False))
+    except Exception as exc:  # noqa: BLE001 — замер сдвига вспомогательный: без него обычная отложенная часть
+        print(f"  ⚠️ сдвиг train/test не посчитан: {type(exc).__name__}: {exc}", flush=True)
+        shift = None
+    shift_auc = shift[0] if shift else float("nan")
+    if holdout == "test_like" and shift and shift_auc >= SHIFT_AUC_MIN:
+        mask, how = shifted_holdout_mask(spec, train, test, shift[1], frac), f"test_like(auc={shift_auc:.3f})"
+    else:
+        mask, how = holdout_mask(spec, train, test, frac)
+        if holdout == "test_like":
+            how += f" (сдвига нет: AUC {shift_auc:.3f} < {SHIFT_AUC_MIN})"
     part, hold = train[~mask], train[mask]
 
     task_dir = out / "task"
@@ -178,7 +282,13 @@ def make_holdout_task(task_md: Path, out: Path, frac: float = 0.25, rows: int | 
             place(spec.sample_submission_path), index=False
         )
     hold[[spec.id_column, *targets]].to_csv(out / "answers.csv", index=False)
-    return {"spec": spec, "task_md": task_dir / task_md.name, "split": how, "y_train": part[targets]}
+    return {
+        "spec": spec,
+        "task_md": task_dir / task_md.name,
+        "split": how,
+        "y_train": part[targets],
+        "shift_auc": shift_auc,
+    }
 
 
 # --- 2. Запуск агента
@@ -242,12 +352,18 @@ def llm_usage(run_dir: Path) -> dict:
 
 
 def score_targets(
-    spec: TaskSpec, merged: pd.DataFrame, y_train: pd.DataFrame, x_train: pd.DataFrame, x_test: pd.DataFrame
+    spec: TaskSpec,
+    merged: pd.DataFrame,
+    y_train: pd.DataFrame,
+    x_train: pd.DataFrame,
+    x_test: pd.DataFrame,
+    extra_baselines: bool = True,
 ) -> dict:
     """Балл по ответу; merged — answers + submission с суффиксами _true/_pred.
 
     Несколько таргетов (#220): метрика каждого таргета считается отдельно, итог — среднее (так их сводят в task.md),
-    бейзлайны — тоже средние, балл — по формуле организаторов от средних.
+    бейзлайны — тоже средние, балл — по формуле организаторов от средних. Сильнейший бейзлайн — среднее сильнейших
+    по таргетам (у каждого таргета свой).
     """
     parts = []
     for target in targets_of(spec):
@@ -265,6 +381,7 @@ def score_targets(
                 y_train[target],
                 x_train=x_train,
                 x_test=x_test,
+                extra_baselines=extra_baselines,
             )
         )
     if len(parts) == 1:
@@ -276,6 +393,14 @@ def score_targets(
     if all(np.isfinite(model_baselines)):
         result["model_baseline"] = float(np.mean(model_baselines))
         result["model_score"] = organizer_score(name, result["value"], result["model_baseline"])
+    for key in ("rf_baseline", "linear_baseline"):
+        if any(key in p for p in parts):
+            result[key] = float(np.mean([p.get(key, float("nan")) for p in parts]))
+    best = [p.get("best_baseline", float("nan")) for p in parts]
+    if all(np.isfinite(best)):
+        result["best_baseline"] = float(np.mean(best))
+        result["best_name"] = "/".join(dict.fromkeys(p["best_name"] for p in parts))
+        result["best_score"] = organizer_score(name, result["value"], result["best_baseline"])
     errors = [p["model_error"] for p in parts if "model_error" in p]
     if errors:
         result.update(model_baseline=float("nan"), model_score=float("nan"), model_error=errors[0])
@@ -290,14 +415,16 @@ def run_task(
     rows: int | None,
     use_llm: bool,
     agent_root: Path = ROOT,
+    holdout: str = "standard",
+    extra_baselines: bool = True,
 ) -> dict:
     """Одна строка лидерборда. Любая ошибка — строка со status=FAILED и score=0, а не исключение."""
     row = {"task": task_md.parent.relative_to(ROOT).as_posix() if task_md.is_relative_to(ROOT) else str(task_md)}
     row.update(minutes=minutes, score=0.0, status="FAILED", error="")
-    out = workdir / task_md.parent.name
+    out = workdir / (task_md.parent.name + ("" if holdout == "standard" else f"_{holdout}"))
     try:
-        prepared = make_holdout_task(task_md, out, frac, rows)
-        row["split"] = prepared["split"]
+        prepared = make_holdout_task(task_md, out, frac, rows, holdout)
+        row["split"], row["shift_auc"] = prepared["split"], prepared["shift_auc"]
         env = {
             **os.environ,
             "AGENT_TIME_BUDGET_SEC": str(int(minutes * 60)),
@@ -332,6 +459,7 @@ def run_task(
             prepared["y_train"],
             x_train=x_train.drop(columns=[spec.id_column], errors="ignore"),
             x_test=x_test,
+            extra_baselines=extra_baselines,
         )
         if "model_error" in scores:
             print(f"  ⚠️ модельный бейзлайн не посчитан: {scores.pop('model_error')}", flush=True)
@@ -366,29 +494,56 @@ def append_rows(rows: list[dict], path: Path = LEADERBOARD) -> None:
         writer.writerows(rows)
 
 
+def _num(value, fmt: str = ".1f") -> str:
+    try:
+        return "—" if value is None or not np.isfinite(float(value)) else format(float(value), fmt)
+    except (TypeError, ValueError):
+        return "—"
+
+
+def holdout_of(row: dict) -> str:
+    """Какой отложенной частью получена строка: test_like или standard (по полю split)."""
+    return "test_like" if str(row.get("split", "")).startswith("test_like") else "standard"
+
+
 def render(rows: list[dict]) -> str:
     lines = [
-        "| Задача | Разбиение | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному | Статус | Время, с "
-        "| Пик RAM, МБ | LLM: запросов (ошибок) | Токены LLM | ₽ |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Задача | Разбиение | AUC сдвига | Метрика | Агент | Бейзлайн | Балл | Сильный бейзлайн | Балл к сильному "
+        "| Сильнейший бейзлайн | Балл к сильнейшему | Статус | Время, с | Пик RAM, МБ | LLM: запросов (ошибок) "
+        "| Токены LLM | ₽ |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         status = r["status"] + (f" — {r['error']}" if r.get("error") else "")
-        model_score = r.get("model_score", float("nan"))
+        best = f"{_num(r.get('best_baseline'), '.5g')} ({r['best_name']})" if r.get("best_name") else "—"
         lines.append(
-            f"| {r['task']} | {r.get('split', '—')} | {r.get('metric', '—')} | {r.get('value', float('nan')):.5g} | "
-            f"{r.get('baseline', float('nan')):.5g} | {r['score']:.1f} | {r.get('model_baseline', float('nan')):.5g} | "
-            f"{'—' if np.isnan(model_score) else f'{model_score:.1f}'} | {status} | "
-            f"{r.get('seconds', 0):.0f} | {r.get('peak_ram_mb', 0):.0f} | "
+            f"| {r['task']} | {r.get('split', '—')} | {_num(r.get('shift_auc'), '.3f')} | {r.get('metric', '—')} | "
+            f"{_num(r.get('value'), '.5g')} | {_num(r.get('baseline'), '.5g')} | {r['score']:.1f} | "
+            f"{_num(r.get('model_baseline'), '.5g')} | {_num(r.get('model_score'))} | {best} | "
+            f"{_num(r.get('best_score'))} | {status} | {r.get('seconds', 0):.0f} | {r.get('peak_ram_mb', 0):.0f} | "
             f"{r.get('llm_calls', 0)} ({r.get('llm_errors', 0)}) | {r.get('llm_tokens', 0)} | {r.get('llm_rub', 0.0):.2f} |"
         )
-    lines.append(f"\nСредний балл: **{np.mean([r['score'] for r in rows]):.1f}** (платформа берёт среднее по задачам)")
-    model_scores = [r.get("model_score", float("nan")) for r in rows]
-    if not np.all(np.isnan(model_scores)):
-        lines.append(
-            f"Средний балл к сильному бейзлайну (лучший из LightGBM и тривиального): "
-            f"**{np.nanmean(model_scores):.1f}** — ближе к платформе, сверяем с public"
-        )
+    standard = [r for r in rows if holdout_of(r) == "standard"] or rows
+    lines.append(
+        f"\nСредний балл: **{np.mean([r['score'] for r in standard]):.1f}** (платформа берёт среднее по задачам)"
+    )
+    for key, title in (
+        ("model_score", "к сильному бейзлайну (лучший из LightGBM и тривиального)"),
+        ("best_score", "к сильнейшему бейзлайну (тривиальный, LightGBM, RandomForest, линейная) — оценка снизу"),
+    ):
+        values = [r.get(key, float("nan")) for r in standard]
+        if not np.all(np.isnan(np.asarray(values, dtype=float))):
+            lines.append(f"Средний балл {title}: **{np.nanmean(values):.1f}**")
+    shifted = {r["task"]: r for r in rows if holdout_of(r) == "test_like"}
+    for r in standard:
+        other = shifted.get(r["task"])
+        if other is not None and r is not other:
+            lines.append(
+                f"Чувствительность к сдвигу, {r['task']}: {r.get('metric', '')} {_num(r.get('value'), '.4g')} → "
+                f"{_num(other.get('value'), '.4g')} на test-подобной части; балл к сильному {_num(r.get('model_score'))}"
+                f" → {_num(other.get('model_score'))}, к сильнейшему {_num(r.get('best_score'))} → "
+                f"{_num(other.get('best_score'))}"
+            )
     calls = sum(r.get("llm_calls", 0) + r.get("llm_errors", 0) for r in rows)
     if calls:
         tokens, rub = sum(r.get("llm_tokens", 0) for r in rows), sum(r.get("llm_rub", 0.0) for r in rows)
@@ -430,6 +585,18 @@ def main(argv: list[str] | None = None) -> int:
         default=ROOT,
         help="папка с solution.py другой версии агента (сравнение «было/стало»: задачи и разбиение — те же)",
     )
+    parser.add_argument(
+        "--holdout",
+        choices=[*HOLDOUTS, "both"],
+        default="standard",
+        help="отложенная часть: standard — как обычно; test_like — строки train, самые похожие на test "
+        f"(при AUC сдвига ≥ {SHIFT_AUC_MIN}); both — оба прогона подряд и чувствительность к сдвигу",
+    )
+    parser.add_argument(
+        "--no-extra-baselines",
+        action="store_true",
+        help="не считать RandomForest и линейную модель (быстрее; best_score тогда — из тривиального и LightGBM)",
+    )
     args = parser.parse_args(argv)
 
     tasks = find_tasks() if args.all else [t.resolve() for t in args.task or []]
@@ -442,11 +609,31 @@ def main(argv: list[str] | None = None) -> int:
     # Дочерние процессы агента могут дописывать файлы в момент удаления папки («Directory not empty») —
     # ошибка уборки не должна терять результаты: строки пишем внутри with, уборку не роняем
     with tempfile.TemporaryDirectory(prefix="harness_", ignore_cleanup_errors=True) as tmp:
+        holdouts = HOLDOUTS if args.holdout == "both" else (args.holdout,)
         for task_md in tasks:
-            print(f"… {task_md.parent.name}: бюджет {args.minutes} мин", flush=True)
-            row = run_task(task_md, Path(tmp), args.minutes, args.frac, args.rows, args.llm, args.agent_root.resolve())
-            rows.append({"date": date, "commit": commit, **row})
-            print(f"  {row['status']}: балл {row['score']:.1f}", flush=True)
+            for holdout in holdouts:
+                if holdout == "test_like" and args.holdout == "both":
+                    auc = rows[-1].get("shift_auc", float("nan")) if rows else float("nan")
+                    if not (np.isfinite(auc) and auc >= SHIFT_AUC_MIN):
+                        print(f"  test_like пропущен: AUC сдвига {_num(auc, '.3f')} < {SHIFT_AUC_MIN}", flush=True)
+                        continue
+                print(f"… {task_md.parent.name} [{holdout}]: бюджет {args.minutes} мин", flush=True)
+                row = run_task(
+                    task_md,
+                    Path(tmp),
+                    args.minutes,
+                    args.frac,
+                    args.rows,
+                    args.llm,
+                    args.agent_root.resolve(),
+                    holdout,
+                    not args.no_extra_baselines,
+                )
+                rows.append({"date": date, "commit": commit, **row})
+                print(
+                    f"  {row['status']}: балл {row['score']:.1f}, к сильнейшему {_num(row.get('best_score'))}",
+                    flush=True,
+                )
         append_rows(rows, args.out)
     print("\n" + render(rows))
     print(f"\nСтроки дописаны в {args.out}")
