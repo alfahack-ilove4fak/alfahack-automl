@@ -16,6 +16,9 @@
 фолдах (Optuna на public/regression: +0.6% на CV, на holdout RMSE 44.5 → 53.1). Порог — страховка, подобран на одном
 примере; надёжнее не тюнить на time-фолдах вовсе (#236).
 Остальные схемы — только по t. Исследование — docs/research/accept-rule.md.
+AGENT_TIME_LAST_PERIOD=0 выключает это правило: и во time-схеме нужно t ≥ порога. Проверка #276/#295: на public/regression
+по нему принят objective_poisson (t = 1.56), а на test он сдвигает прогноз вниз (−5.3 в среднем; разбор Ромы,
+docs/research/penalty-2026-10-25.md); на test BeyondArena правило вредило на 2 задачах из 2 (#295).
 
 Гипотезы от LLM (source="llm", #276) проходят по своему порогу: t ≥ LLM_T_MIN, во time-схеме выигрыш
 ≥ LLM_TIME_MIN_REL_GAIN. По умолчанию — как у playbook (2 и 1%): сабмит №6 без LLM показал, что штраф −8 не от LLM,
@@ -40,6 +43,7 @@ LLM_T_ENV = "AGENT_LLM_T_MIN"  # порог t для гипотез LLM (#276); 
 LLM_T_MIN = T_MIN  # как у playbook: строгий порог 3 отсекал все гипотезы LLM, а штраф не от неё (сабмит №6)
 LLM_GAIN_ENV = "AGENT_LLM_TIME_GAIN"  # порог выигрыша time-правила для гипотез LLM, доля метрики
 LLM_TIME_MIN_REL_GAIN = TIME_MIN_REL_GAIN
+TIME_RULE_ENV = "AGENT_TIME_LAST_PERIOD"  # 0 — правило «лучше на последнем периоде» выключено (#295)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -49,6 +53,11 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
     return value if math.isfinite(value) and value >= 0 else default
+
+
+def time_rule_on() -> bool:
+    """Действует ли во time-схеме правило «лучше на последнем периоде и в среднем» (AGENT_TIME_LAST_PERIOD, #295)."""
+    return os.getenv(TIME_RULE_ENV, "1").strip() != "0"
 
 
 def thresholds(strict: bool) -> tuple[float, float]:
@@ -107,6 +116,7 @@ def accept(
         and (new.validation or "").startswith(TIME_PREFIX)
         and gains[-1] > 0
         and mean_gain >= time_gain * abs(best.mean_score)
+        and time_rule_on()
     ):
         return True, f"{reason}; лучше на последнем периоде ({gains[-1]:.4g}) и в среднем — time-схема"
     return t >= t_min, reason

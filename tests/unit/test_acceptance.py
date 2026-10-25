@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from agent import acceptance
 from agent.acceptance import (
     LLM_GAIN_ENV,
     LLM_T_ENV,
@@ -230,3 +231,25 @@ def test_llm_time_scheme_gain(monkeypatch):
     assert not accept(new, best, greater_is_better=False, strict=True)[0]
     new, best = time_pair([0.2, 1.8, 3.2])  # +3.5% — проходит и при строгом пороге
     assert accept(new, best, greater_is_better=False, strict=True)[0]
+
+
+# #295: AGENT_TIME_LAST_PERIOD=0 выключает правило «лучше на последнем периоде» — во time-схеме нужно t ≥ T_MIN.
+# Случай public/regression: objective_poisson принят по этому правилу при t = 1.56, а на test он сдвигает прогноз вниз.
+@pytest.mark.parametrize("value, accepted", [(None, True), ("1", True), ("0", False), (" 0 ", False), ("мусор", True)])
+def test_time_rule_switch(monkeypatch, value, accepted):
+    if value is None:
+        monkeypatch.delenv(acceptance.TIME_RULE_ENV, raising=False)  # по умолчанию правило действует
+    else:
+        monkeypatch.setenv(acceptance.TIME_RULE_ENV, value)
+    new, best = time_pair(TIME_GAINS_ALL)  # лучше на всех периодах, t < T_MIN
+    ok, reason = accept(new, best, greater_is_better=False)
+    assert ok is accepted
+    assert ("последнем периоде" in reason) is accepted and "t=" in reason
+
+
+def test_time_rule_off_keeps_t_rule(monkeypatch):
+    # без правила значимый выигрыш во time-схеме по-прежнему принимается по t
+    monkeypatch.setenv(acceptance.TIME_RULE_ENV, "0")
+    new, best = time_pair([2.0, 2.1, 2.2])
+    assert corrected_t(fold_gains(new, best, greater_is_better=False)) >= T_MIN
+    assert accept(new, best, greater_is_better=False)[0]

@@ -17,7 +17,7 @@
 | `critic.py` | критик по правилам: пустые для задачи гипотезы, недопустимые значения, цена по времени → пропуск (`SKIPPED`) до запуска |
 | `llm_critic.py` | LLM-критик: одна проверка пачки LLM-гипотез до запуска (утечка, подгонка, метрика, повтор, цена); `AGENT_LLM_CRITIC=1`, при сбое пропускает всё |
 | `fallback.py` | запасные направления (#200), когда playbook и LLM пусты: модели и ансамбли (порядок danil по стенду), Optuna, «почти прошедшие», playbook поверх лучшего, усреднение seed, Optuna других моделей и глубже; цикл берёт их порциями по `FALLBACK_CHUNK` (между порциями ход LLM), после нового лучшего строит заново. `AGENT_FALLBACK=0` выключает |
-| `loop.py` | цикл AutoResearch: очередь гипотез (по 3 за запрос к LLM) → `ml.run_experiment` → `acceptance.accept`; у гипотез LLM свой порог — по умолчанию как у playbook (t ≥ 2, time-схема ≥ 1%), строже через `AGENT_LLM_T_MIN`, `AGENT_LLM_TIME_GAIN` (#276) |
+| `loop.py` | цикл AutoResearch: очередь гипотез (по 3 за запрос к LLM) → `ml.run_experiment` → `acceptance.accept`; у гипотез LLM свой порог — по умолчанию как у playbook (t ≥ 2, time-схема ≥ 1%), строже через `AGENT_LLM_T_MIN`, `AGENT_LLM_TIME_GAIN` (#276); `AGENT_TIME_LAST_PERIOD=0` выключает правило «лучше на последнем периоде» во time-схеме — нужно t ≥ 2 (#295) |
 
 ## Контракты
 - Создаёшь: `TaskSpec`, `Hypothesis`. Читаешь: `DataProfile`, `ExperimentResult`, `RunBudget`.
