@@ -26,6 +26,9 @@ from runtime.log import get_logger
 log = get_logger("task_analyst")
 
 ANALYST_ENV = "AGENT_LLM_TASK"  # "0" — не спрашивать LLM
+APPLY_ENV = "AGENT_ANALYST_APPLY"  # "0" — LLM только заполняет пустое, замены — в заметки (выключатель #276)
+# как до #276: метрика по типу задачи вместо названной в тексте — риск нуля больше недоказанного вреда аналитика
+APPLY_DEFAULT = "1"
 MAX_TOKENS = 600
 MAX_WAIT = 90.0  # сек: разбор идёт до шага 0 (тривиального ответа) — дольше ждать нельзя
 MAX_TEXT_CHARS = 8000
@@ -41,6 +44,35 @@ SYSTEM = (
 
 def enabled() -> bool:
     return os.getenv(ANALYST_ENV, "1") != "0"
+
+
+def apply_enabled() -> bool:
+    """Может ли аналитик заменить угаданные target/id/метрику. По умолчанию да; AGENT_ANALYST_APPLY=0 — только пустое."""
+    return os.getenv(APPLY_ENV, APPLY_DEFAULT) == "1"
+
+
+def _in_registry(name: str) -> bool:
+    """Метрика есть в реестре; не `in`: параметрические (fbeta@2, pinball@0.9) реестр собирает через __missing__."""
+    try:
+        METRICS[name]
+    except KeyError:
+        return False
+    return True
+
+
+def _only_fill_gaps(accepted: dict[str, str], heuristic: dict[str, str | None]) -> tuple[dict[str, str], list[str]]:
+    """Без AGENT_ANALYST_APPLY=1 оставить только поля, где разбор по данным ничего не нашёл; прочее — в заметки.
+
+    Метрику заполняем, когда словарь не нашёл её в тексте (None) и LLM назвала метрику из реестра: метрика,
+    описанная словами, точнее метрики по типу задачи (#276). Найденную словарём по-прежнему не заменяем.
+    """
+    kept = {k: v for k, v in accepted.items() if heuristic.get(k) is None and (k != "metric" or _in_registry(v))}
+    notes = [
+        f"предлагает {key}={value} вместо {heuristic[key] or 'значения по умолчанию'} — не применено ({APPLY_ENV}=1 включает)"
+        for key, value in accepted.items()
+        if key not in kept
+    ]
+    return kept, notes
 
 
 def _columns(cols: list[str]) -> str:
@@ -102,7 +134,7 @@ def metric_key(value) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     name = value.strip().lower()
-    return name if name in METRICS else find_metric_in_text(name)
+    return name if _in_registry(name) else find_metric_in_text(name)
 
 
 def reconcile(
@@ -182,6 +214,11 @@ def reconcile(
     if isinstance(constraints, list):
         notes += [" ".join(str(c).split())[:MAX_NOTE_CHARS] for c in constraints[:3] if str(c).strip()]
 
+    if not apply_enabled():
+        accepted, kept_back = _only_fill_gaps(accepted, heuristic)
+        notes += kept_back
+    if "metric" in accepted:
+        notes.append(f"метрика от аналитика: {accepted['metric']}")
     log.info("%s: %s", PREFIX, ", ".join(checks) or "поля не распознаны")
     for note in notes:
         log.info("%s: %s", PREFIX, note)

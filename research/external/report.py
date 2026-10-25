@@ -3,13 +3,17 @@
     uv run python research/night/run_alien.py --set external --minutes 5     # прогон (≈ 6 мин на задачу)
     uv run python research/external/report.py                                # таблица + сравнение с базой
     uv run python research/external/report.py --update-baseline              # текущий результат → новая база
+    uv run python research/external/report.py --set beyond                   # BeyondArena (make_beyond_tasks.py)
+    uv run python research/external/report.py --set beyond_grouped           # BeyondArena, группы
 
 Что смотрим (код выхода 1, если нарушено):
   1. нули (агент упал, ответ невалиден или «балл к сильному бейзлайну» ≤ 0) — число не выросло и ни одна задача
      с баллом не стала нулём;
   2. разбор: метрика и таргет, которые понял агент, совпадают с теми, что записаны в task.md (meta);
-  3. балл любой задачи не упал больше чем на NOISE относительно базы.
-База — docs/external_baseline.json; без неё печатаем только таблицу. Подгонять playbook под этот набор нельзя:
+  3. балл любой задачи не упал больше чем на NOISE относительно базы;
+  4. схема валидации: если в meta есть expected_validation (time:<колонка> — набор beyond, group:<колонка> —
+     beyond_grouped), агент в agent.log выбрал эту схему именно по этой колонке.
+База — docs/<набор>_baseline.json (docs/external_baseline.json для external); без неё печатаем только таблицу. Подгонять playbook под этот набор нельзя:
 он для гейта «стало ли хуже», а не для настройки параметров.
 """
 
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +30,23 @@ RESULTS = ROOT / "runs" / "night" / "external_results.jsonl"
 ANSWERS = ROOT / "runs" / "night" / "external" / "_answers"
 BASELINE = ROOT / "docs" / "external_baseline.json"
 NOISE = 2.0
+# ml/validation.choose_validation: «Схема валидации: по времени (col) — …». Для групп агент сейчас умеет только
+# «группы дубликатов»; формат «по группам (col)» — предложение ML (как у времени), group:col тоже засчитываем
+SCHEMES = {
+    "time": re.compile(r"по времени \((.+?)\)"),
+    "group": re.compile(r"по группам \((.+?)\)|group:([^\s,;)]+?)(?:-\d+)?(?=$|[\s,;)])"),
+}
+
+
+def validation_ok(row: dict, meta: dict) -> bool | None:
+    """Совпала ли схема из agent.log с expected_validation; None — набор схему не проверяет."""
+    expected = meta.get("expected_validation")
+    if not expected:
+        return None
+    scheme, _, column = expected.partition(":")
+    pattern = SCHEMES.get(scheme)
+    found = pattern.search((row.get("log") or {}).get("validation") or "") if pattern else None
+    return found is not None and column in found.groups()
 
 
 def is_zero(row: dict) -> bool:
@@ -50,6 +72,8 @@ def summarize(rows: list[dict]) -> dict[str, dict]:
             "parsed_metric": spec.get("metric"),
             "parse_ok": bool(meta) and spec.get("metric") == meta.get("metric") and spec.get("target") == (meta.get("targets") or [None])[0],
             "problems": row.get("problems") or [],
+            "validation": (row.get("log") or {}).get("validation"),
+            "validation_ok": validation_ok(row, meta),
         }  # fmt: skip
     return out
 
@@ -71,19 +95,27 @@ def compare(current: dict[str, dict], base: dict) -> list[str]:
     for name, now in current.items():
         if not now["parse_ok"]:
             problems.append(f"{name}: агент понял метрику/таргет иначе — {now['parsed_metric']} вместо {now['metric']}")
+        if now.get("validation_ok") is False:
+            problems.append(f"{name}: схема валидации не та — «{now['validation']}»")
     return problems
 
 
 def table(current: dict[str, dict], base: dict) -> str:
+    schemes = any(v.get("validation_ok") is not None for v in current.values())
     lines = [
-        "| Задача | Тип | Метрика | Балл к сильному | База | Ноль | Разбор | Время, с |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Задача | Тип | Метрика | Балл к сильному | База | Ноль | Разбор | Время, с |"
+        + (" Схема |" if schemes else ""),
+        "|---|---|---|---|---|---|---|---|" + ("---|" if schemes else ""),
     ]
     for name, v in current.items():
         before = base.get(name, {}).get("score")
+        scheme = ""
+        if schemes:
+            scheme = f" {'✅' if v.get('validation_ok') else '❌'} {(v.get('validation') or '—')[:40]} |"
         lines.append(
             f"| {name} | {v['type']} | {v['metric']} | {v['score']} | {before if before is not None else '—'} "
             f"| {'❌' if v['zero'] else ''} | {'✅' if v['parse_ok'] else '❌ ' + str(v['parsed_metric'])} | {v['seconds']} |"
+            + scheme
         )
     zeros = sum(v["zero"] for v in current.values())
     scores = [v["score"] for v in current.values() if v["score"] is not None]
@@ -96,9 +128,16 @@ def table(current: dict[str, dict], base: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--update-baseline", action="store_true")
+    parser.add_argument(
+        "--set", default="external", help="набор run_alien.py --set: external | beyond | beyond_grouped"
+    )
     args = parser.parse_args()
+    global RESULTS, ANSWERS, BASELINE
+    RESULTS = ROOT / "runs" / "night" / f"{args.set}_results.jsonl"
+    ANSWERS = ROOT / "runs" / "night" / args.set / "_answers"
+    BASELINE = ROOT / "docs" / f"{args.set}_baseline.json"
     if not RESULTS.exists():
-        print(f"Нет {RESULTS}: сначала прогон run_alien.py --set external")
+        print(f"Нет {RESULTS}: сначала прогон run_alien.py --set {args.set}")
         return 2
     rows = [json.loads(line) for line in RESULTS.read_text(encoding="utf-8").splitlines() if line.strip()]
     current = summarize(rows)
