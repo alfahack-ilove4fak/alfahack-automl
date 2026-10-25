@@ -3,6 +3,8 @@
 Часть A-L3-2 (роли «генератор → критик»), которая не требует LLM:
   * пустые для задачи гипотезы — log_target на классификации, class_weight на регрессии (= бейзлайн);
   * недопустимые значения параметров — learning_rate ≤ 0, n_folds < 2 и т.п. (= гарантированный FAILED);
+  * цель обучения не подходит таргету — Poisson/Tweedie при отрицательных значениях, Gamma при ≤ 0
+    (LightGBM падает: «at least one target label is negative»; на public regression — 2 итерации впустую);
   * цена по времени — оценка длительности эксперимента относительно бейзлайна.
 
 Модель времени откалибрована на multiclass (замер 2026-10-21):
@@ -12,8 +14,8 @@ learning_rate 0.05 → 0.02 дал ×1.6 (ранняя остановка, а н
 
 from __future__ import annotations
 
-from interfaces.schemas import Hypothesis, TaskSpec, TaskType
-from ml.experiment import BASE_PARAMS
+from interfaces.schemas import DataProfile, Hypothesis, TaskSpec, TaskType
+from ml.experiment import BASE_PARAMS, OBJECTIVE_KEYS
 
 DEFAULT_FOLDS = 5
 TIME_SAFETY = 1.5
@@ -21,12 +23,16 @@ MAX_SLOWDOWN = 20.0  # оценка не больше ×20 — дальше мо
 # Во сколько раз модель дольше LightGBM при параметрах по умолчанию (замер ml, ревью #97; уточняется в #27)
 MODEL_SLOWDOWN = {"lightgbm": 1.0, "catboost": 8.0, "xgboost": 4.0, "linear": 2.0}
 UNKNOWN_MODEL_SLOWDOWN = 4.0
+NON_NEGATIVE_OBJECTIVES = ("poisson", "tweedie")  # подстрока имени цели: poisson, count:poisson, reg:tweedie, Tweedie:…
+POSITIVE_OBJECTIVES = ("gamma",)  # gamma, reg:gamma — таргет строго > 0
 
 
-def review(hyp: Hypothesis, spec: TaskSpec) -> str | None:
-    """Причина отклонить гипотезу или None, если по правилам она годится."""
+def review(hyp: Hypothesis, spec: TaskSpec, profile: DataProfile | None = None) -> str | None:
+    """Причина отклонить гипотезу или None, если по правилам она годится. profile — для проверки цели по таргету."""
     params = hyp.params
     regression = spec.task_type == TaskType.REGRESSION
+    if regression and profile is not None and (reason := _objective_mismatch(hyp, profile)):
+        return reason
     if params.get("log_target") and not regression:
         return "log_target действует только на регрессии — здесь гипотеза совпадёт с бейзлайном"
     if params.get("class_weight") is not None and regression:
@@ -49,6 +55,30 @@ def review(hyp: Hypothesis, spec: TaskSpec) -> str | None:
     leaves = model_params.get("num_leaves", BASE_PARAMS["num_leaves"])
     if not isinstance(leaves, int) or isinstance(leaves, bool) or not 2 <= leaves <= 4096:
         return f"num_leaves={leaves!r}: нужно целое от 2 до 4096"
+    return None
+
+
+def _objectives(hyp: Hypothesis) -> list[str]:
+    """Явно заданные цели обучения гипотезы (model_params и участники ансамбля), в нижнем регистре."""
+    blocks = [hyp.params.get("model_params")]
+    members = hyp.params.get("ensemble")
+    if isinstance(members, list):
+        blocks += [m.get("model_params") for m in members if isinstance(m, dict)]
+    return [str(b[k]).lower() for b in blocks if isinstance(b, dict) for k in OBJECTIVE_KEYS if b.get(k) is not None]
+
+
+def _objective_mismatch(hyp: Hypothesis, profile: DataProfile) -> str | None:
+    """Цель обучения, которую таргет не допускает: модель упадёт на первом фолде."""
+    if hyp.params.get("log_target"):
+        return None  # учимся на log1p(max(y, 0)) ≥ 0 — любые из этих целей допустимы
+    low = profile.target_summary.get("min")
+    if not isinstance(low, int | float):
+        return None
+    for objective in _objectives(hyp):
+        if low < 0 and any(name in objective for name in NON_NEGATIVE_OBJECTIVES):
+            return f"цель {objective} требует таргет ≥ 0, а минимум таргета {low:g} — модель упадёт"
+        if low <= 0 and any(name in objective for name in POSITIVE_OBJECTIVES):
+            return f"цель {objective} требует таргет > 0, а минимум таргета {low:g} — модель упадёт"
     return None
 
 

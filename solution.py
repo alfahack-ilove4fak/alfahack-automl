@@ -100,6 +100,18 @@ def fit_extra_targets(spec: TaskSpec, train, test) -> list[pd.DataFrame]:
     return parts
 
 
+def to_template(answer: pd.DataFrame, spec: TaskSpec) -> pd.DataFrame:
+    """Колонки ответа — как в шаблоне. Единственная колонка ответа может называться не как таргет (#276).
+
+    train: `target`, шаблон: `id, prediction` — разбор находит target верно, а колонка ответа в шаблоне другая:
+    без переименования `answer[spec.submission_columns]` падал с KeyError и сдавался шаблон из нулей.
+    """
+    answer_columns = [c for c in spec.submission_columns if c != spec.id_column]
+    if len(answer_columns) == 1 and answer_columns[0] not in answer.columns and spec.target in answer.columns:
+        answer = answer.rename(columns={spec.target: answer_columns[0]})
+    return answer[spec.submission_columns]
+
+
 def trivial_answer(spec: TaskSpec, train, test):
     """Ответ без модели: страховка на случай, если всё остальное упадёт."""
     if spec.extra_targets:  # несколько таргетов (#174): тривиальный ответ по каждому
@@ -115,7 +127,7 @@ def trivial_answer(spec: TaskSpec, train, test):
         value = float((y.astype(str) == spec.class_labels[-1]).mean())  # доля «положительного» класса
     else:
         value = str(y.astype(str).mode()[0])
-    return test[[spec.id_column]].assign(**{spec.target: value})[spec.submission_columns]
+    return to_template(test[[spec.id_column]].assign(**{spec.target: value}), spec)
 
 
 LIGHT_ID = "baseline_light"
@@ -323,7 +335,7 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
             answer = fit_predict_final(spec, profile, hyp, train, test)
             if spec.extra_targets:
                 answer = join_targets(spec, test, [answer[[spec.id_column, spec.target]], *extra_answers])
-            problems = keeper.write(answer[spec.submission_columns])
+            problems = keeper.write(to_template(answer, spec))
             score = "без CV" if res.mean_score is None else f"CV {res.metric_name}={res.mean_score:.5f}"
             log.info("Сохранён ответ «%s» (%s), проверка: %s", hyp.id, score, "OK" if not problems else problems)
         except Exception:  # noqa: BLE001 — старый валидный ответ остаётся на месте
@@ -372,6 +384,21 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
     )
 
 
+def cpu_info() -> str:
+    """Сколько ядер реально у агента: os.cpu_count() в Docker показывает ядра хоста, а не лимит контейнера."""
+    parts = [f"cpu_count={os.cpu_count()}"]
+    try:
+        parts.append(f"affinity={len(os.sched_getaffinity(0))}")
+    except Exception:  # noqa: BLE001 — строка в лог не должна ронять агента до первого ответа
+        pass
+    for path in ("/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"):  # cgroup v2 / v1
+        try:
+            parts.append(f"{path}={Path(path).read_text().strip()}")
+        except Exception:  # noqa: BLE001 — нет файла, права, не UTF-8: просто нет этой части строки
+            pass
+    return ", ".join(parts)
+
+
 def main(argv: list[str]) -> int:
     started = time.time()
     run_dir = Path(os.environ["AGENT_RUN_DIR"]) if os.getenv("AGENT_RUN_DIR") else None
@@ -381,6 +408,7 @@ def main(argv: list[str]) -> int:
     task_md = Path(argv[1] if len(argv) > 1 else "task.md")
     log.info("Старт: %s, бюджет %.0f с, RAM %.0f МБ", task_md, budget.total_seconds, budget.ram_limit_mb)
     log.info("План этапов: %s", plan.describe())
+    log.info("CPU: %s", cpu_info())
 
     keeper = AnswerKeeper(task_md)
     watchdog = Watchdog(plan.hard_deadline, keeper.finalize, lock=keeper.lock)
