@@ -105,8 +105,27 @@ CODE_OK = (
 )
 
 
+# Инженер данных (agent/data_engineer.py): первый план — с ошибкой (проверка обратной связи), дальше — рабочий
+DE_CODE_BROKEN = "def prepare(df):\n    return df['нет_такой_колонки']"
+DE_CODE_OK = (
+    "def prepare(df):\n    import numpy as np\n    out = df.copy()\n"
+    "    for c in list(out.columns):\n"
+    "        if out[c].dtype == object and out[c].nunique() > 0.9 * len(out):\n"
+    "            out = out.drop(columns=c)\n"
+    "    num = out.select_dtypes('number')\n"
+    "    if num.shape[1] > 1:\n"
+    "        out['row_mean'] = num.mean(axis=1)\n"
+    "    return out"
+)
+_de_rounds = count(1)
+
+
 def kind_of(messages: list[dict]) -> str:
     text = " ".join(str(m.get("content", "")) for m in messages)
+    if "Выбери вариант для ответа" in text:
+        return "verdict"
+    if "инженер данных" in text:
+        return "data_engineer"
     if "add_features" in text:
         return "features"
     if "что именно надо предсказать" in text or "answer_format" in text:
@@ -139,6 +158,14 @@ def answer(kind: str, n: int) -> str:
                 }
             )
         return "ok"
+    if kind == "data_engineer":
+        k = next(_de_rounds)
+        code = DE_CODE_BROKEN if k == 1 else DE_CODE_OK
+        model = "lightgbm" if k <= 2 else "xgboost"
+        plan = "убрать идентификаторы-строки, добавить среднее числовых признаков строки"
+        return json.dumps({"plan": plan, "code": code, "model": model, "model_params": {}}, ensure_ascii=False)
+    if kind == "verdict":
+        return json.dumps({"choice": "qwen_data_2", "conclusion": "Подготовка данных дала устойчивый выигрыш."})
     if kind == "features":
         return json.dumps({"id": f"row_stats_{n}", "title": "статистики строки", "rationale": "x", "code": CODE_OK})
     if kind == "hypotheses":

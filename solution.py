@@ -28,7 +28,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from agent.data_engineer import run_data_engineer
 from agent.hypotheses import baseline_hypothesis
+from agent.llm_client import LLMClient
 from agent.loop import run_autoresearch
 from agent.task_parser import find_task_files, parse_task, spec_for_target
 from evaluation.metrics import METRICS
@@ -359,8 +361,25 @@ def run_pipeline(task_md: Path, budget: RunBudget, plan: StagePlan, keeper: Answ
         budget.total_seconds - reserve,
     )
 
+    # Шаг 2: Qwen — инженер данных (agent/data_engineer.py). Его выбор — новая основа: дальше цикл работает
+    # на подготовленных им данных. Без LLM или при сбое — как раньше, на сырых колонках
+    llm = LLMClient(rub_limit=budget.llm_rub_limit)
+    best_pair = (base, base_result)
+    try:
+        outcome = run_data_engineer(spec, profile, train, test, base, base_result, budget, llm)
+    except Exception:  # noqa: BLE001 — роль LLM не должна стоить ответа
+        log.exception("Инженер данных упал — продолжаем на сырых данных")
+        outcome = None
+    if outcome is not None and outcome.chosen is not None:
+        chosen = outcome.chosen
+        train, test, profile = chosen.train, chosen.test, chosen.profile
+        best_pair = (chosen.hyp, chosen.result)
+        history = [best_pair]
+        save(chosen.hyp, chosen.result, profile)
+        log.info("Шаг 2: в ответе данные и модель от Qwen (%s), дальше цикл — на них", chosen.hyp.id)
+
     best = run_autoresearch(
-        spec, profile, train, budget, history, (base, base_result), on_new_best=lambda h, r: save(h, r, profile)
+        spec, profile, train, budget, history, best_pair, on_new_best=lambda h, r: save(h, r, profile), llm=llm
     )
     log.info(
         "Готово за %.0f с. Лучшая гипотеза: %s (%s=%.5f), всего экспериментов: %d",

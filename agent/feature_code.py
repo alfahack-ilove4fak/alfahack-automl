@@ -73,21 +73,23 @@ LLM_FIELDS = ("id", "title", "rationale", "code")
 MAX_ID_LEN = 40
 
 
-def check_feature_code(code: str, target: str | None = None) -> str | None:
-    """Причина отклонить код признаков или None, если по тексту он допустим."""
+def check_feature_code(
+    code: str, target: str | None = None, function: str = FUNCTION_NAME, max_chars: int = MAX_CODE_CHARS
+) -> str | None:
+    """Причина отклонить код признаков (или код подготовки данных — function="prepare") или None, если он допустим."""
     if not code or not code.strip():
         return "код пустой"
-    if len(code) > MAX_CODE_CHARS:
-        return f"код длиннее {MAX_CODE_CHARS} символов"
+    if len(code) > max_chars:
+        return f"код длиннее {max_chars} символов"
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
         return f"синтаксическая ошибка: {exc.msg} (строка {exc.lineno})"
-    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == FUNCTION_NAME]
+    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function]
     if not funcs:
-        return f"нет функции {FUNCTION_NAME}(df) на верхнем уровне"
+        return f"нет функции {function}(df) на верхнем уровне"
     if len(funcs[0].args.args) != 1:
-        return f"{FUNCTION_NAME} должна принимать ровно один аргумент — таблицу признаков"
+        return f"{function} должна принимать ровно один аргумент — таблицу признаков"
     for node in ast.walk(tree):
         if isinstance(node, ast.Import | ast.ImportFrom):
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
