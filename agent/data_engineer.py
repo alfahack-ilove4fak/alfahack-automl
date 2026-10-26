@@ -8,8 +8,8 @@
   log_target / objective_metric / class_weight — готовые ключи params ml/.
 Агент считает CV на подготовленных данных в той же схеме и на тех же фолдах, что бейзлайн, и показывает Qwen
 результат или ошибку — до MAX_ROUNDS раундов. Затем Qwen выбирает вариант для ответа и пишет вывод
-(qwen_report.md в папке прогона и agent.log). Страховка: вариант, который по CV хуже бейзлайна больше чем на разброс
-бейзлайна по фолдам, не берётся — остаётся бейзлайн. Без LLM, при мусорном ответе или сбое — None: агент работает
+(qwen_report.md в папке прогона и agent.log). Страховка: вариант, который по CV хуже бейзлайна больше чем на четверть
+разброса бейзлайна по фолдам, не берётся — остаётся бейзлайн. Без LLM, при мусорном ответе или сбое — None: агент работает
 как раньше. AGENT_DATA_ENGINEER=0 выключает.
 """
 
@@ -59,6 +59,7 @@ TEMPERATURE = 0.2
 SANDBOX_TIMEOUT = 300.0
 DE_TIME_SHARE = 0.5  # не больше этой доли остатка бюджета на всю роль: остальное — циклу AutoResearch
 ROUND_MIN_SECONDS = 45.0  # раунд = запрос к LLM + песочница + CV; меньше — не начинаем
+VERDICT_NOISE = 0.25  # выбор Qwen хуже бейзлайна больше этой доли разброса по фолдам — не берём (как NOISE_FACTOR)
 PLAN_KEYS = ("plan", "code", "model", "model_params", "log_target", "objective_metric", "class_weight")
 
 
@@ -340,11 +341,11 @@ def _round(
 
 
 def too_worse(res: ExperimentResult, base: ExperimentResult, greater_is_better: bool) -> bool:
-    """Страховка вердикта: вариант хуже бейзлайна больше, чем на разброс бейзлайна по фолдам."""
+    """Страховка вердикта: вариант хуже бейзлайна больше, чем на VERDICT_NOISE разброса бейзлайна по фолдам."""
     if res.mean_score is None or base.mean_score is None or res.validation != base.validation:
         return True
     gap = (base.mean_score - res.mean_score) if greater_is_better else (res.mean_score - base.mean_score)
-    return gap > (base.std_score or 0.0)
+    return gap > VERDICT_NOISE * (base.std_score or 0.0)
 
 
 def _best_by_cv(attempts: list[Attempt], base: ExperimentResult, gib: bool) -> Attempt | None:
@@ -500,9 +501,7 @@ def run_data_engineer(
         chosen = _best_by_cv(attempts, base_result, gib)
         conclusion = conclusion or "вывод LLM не получен — выбран лучший по CV вариант, если он лучше бейзлайна"
     if chosen is not None and too_worse(chosen.result, base_result, gib):
-        conclusion += (
-            f" [страховка агента: {chosen.hyp.id} хуже бейзлайна больше разброса по фолдам — остаётся бейзлайн]"
-        )
+        conclusion += f" [страховка агента: {chosen.hyp.id} хуже бейзлайна больше шума CV — остаётся бейзлайн]"
         chosen = None
     outcome = Outcome(chosen, attempts, conclusion)
     write_report(outcome, spec, base_result)

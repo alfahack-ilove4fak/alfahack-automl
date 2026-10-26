@@ -5,7 +5,7 @@
 Дедлайн ≈ 27.10.2026. Команда — 5 человек, часть впервые на хакатоне. Подробности: @docs/architecture.md
 
 ## Архитектура (кратко)
-`solution.py` → `agent/task_parser.py` (TaskSpec) → `ml/profiling.py` (DataProfile) → тривиальный ответ → бейзлайн `ml/experiment.py` → цикл `agent/loop.py` (гипотезы из LLM или `research/playbook.yaml`) → каждый новый лучший сразу пишется в `submission.csv`.
+`solution.py` → `agent/task_parser.py` (TaskSpec) → `ml/profiling.py` (DataProfile) → тривиальный ответ → бейзлайн `ml/experiment.py` → **Qwen — инженер данных `agent/data_engineer.py`** (готовит данные кодом, выбирает модель, делает вывод) → цикл `agent/loop.py` (гипотезы из LLM или `research/playbook.yaml`) → каждый новый лучший сразу пишется в `submission.csv`.
 Контракты между модулями — `interfaces/schemas.py`. Владельцы папок — `.github/CODEOWNERS`. В каждой папке модуля есть свой `CLAUDE.md`.
 
 ## Команды

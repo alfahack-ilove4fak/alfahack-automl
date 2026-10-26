@@ -214,6 +214,7 @@ def test_too_worse_rule():
             mean_score=mean, std_score=std, validation="kfold-3",
         )  # fmt: skip
 
-    assert not de.too_worse(res(10.5), res(10.0), greater_is_better=False)  # хуже, но в пределах разброса
+    assert not de.too_worse(res(10.2), res(10.0), greater_is_better=False)  # хуже, но в пределах шума (¼ разброса)
+    assert de.too_worse(res(10.5), res(10.0), greater_is_better=False)
     assert de.too_worse(res(11.5), res(10.0), greater_is_better=False)
     assert not de.too_worse(res(0.85), res(0.80, 0.01), greater_is_better=True)
